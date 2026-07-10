@@ -188,6 +188,11 @@ func permissionACLViolations(content string, ownerUID int, allowedMode os.FileMo
 		case item.tag == "group":
 			allowed = groupAllowed
 		case item.tag == "mask" && item.qualifier == "":
+			if !item.defaultEntry {
+				// The access ACL mask is represented by the inode's group mode bits,
+				// which InspectPermissions validates before inspecting the ACL.
+				continue
+			}
 			allowed = groupAllowed
 		case item.tag == "other" && item.qualifier == "":
 			allowed = otherAllowed

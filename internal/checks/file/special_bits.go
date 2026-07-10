@@ -39,7 +39,7 @@ type specialBitApproval struct {
 }
 
 func evaluateSpecialBits(ctx context.Context, rule model.ResolvedRule, environment evaluator.Environment) evaluator.Outcome {
-	expected := "모든 SUID/SGID 일반 파일이 서명 정보가 있는 RPM 설치·검증 기준과 일치하거나 기관이 승인한 경로·모드·내용 해시와 일치해야 합니다."
+	expected := "모든 SUID/SGID 일반 파일이 기관이 승인한 경로·모드·내용 해시와 일치해야 하며, RPM 서명·무결성은 업무 필요성 승인을 대신하지 않습니다."
 	approved, policySet, err := specialBitApprovalParameter(rule.Parameters)
 	if err != nil {
 		return fileError("invalid_rule_parameter", "특수 권한 승인 목록을 해석하지 못했습니다.", err)
@@ -194,6 +194,23 @@ func evaluateSpecialBits(ctx context.Context, rule model.ResolvedRule, environme
 			findings = append(findings, finding)
 			continue
 		}
+		if policySet {
+			stable, stableErr := confirmMetadataStable(environment.Files, candidate, metadata)
+			if stableErr != nil {
+				return fileError("special_bit_stability_failed", "특수 권한 파일의 안정성을 재확인하지 못했습니다.", stableErr)
+			}
+			if stable {
+				definiteFailures++
+				finding.State, finding.Reason = classifyUnapprovedSpecialBitCandidate(true, false)
+			} else {
+				unknownCandidates++
+				incompleteReasons = append(incompleteReasons, "candidate_changed_during_inspection")
+				finding.State = "unknown"
+				finding.Reason = "candidate_changed_after_inspection"
+			}
+			findings = append(findings, finding)
+			continue
+		}
 		if !environment.Commands.Available("rpm") {
 			unknownCandidates++
 			incompleteReasons = append(incompleteReasons, "rpm_unavailable")
@@ -311,9 +328,8 @@ func evaluateSpecialBits(ctx context.Context, rule model.ResolvedRule, environme
 			finding.State = "unknown"
 			finding.Reason = "candidate_changed_after_inspection"
 		} else {
-			verifiedCandidates++
-			finding.State = "verified"
-			finding.Reason = "package_default_with_signature_metadata"
+			unknownCandidates++
+			finding.State, finding.Reason = classifyUnapprovedSpecialBitCandidate(false, true)
 		}
 		findings = append(findings, finding)
 	}
@@ -382,11 +398,21 @@ func evaluateSpecialBits(ctx context.Context, rule model.ResolvedRule, environme
 	}
 	return evaluator.Outcome{
 		Status:   model.StatusPass,
-		Summary:  "모든 SUID/SGID 일반 파일이 RPM 설치·검증 기준 또는 기관이 승인한 모드·내용 해시와 일치합니다.",
+		Summary:  "모든 SUID/SGID 일반 파일이 기관이 승인한 모드·내용 해시와 일치하거나 대상 파일이 없습니다.",
 		Expected: expected,
 		Observed: fmt.Sprintf("SUID/SGID 파일 %d개와 sticky 디렉터리 %d개를 확인했습니다.", len(specialPaths), len(stickyPaths)),
 		Evidence: evidence,
 	}
+}
+
+func classifyUnapprovedSpecialBitCandidate(completeApprovalPolicy, packageIntegrityVerified bool) (string, string) {
+	if completeApprovalPolicy {
+		return "fail", "file_outside_complete_institution_baseline"
+	}
+	if packageIntegrityVerified {
+		return "unknown", "package_integrity_verified_manual_approval_required"
+	}
+	return "unknown", "institution_approval_required"
 }
 
 func specialBitApprovalParameter(parameters map[string]any) (map[string]specialBitApproval, bool, error) {

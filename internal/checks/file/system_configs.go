@@ -14,6 +14,7 @@ import (
 	"github.com/yesidodo73/OpenCIIP/internal/evaluator"
 	"github.com/yesidodo73/OpenCIIP/internal/executor"
 	"github.com/yesidodo73/OpenCIIP/internal/model"
+	"github.com/yesidodo73/OpenCIIP/internal/system"
 )
 
 const (
@@ -91,7 +92,11 @@ func evaluateStartupPermissions(ctx context.Context, _ model.ResolvedRule, envir
 			unknowns = append(unknowns, unitName+": "+reason)
 		}
 		if strings.HasSuffix(unitName, ".service") {
-			executablePaths, complete, executableEvidence, inspectErr := startupExecutablePaths(ctx, environment, unitName)
+			inspectionName := state.InspectionName
+			if inspectionName == "" {
+				inspectionName = unitName
+			}
+			executablePaths, complete, executableEvidence, inspectErr := startupExecutablePaths(ctx, environment, inspectionName)
 			if inspectErr != nil {
 				return fileError("systemd_execstart_inspection_failed", "systemd unit의 실제 시작 실행 파일을 확인하지 못했습니다.", inspectErr)
 			}
@@ -276,7 +281,15 @@ func evaluateSyslogPermissions(ctx context.Context, _ model.ResolvedRule, enviro
 	if unit.FragmentPath == "" || strings.TrimSpace(unit.DropInPaths) != "" || (!strings.HasPrefix(unit.FragmentPath, "/usr/lib/systemd/system/") && !strings.HasPrefix(unit.FragmentPath, "/lib/systemd/system/")) {
 		return evaluator.Outcome{Status: model.StatusUnknown, UnknownReason: model.UnknownUnsupportedConfiguration, Summary: "비표준 rsyslog unit 또는 drop-in으로 설정 경로가 변경될 수 있습니다.", Expected: "실제로 로드되는 rsyslog 설정 경로를 확인할 수 있어야 합니다.", Observed: "custom unit or drop-in", Evidence: evidence}
 	}
-	validationSpec := executor.Spec{Name: "rsyslogd", Arguments: []string{"-N1"}, Timeout: 30 * time.Second, MaxOutput: 2 << 20}
+	rootConfig, startupPaths, startupEvidence, startupComplete, err := inspectRsyslogStartupPath(ctx, environment.Files)
+	if err != nil {
+		return fileError("rsyslog_startup_config_failed", "rsyslog 시작 설정을 해석하지 못했습니다.", err)
+	}
+	evidence = append(evidence, startupEvidence...)
+	if !startupComplete {
+		return evaluator.Outcome{Status: model.StatusUnknown, UnknownReason: model.UnknownUnsupportedConfiguration, Summary: "rsyslog 시작 옵션의 실효 설정 경로를 결정적으로 해석할 수 없습니다.", Expected: "EnvironmentFile과 -f 옵션에서 실제 설정 경로를 확정할 수 있어야 합니다.", Observed: "dynamic or conflicting rsyslog startup option", Evidence: evidence}
+	}
+	validationSpec := executor.Spec{Name: "rsyslogd", Arguments: []string{"-N1", "-f", rootConfig}, Timeout: 30 * time.Second, MaxOutput: 2 << 20}
 	validation, err := environment.Commands.Run(ctx, validationSpec)
 	if err != nil {
 		return fileError("rsyslog_validation_failed", "rsyslog 설정 구문을 검증하지 못했습니다.", err)
@@ -285,11 +298,12 @@ func evaluateSyslogPermissions(ctx context.Context, _ model.ResolvedRule, enviro
 	if validation.ExitCode != 0 || validation.Truncated {
 		return fileError("rsyslog_validation_failed", "rsyslog 설정 구문을 검증하지 못했습니다.", fmt.Errorf("exit=%d truncated=%t", validation.ExitCode, validation.Truncated))
 	}
-	paths, complete, pathEvidence, err := collectRsyslogConfigPaths(ctx, environment)
+	paths, complete, pathEvidence, err := collectRsyslogConfigPaths(ctx, environment, rootConfig)
 	if err != nil {
 		return fileError("rsyslog_include_failed", "rsyslog include 경로를 해석하지 못했습니다.", err)
 	}
 	evidence = append(evidence, pathEvidence...)
+	paths = uniqueSortedPaths(append(paths, startupPaths...))
 	if !complete {
 		return evaluator.Outcome{Status: model.StatusUnknown, UnknownReason: model.UnknownUnsupportedConfiguration, Summary: "동적 또는 비표준 rsyslog include 경로를 완전히 해석할 수 없습니다.", Expected: "로드되는 모든 rsyslog 설정 파일을 열거할 수 있어야 합니다.", Observed: "unsupported include pattern", Evidence: evidence}
 	}
@@ -515,7 +529,7 @@ func parseSystemdCommandPaths(value string) ([]string, bool) {
 		}
 		paths = append(paths, executable)
 		switch strings.ToLower(path.Base(executable)) {
-		case "sh", "bash", "dash", "ksh", "zsh", "csh", "tcsh", "env", "python", "python3", "perl", "ruby", "node":
+		case "sh", "bash", "dash", "ksh", "zsh", "csh", "tcsh", "env", "busybox", "nice", "nohup", "setsid", "chroot", "su", "runuser", "sudo", "python", "python3", "perl", "ruby", "node":
 			// The executable itself can be checked, but a secondary script or
 			// dynamically selected program may be present in argv[].
 			complete = false
@@ -527,7 +541,7 @@ func parseSystemdCommandPaths(value string) ([]string, bool) {
 	return uniqueSortedPaths(paths), complete
 }
 
-func inetdUsesCustomConfig(output string) bool {
+func xinetdUsesCustomConfig(output string) bool {
 	paths, complete := parseSystemdCommandPaths(output)
 	if !complete || len(paths) != 1 || strings.ToLower(path.Base(paths[0])) != "xinetd" {
 		return true
@@ -742,8 +756,8 @@ func xinetdBraceDelta(value string) (int, bool) {
 	return delta, quote == 0 && !escaped
 }
 
-func collectRsyslogConfigPaths(ctx context.Context, environment evaluator.Environment) ([]string, bool, []model.Evidence, error) {
-	queue := []string{"/etc/rsyslog.conf"}
+func collectRsyslogConfigPaths(ctx context.Context, environment evaluator.Environment, rootConfig string) ([]string, bool, []model.Evidence, error) {
+	queue := []string{rootConfig}
 	seen := make(map[string]struct{})
 	result := make([]string, 0)
 	evidence := make([]model.Evidence, 0)
@@ -818,6 +832,122 @@ func collectRsyslogConfigPaths(ctx context.Context, environment evaluator.Enviro
 	}
 	sort.Strings(result)
 	return result, complete, evidence, nil
+}
+
+func inspectRsyslogStartupPath(ctx context.Context, files system.Reader) (string, []string, []model.Evidence, bool, error) {
+	const sysconfigPath = "/etc/sysconfig/rsyslog"
+	exists, err := files.Exists(sysconfigPath)
+	if err != nil {
+		return "", nil, nil, false, err
+	}
+	if !exists {
+		return "/etc/rsyslog.conf", nil, nil, true, nil
+	}
+	data, metadata, err := files.ReadFile(ctx, sysconfigPath, 256<<10)
+	if err != nil {
+		return "", nil, nil, false, err
+	}
+	configPath, complete, err := rsyslogConfigPathFromSysconfig(string(data))
+	evidence := []model.Evidence{
+		support.FileMetadataEvidence(metadata),
+		support.FactEvidence("rsyslog startup configuration", map[string]any{"custom_config_path": configPath != "/etc/rsyslog.conf", "content_redacted": true}),
+	}
+	return configPath, []string{sysconfigPath}, evidence, complete, err
+}
+
+func rsyslogConfigPathFromSysconfig(content string) (string, bool, error) {
+	selected := "/etc/rsyslog.conf"
+	explicit := false
+	setPath := func(candidate string) bool {
+		candidate = strings.TrimPrefix(strings.TrimSpace(candidate), "=")
+		if !path.IsAbs(candidate) || path.Clean(candidate) != candidate || strings.ContainsAny(candidate, "\\\x00\r\n\"'`$%") {
+			return false
+		}
+		if explicit && selected != candidate {
+			return false
+		}
+		selected = candidate
+		explicit = true
+		return true
+	}
+	for lineNumber, raw := range strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n") {
+		tokens, err := sysconfigTokens(raw)
+		if err != nil {
+			return "", false, fmt.Errorf("line %d: %w", lineNumber+1, err)
+		}
+		if len(tokens) > 1 {
+			values, valueErr := sysconfigTokens(strings.Join(tokens[1:], " "))
+			if valueErr != nil {
+				return "", false, fmt.Errorf("line %d value: %w", lineNumber+1, valueErr)
+			}
+			tokens = append([]string{tokens[0]}, values...)
+		}
+		for index, token := range tokens {
+			switch {
+			case token == "RSYSLOG_CONFIG_FILE":
+				if index+1 >= len(tokens) || !setPath(tokens[index+1]) {
+					return selected, false, nil
+				}
+			case token == "-f":
+				if index+1 >= len(tokens) || !setPath(tokens[index+1]) {
+					return selected, false, nil
+				}
+			case strings.HasPrefix(token, "-f") && len(token) > 2:
+				if !setPath(strings.TrimPrefix(token, "-f")) {
+					return selected, false, nil
+				}
+			}
+		}
+	}
+	return selected, true, nil
+}
+
+func sysconfigTokens(line string) ([]string, error) {
+	result := make([]string, 0)
+	var current strings.Builder
+	var quote rune
+	escaped := false
+	flush := func() {
+		if current.Len() > 0 {
+			result = append(result, current.String())
+			current.Reset()
+		}
+	}
+	for _, character := range line {
+		if escaped {
+			current.WriteRune(character)
+			escaped = false
+			continue
+		}
+		if character == '\\' && quote != '\'' {
+			escaped = true
+			continue
+		}
+		if quote != 0 {
+			if character == quote {
+				quote = 0
+			} else {
+				current.WriteRune(character)
+			}
+			continue
+		}
+		switch character {
+		case '\'', '"':
+			quote = character
+		case '#':
+			flush()
+			return result, nil
+		case ' ', '\t', '=':
+			flush()
+		default:
+			current.WriteRune(character)
+		}
+	}
+	if quote != 0 || escaped {
+		return nil, fmt.Errorf("unterminated quoted or escaped value")
+	}
+	flush()
+	return result, nil
 }
 
 func expandFixedConfigPattern(environment evaluator.Environment, pattern string) ([]string, bool, error) {

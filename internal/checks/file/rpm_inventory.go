@@ -67,13 +67,24 @@ func inspectRPMOwnership(ctx context.Context, environment evaluator.Environment,
 		return rpmOwnership{}, fmt.Errorf("rpm -qf emitted diagnostics")
 	}
 	lines := nonEmptyLines(string(result.Stdout))
-	if len(lines) != 1 {
-		return rpmOwnership{}, fmt.Errorf("rpm owner query returned %d records", len(lines))
+	if len(lines) == 0 {
+		return rpmOwnership{}, fmt.Errorf("rpm owner query returned no package record")
 	}
-	fields := strings.SplitN(lines[0], "\t", 2)
-	if len(fields) != 2 || !safeRPMLabel(fields[0]) {
-		return rpmOwnership{}, fmt.Errorf("rpm owner query returned an invalid package identity")
+	records := make([][]string, len(lines))
+	for index, line := range lines {
+		fields := strings.SplitN(line, "\t", 2)
+		if len(fields) != 2 || !safeRPMLabel(fields[0]) {
+			return rpmOwnership{}, fmt.Errorf("rpm owner query record %d has an invalid package identity", index+1)
+		}
+		records[index] = fields
 	}
+	if len(lines) > 1 {
+		// Directories can legitimately be owned by many packages. The package
+		// context is not singular enough for package verification, but the query
+		// result itself is neither an execution nor parsing failure.
+		return rpmOwnership{Owned: true, Complete: false, Evidence: evidence}, nil
+	}
+	fields := records[0]
 	signature := strings.TrimSpace(fields[1])
 	signaturePresent := signature != "" && signature != "(none)" && signature != "none"
 	return rpmOwnership{

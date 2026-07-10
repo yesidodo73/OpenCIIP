@@ -23,7 +23,6 @@ type permissionPolicy struct {
 	path              string
 	allowedMode       os.FileMode
 	allowedOwnerNames []string
-	missingPass       bool
 }
 
 func Implementations() map[string]evaluator.Func {
@@ -35,12 +34,62 @@ func Implementations() map[string]evaluator.Func {
 		EvaluatorShadowPermissions:   staticPermissionEvaluator(permissionPolicy{path: "/etc/shadow", allowedMode: 0o400}),
 		EvaluatorHostsPermissions:    staticPermissionEvaluator(permissionPolicy{path: "/etc/hosts", allowedMode: 0o644}),
 		EvaluatorServicesPermissions: staticPermissionEvaluator(permissionPolicy{path: "/etc/services", allowedMode: 0o644, allowedOwnerNames: []string{"bin", "sys"}}),
-		EvaluatorHostsLPDPermissions: staticPermissionEvaluator(permissionPolicy{path: "/etc/hosts.lpd", allowedMode: 0o600, missingPass: true}),
+		EvaluatorHostsLPDPermissions: evaluateHostsLPDPermissions,
 	}
 	for id, implementation := range filesystemImplementations() {
 		implementations[id] = implementation
 	}
 	return implementations
+}
+
+func evaluateHostsLPDPermissions(ctx context.Context, rule model.ResolvedRule, environment evaluator.Environment) evaluator.Outcome {
+	exists, err := environment.Files.Exists("/etc/hosts.lpd")
+	if err != nil {
+		return permissionError("hosts_lpd_stat_failed", "/etc/hosts.lpd", err)
+	}
+	if exists {
+		return staticPermissionEvaluator(permissionPolicy{path: "/etc/hosts.lpd", allowedMode: 0o600})(ctx, rule, environment)
+	}
+	evidence := []model.Evidence{support.FactEvidence("/etc/hosts.lpd", map[string]any{"exists": false})}
+	activeSignals := make([]string, 0)
+	if environment.Platform.InitSystem == "systemd" {
+		units, unitEvidence, inspectErr := support.InspectUnits(ctx, environment, []string{"lpd.service", "lpd.socket", "cups-lpd.socket", "cups-lpd@.service"})
+		if inspectErr != nil {
+			return permissionError("lpd_unit_inspection_failed", "/etc/hosts.lpd", inspectErr)
+		}
+		evidence = append(evidence, unitEvidence...)
+		for _, unit := range units {
+			if support.UnitActive(unit) || support.UnitEnabled(unit) {
+				activeSignals = append(activeSignals, unit.Name)
+			}
+		}
+	}
+	processes, processEvidence, err := support.InspectProcesses(ctx, environment, []string{"lpd", "in.lpd", "cups-lpd"})
+	if err != nil {
+		return permissionError("lpd_process_inspection_failed", "/etc/hosts.lpd", err)
+	}
+	evidence = append(evidence, processEvidence)
+	activeSignals = append(activeSignals, processes...)
+	listeners, listenerEvidence, err := support.InspectListeningPorts(ctx, environment, []int{515})
+	if err != nil {
+		return permissionError("lpd_listener_inspection_failed", "/etc/hosts.lpd", err)
+	}
+	evidence = append(evidence, listenerEvidence)
+	if len(listeners[515]) > 0 {
+		activeSignals = append(activeSignals, "port 515 listening")
+	}
+	return hostsLPDMissingConclusion(environment.Platform.InitSystem, activeSignals, evidence)
+}
+
+func hostsLPDMissingConclusion(initSystem string, activeSignals []string, evidence []model.Evidence) evaluator.Outcome {
+	activeSignals = uniqueSortedPaths(activeSignals)
+	if len(activeSignals) > 0 {
+		return evaluator.Outcome{Status: model.StatusUnknown, UnknownReason: model.UnknownUnsupportedConfiguration, Summary: "활성 LPD 경로가 있으나 실제 접근 통제 파일을 확정할 수 없습니다.", Expected: "LPD가 비활성이거나 실제 hosts.lpd가 root 소유 0600 허용 비트 이내여야 합니다.", Observed: strings.Join(activeSignals, "; "), Evidence: evidence}
+	}
+	if initSystem != "systemd" {
+		return evaluator.Outcome{Status: model.StatusUnknown, UnknownReason: model.UnknownUnsupportedConfiguration, Summary: "hosts.lpd는 없지만 LPD 부팅 활성 경로를 지원하는 방식으로 확인할 수 없습니다.", Expected: "LPD가 비활성이거나 실제 접근 통제 파일의 권한이 안전해야 합니다.", Observed: initSystem, Evidence: evidence}
+	}
+	return evaluator.Outcome{Status: model.StatusPass, Summary: "/etc/hosts.lpd가 없고 활성 LPD 서비스 경로도 확인되지 않았습니다.", Expected: "파일이 없거나 root 소유이고 권한이 0600 허용 비트 이내여야 합니다.", Observed: "파일 및 활성 LPD 경로 없음", Evidence: evidence}
 }
 
 func staticPermissionEvaluator(policy permissionPolicy) evaluator.Func {
@@ -78,15 +127,6 @@ func staticPermissionEvaluator(policy permissionPolicy) evaluator.Func {
 			ownerLabel += "/" + strings.Join(policy.allowedOwnerNames, "/")
 		}
 		if !assessment.Exists {
-			if policy.missingPass {
-				return evaluator.Outcome{
-					Status:   model.StatusPass,
-					Summary:  fmt.Sprintf("%s 파일이 없어 가이드의 양호 기준을 충족합니다.", policy.path),
-					Expected: fmt.Sprintf("파일이 없거나 %s 소유이고 권한이 %04o 허용 비트 이내여야 합니다.", ownerLabel, policy.allowedMode.Perm()),
-					Observed: "파일 없음",
-					Evidence: []model.Evidence{support.FactEvidence(policy.path, map[string]any{"exists": false})},
-				}
-			}
 			return permissionError("file_not_found", policy.path, os.ErrNotExist)
 		}
 		expected := fmt.Sprintf("%s 소유 일반 파일이며 권한과 ACL이 %04o 허용 비트 이내여야 합니다.", ownerLabel, policy.allowedMode.Perm())

@@ -12,7 +12,7 @@ import (
 )
 
 func ReadEffectiveGroup(ctx context.Context, commands executor.CommandRunner, name string) (GroupEntry, model.Evidence, bool, error) {
-	if name == "" || strings.ContainsAny(name, " \t/\\:") {
+	if name == "" || strings.HasPrefix(name, "-") || strings.ContainsAny(name, " \t/\\:") {
 		return GroupEntry{}, model.Evidence{}, false, fmt.Errorf("invalid group name %q", name)
 	}
 	spec := executor.Spec{Name: "getent", Arguments: []string{"group", name}, Timeout: 10 * time.Second, MaxOutput: 1 << 20}
