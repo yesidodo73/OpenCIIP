@@ -457,11 +457,7 @@ func assessACLDocument(lines []string) (aclAssessment, error) {
 			continue
 		}
 		reason := fmt.Sprintf("ACL %s:%s 권한이 기준을 초과함", item.tag, item.qualifier)
-		if extra&0o1 != 0 || (item.tag == "other" && extra&0o2 != 0) {
-			assessment.clearReasons = append(assessment.clearReasons, reason)
-		} else {
-			assessment.ambiguousReasons = append(assessment.ambiguousReasons, reason)
-		}
+		assessment.clearReasons = append(assessment.clearReasons, reason)
 	}
 	return assessment, nil
 }
@@ -491,7 +487,7 @@ func assessLogFile(metadata system.FileMetadata, acl aclAssessment) ([]string, [
 	if metadata.UID < 0 {
 		ambiguous = append(ambiguous, prefix+"소유자 UID를 확인할 수 없음")
 	} else if metadata.UID != 0 {
-		ambiguous = append(ambiguous, fmt.Sprintf("%s비-root 소유자 uid=%d이며 데몬 요구 또는 승인 예외를 확인해야 함", prefix, metadata.UID))
+		clear = append(clear, fmt.Sprintf("%s비-root 소유자 uid=%d", prefix, metadata.UID))
 	}
 	mode := metadata.Mode.Perm()
 	if metadata.Mode&(os.ModeSetuid|os.ModeSetgid|os.ModeSticky) != 0 {
@@ -504,7 +500,7 @@ func assessLogFile(metadata system.FileMetadata, acl aclAssessment) ([]string, [
 		clear = append(clear, fmt.Sprintf("%sother 쓰기 권한이 설정됨 mode=%04o", prefix, mode))
 	}
 	if mode&0o020 != 0 {
-		ambiguous = append(ambiguous, fmt.Sprintf("%sgroup 쓰기 권한 mode=%04o가 Rocky 패키지 기본값 또는 서비스 요구인지 확인해야 함", prefix, mode))
+		clear = append(clear, fmt.Sprintf("%sgroup 쓰기 권한 mode=%04o", prefix, mode))
 	}
 	for _, reason := range acl.clearReasons {
 		clear = append(clear, prefix+reason)

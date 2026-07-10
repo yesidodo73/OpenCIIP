@@ -2,7 +2,9 @@ package logging
 
 import (
 	"context"
+	"encoding/csv"
 	"fmt"
+	"io"
 	"sort"
 	"strings"
 	"time"
@@ -99,6 +101,39 @@ func evaluateTimeSync(ctx context.Context, rule model.ResolvedRule, environment 
 			Evidence:      evidence,
 		}
 	}
+	sourcesSpec := executor.Spec{Name: "chronyc", Arguments: []string{"-N", "-c", "sources"}, Timeout: 10 * time.Second, MaxOutput: 1 << 20}
+	runtimeResult, err := environment.Commands.Run(ctx, sourcesSpec)
+	if err != nil {
+		return logError("chronyc_sources_failed", err)
+	}
+	evidence = append(evidence, support.CommandEvidence(sourcesSpec, runtimeResult))
+	if runtimeResult.ExitCode != 0 || runtimeResult.Truncated {
+		return evaluator.Outcome{
+			Status:        model.StatusUnknown,
+			UnknownReason: model.UnknownInsufficientEvidence,
+			Summary:       "현재 chronyd 시간원 목록을 확인하지 못했습니다.",
+			Expected:      "chronyc가 원래 이름을 보존한 전체 runtime source 목록을 반환해야 합니다.",
+			Observed:      fmt.Sprintf("exit=%d truncated=%t", runtimeResult.ExitCode, runtimeResult.Truncated),
+			Evidence:      evidence,
+		}
+	}
+	runtimeSources, selectedSources, err := parseChronySourcesCSV(runtimeResult.Stdout)
+	if err != nil {
+		return logError("chronyc_sources_parse_failed", err)
+	}
+	evidence = append(evidence, support.FactEvidence("chronyc runtime sources", map[string]any{
+		"runtime_source_count": len(runtimeSources), "selected_source_count": len(selectedSources), "source_names": runtimeSources,
+	}))
+	if len(runtimeSources) == 0 || len(selectedSources) != 1 {
+		return evaluator.Outcome{
+			Status:        model.StatusUnknown,
+			UnknownReason: model.UnknownAmbiguousResult,
+			Summary:       "chronyd가 실제로 선택한 단일 시간원을 확정할 수 없습니다.",
+			Expected:      "runtime source가 존재하고 동기화에 선택된 source가 정확히 하나여야 합니다.",
+			Observed:      fmt.Sprintf("runtime=%d selected=%d", len(runtimeSources), len(selectedSources)),
+			Evidence:      evidence,
+		}
+	}
 
 	approved, hasApproved, err := support.StringSliceParameter(rule.Parameters, "approved_sources")
 	if err != nil {
@@ -124,7 +159,7 @@ func evaluateTimeSync(ctx context.Context, rule model.ResolvedRule, environment 
 			Evidence:      evidence,
 		}
 	}
-	unapproved := differenceFold(configuredSources, approved)
+	unapproved := differenceFold(append(append([]string(nil), configuredSources...), runtimeSources...), approved)
 	if len(unapproved) > 0 {
 		return evaluator.Outcome{
 			Status:   model.StatusFail,
@@ -134,6 +169,17 @@ func evaluateTimeSync(ctx context.Context, rule model.ResolvedRule, environment 
 			Evidence: evidence,
 		}
 	}
+	runtimeOnly := differenceFold(runtimeSources, configuredSources)
+	if len(runtimeOnly) > 0 {
+		return evaluator.Outcome{
+			Status:        model.StatusUnknown,
+			UnknownReason: model.UnknownUnsupportedConfiguration,
+			Summary:       "정적 설정에 없는 runtime 시간원이 있어 실효 구성의 출처를 확정할 수 없습니다.",
+			Expected:      "runtime 시간원이 해석된 chrony 설정에서 유래해야 합니다.",
+			Observed:      strings.Join(runtimeOnly, ", "),
+			Evidence:      evidence,
+		}
+	}
 	return evaluator.Outcome{
 		Status:   model.StatusPass,
 		Summary:  "시각 동기화 서비스와 시간원이 정책 기준을 충족합니다.",
@@ -141,6 +187,42 @@ func evaluateTimeSync(ctx context.Context, rule model.ResolvedRule, environment 
 		Observed: strings.Join(configuredSources, ", "),
 		Evidence: evidence,
 	}
+}
+
+func parseChronySourcesCSV(data []byte) ([]string, []string, error) {
+	reader := csv.NewReader(strings.NewReader(string(data)))
+	reader.FieldsPerRecord = -1
+	reader.TrimLeadingSpace = true
+	sources := make([]string, 0)
+	selected := make([]string, 0, 1)
+	for line := 1; ; line++ {
+		record, err := reader.Read()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, nil, fmt.Errorf("chronyc sources CSV line %d: %w", line, err)
+		}
+		if len(record) < 3 {
+			return nil, nil, fmt.Errorf("chronyc sources CSV line %d has too few fields", line)
+		}
+		mode := strings.TrimSpace(record[0])
+		state := strings.TrimSpace(record[1])
+		source := strings.TrimSpace(record[2])
+		if (mode != "^" && mode != "=" && mode != "#") || len(state) != 1 || !strings.Contains("*+-?x~", state) || source == "" || strings.ContainsAny(source, "\r\n\x00") {
+			return nil, nil, fmt.Errorf("chronyc sources CSV line %d has invalid source fields", line)
+		}
+		sources = append(sources, source)
+		if state == "*" {
+			selected = append(selected, source)
+		}
+		if len(sources) > 1024 {
+			return nil, nil, fmt.Errorf("chronyc sources output exceeds 1024 entries")
+		}
+	}
+	sort.Strings(sources)
+	sort.Strings(selected)
+	return uniqueStrings(sources), uniqueStrings(selected), nil
 }
 
 func readChronySources(ctx context.Context, environment evaluator.Environment) ([]string, bool, model.Evidence, error) {

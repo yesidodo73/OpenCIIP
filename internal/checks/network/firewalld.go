@@ -4,8 +4,10 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"hash"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -18,6 +20,8 @@ import (
 )
 
 const maximumFirewalldObjects = 128
+
+const firewalldConfigurationPath = "/etc/firewalld/firewalld.conf"
 
 type firewalldInspection struct {
 	runtimeMatchesPermanent bool
@@ -44,21 +48,16 @@ func inspectFirewalld(ctx context.Context, environment evaluator.Environment) (f
 	runtimeTranscript := newFirewalldTranscript()
 	permanentTranscript := newFirewalldTranscript()
 
-	defaultResult, err := runFirewalldCommand(ctx, environment, []string{"--get-default-zone"}, "default-zone", runtimeTranscript)
+	runtimeDefaultZone, permanentDefaultZone, err := collectFirewalldDefaultZones(ctx, environment, runtimeTranscript, permanentTranscript)
 	if err != nil {
 		return firewalldInspection{}, model.Evidence{}, err
-	}
-	permanentTranscript.add("default-zone", defaultResult)
-	defaultZone, err := parseSingleFirewalldName(defaultResult.Stdout)
-	if err != nil {
-		return firewalldInspection{}, model.Evidence{}, fmt.Errorf("parse firewalld default zone: %w", err)
 	}
 
-	runtime, err := collectRuntimeFirewalld(ctx, environment, defaultZone, runtimeTranscript)
+	runtime, err := collectRuntimeFirewalld(ctx, environment, runtimeDefaultZone, runtimeTranscript)
 	if err != nil {
 		return firewalldInspection{}, model.Evidence{}, err
 	}
-	permanent, err := collectPermanentFirewalld(ctx, environment, defaultZone, permanentTranscript)
+	permanent, err := collectPermanentFirewalld(ctx, environment, permanentDefaultZone, permanentTranscript)
 	if err != nil {
 		return firewalldInspection{}, model.Evidence{}, err
 	}
@@ -73,6 +72,7 @@ func inspectFirewalld(ctx context.Context, environment evaluator.Environment) (f
 	facts := map[string]any{
 		"runtime_configuration_sha256":   runtimeHash,
 		"permanent_configuration_sha256": permanentHash,
+		"default_zone_match":             runtimeDefaultZone == permanentDefaultZone,
 		"runtime_permanent_match":        inspection.runtimeMatchesPermanent,
 		"runtime_transcript_sha256":      runtimeTranscript.sum(),
 		"permanent_transcript_sha256":    permanentTranscript.sum(),
@@ -94,6 +94,67 @@ func inspectFirewalld(ctx context.Context, environment evaluator.Environment) (f
 		"permanent_direct_rule_count":    len(permanent.directRules) + len(permanent.passthroughs),
 	}
 	return inspection, support.FactEvidence("firewalld-configuration-summary", facts), nil
+}
+
+func collectFirewalldDefaultZones(
+	ctx context.Context,
+	environment evaluator.Environment,
+	runtimeTranscript *firewalldTranscript,
+	permanentTranscript *firewalldTranscript,
+) (string, string, error) {
+	runtimeResult, err := runFirewalldCommand(ctx, environment, []string{"--get-default-zone"}, "default-zone", runtimeTranscript)
+	if err != nil {
+		return "", "", err
+	}
+	runtimeDefaultZone, err := parseSingleFirewalldName(runtimeResult.Stdout)
+	if err != nil {
+		return "", "", fmt.Errorf("parse firewalld runtime default zone: %w", err)
+	}
+	configuration, _, readErr := environment.Files.ReadFile(ctx, firewalldConfigurationPath, 1<<20)
+	if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
+		return "", "", fmt.Errorf("read firewalld permanent default zone: %w", readErr)
+	}
+	permanentTranscript.addSource("default-zone-configuration", configuration)
+	permanentDefaultZone, err := parsePermanentFirewalldDefaultZone(configuration, errors.Is(readErr, os.ErrNotExist))
+	if err != nil {
+		return "", "", fmt.Errorf("parse firewalld permanent default zone: %w", err)
+	}
+	return runtimeDefaultZone, permanentDefaultZone, nil
+}
+
+func parsePermanentFirewalldDefaultZone(data []byte, configurationMissing bool) (string, error) {
+	// firewalld uses public when firewalld.conf or DefaultZone is absent.
+	// --set-default-zone changes both runtime and permanent state, while
+	// --get-default-zone is a stand-alone option and cannot be combined with
+	// --permanent. Reading the persisted setting also detects manual edits that
+	// have not yet been loaded into the daemon.
+	defaultZone := "public"
+	if configurationMissing {
+		return defaultZone, nil
+	}
+	found := false
+	for lineNumber, raw := range normalizedLines(data) {
+		line := strings.TrimSpace(raw)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		key, value, hasValue := strings.Cut(line, "=")
+		if strings.TrimSpace(key) != "DefaultZone" {
+			continue
+		}
+		if !hasValue || strings.TrimSpace(value) == "" {
+			return "", fmt.Errorf("DefaultZone on line %d has no value", lineNumber+1)
+		}
+		if found {
+			return "", fmt.Errorf("DefaultZone is declared more than once")
+		}
+		defaultZone = strings.TrimSpace(value)
+		if err := validateFirewalldName(defaultZone); err != nil {
+			return "", fmt.Errorf("DefaultZone on line %d: %w", lineNumber+1, err)
+		}
+		found = true
+	}
+	return defaultZone, nil
 }
 
 func collectRuntimeFirewalld(
@@ -523,7 +584,22 @@ func firewalldArguments(permanent bool, values ...string) []string {
 }
 
 func leadingWhitespace(value string) int {
-	return len(value) - len(strings.TrimLeftFunc(value, unicode.IsSpace))
+	columns := 0
+	for _, character := range value {
+		switch character {
+		case ' ':
+			columns++
+		case '\t':
+			columns += 8 - columns%8
+		default:
+			if unicode.IsSpace(character) {
+				columns++
+				continue
+			}
+			return columns
+		}
+	}
+	return columns
 }
 
 func firstRune(value string) (rune, int) {
@@ -538,13 +614,17 @@ func newFirewalldTranscript() *firewalldTranscript {
 }
 
 func (transcript *firewalldTranscript) add(operation string, result executor.Result) {
+	transcript.addSource(operation, result.Stdout, result.Stderr)
+	transcript.commandCount++
+}
+
+func (transcript *firewalldTranscript) addSource(operation string, values ...[]byte) {
 	_, _ = transcript.digest.Write([]byte(operation))
 	_, _ = transcript.digest.Write([]byte{0})
-	_, _ = transcript.digest.Write(result.Stdout)
-	_, _ = transcript.digest.Write([]byte{0})
-	_, _ = transcript.digest.Write(result.Stderr)
-	_, _ = transcript.digest.Write([]byte{0})
-	transcript.commandCount++
+	for _, value := range values {
+		_, _ = transcript.digest.Write(value)
+		_, _ = transcript.digest.Write([]byte{0})
+	}
 }
 
 func (transcript *firewalldTranscript) sum() string {
