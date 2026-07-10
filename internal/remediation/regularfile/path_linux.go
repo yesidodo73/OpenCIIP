@@ -13,6 +13,7 @@ import (
 	"syscall"
 
 	"github.com/yesidodo73/OpenCIIP/internal/model"
+	"golang.org/x/sys/unix"
 )
 
 func newPlatform(systemRoot, runDirectory string, configuration config) (*Handler, error) {
@@ -272,7 +273,6 @@ type openedTarget struct {
 	name       string
 	stat       syscall.Stat_t
 	parentStat syscall.Stat_t
-	physical   string
 }
 
 func (o *openedTarget) close() {
@@ -305,9 +305,8 @@ func (h *Handler) openCurrentWithFlags(target, operation string, accessFlags int
 	if err != nil {
 		return nil, classifyTargetError(operation, target, err)
 	}
-	physical := filepath.Join(h.systemRoot, strings.TrimPrefix(target, string(filepath.Separator)))
-	var before syscall.Stat_t
-	if err := syscall.Lstat(physical, &before); err != nil {
+	before, err := statTargetAt(parentFD, name)
+	if err != nil {
 		_ = syscall.Close(parentFD)
 		return nil, classifyTargetError(operation, target, err)
 	}
@@ -341,7 +340,68 @@ func (h *Handler) openCurrentWithFlags(target, operation string, accessFlags int
 		_ = syscall.Close(parentFD)
 		return nil, &Error{Code: CodeFileChanged, Operation: operation, Path: target, Err: fmt.Errorf("target changed while it was opened")}
 	}
-	return &openedTarget{file: file, fd: fd, parentFD: parentFD, name: name, stat: opened, parentStat: parentStat, physical: physical}, nil
+	openedTarget := &openedTarget{file: file, fd: fd, parentFD: parentFD, name: name, stat: opened, parentStat: parentStat}
+	if err := h.validateOpenedPathIdentity(openedTarget, operation, target); err != nil {
+		openedTarget.close()
+		return nil, err
+	}
+	return openedTarget, nil
+}
+
+func statTargetAt(parentFD int, name string) (syscall.Stat_t, error) {
+	fd, err := syscall.Openat(parentFD, name, unix.O_PATH|syscall.O_CLOEXEC|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return syscall.Stat_t{}, err
+	}
+	defer syscall.Close(fd)
+	var stat syscall.Stat_t
+	if err := syscall.Fstat(fd, &stat); err != nil {
+		return syscall.Stat_t{}, err
+	}
+	return stat, nil
+}
+
+func (h *Handler) validateOpenedPathIdentity(o *openedTarget, operation, target string) error {
+	if h == nil {
+		return &Error{Code: CodeInvalidInput, Operation: operation, Path: target, Err: fmt.Errorf("handler is nil")}
+	}
+	if o == nil || o.fd < 0 || o.parentFD < 0 || o.name == "" {
+		return &Error{Code: CodeUnsafePath, Operation: operation, Path: target, Err: fmt.Errorf("opened target handles are incomplete")}
+	}
+	var parent syscall.Stat_t
+	if err := syscall.Fstat(o.parentFD, &parent); err != nil {
+		return &Error{Code: CodeUnsafePath, Operation: operation, Path: target, Err: err}
+	}
+	if parent.Mode&syscall.S_IFMT != syscall.S_IFDIR || parent.Dev != o.parentStat.Dev || parent.Ino != o.parentStat.Ino {
+		return &Error{Code: CodeFileChanged, Operation: operation, Path: target, Err: fmt.Errorf("target parent identity changed")}
+	}
+	freshParentFD, freshName, freshParent, err := h.openParent(target)
+	if err != nil {
+		return &Error{Code: CodeFileChanged, Operation: operation, Path: target, Err: fmt.Errorf("reopen target parent: %w", err)}
+	}
+	defer syscall.Close(freshParentFD)
+	if freshName != o.name || freshParent.Mode&syscall.S_IFMT != syscall.S_IFDIR || freshParent.Dev != o.parentStat.Dev || freshParent.Ino != o.parentStat.Ino {
+		return &Error{Code: CodeFileChanged, Operation: operation, Path: target, Err: fmt.Errorf("canonical path no longer names the opened target parent")}
+	}
+	var opened syscall.Stat_t
+	if err := syscall.Fstat(o.fd, &opened); err != nil {
+		return &Error{Code: CodeUnsafePath, Operation: operation, Path: target, Err: err}
+	}
+	pathStat, err := statTargetAt(o.parentFD, o.name)
+	if err != nil {
+		return classifyTargetError(operation, target, err)
+	}
+	if opened.Mode&syscall.S_IFMT != syscall.S_IFREG || pathStat.Mode&syscall.S_IFMT != syscall.S_IFREG || opened.Dev != pathStat.Dev || opened.Ino != pathStat.Ino {
+		return &Error{Code: CodeFileChanged, Operation: operation, Path: target, Err: fmt.Errorf("target path no longer names the opened regular file")}
+	}
+	freshPathStat, err := statTargetAt(freshParentFD, freshName)
+	if err != nil {
+		return &Error{Code: CodeFileChanged, Operation: operation, Path: target, Err: fmt.Errorf("reopen target path: %w", err)}
+	}
+	if freshPathStat.Mode&syscall.S_IFMT != syscall.S_IFREG || opened.Dev != freshPathStat.Dev || opened.Ino != freshPathStat.Ino {
+		return &Error{Code: CodeFileChanged, Operation: operation, Path: target, Err: fmt.Errorf("canonical path no longer names the opened regular file")}
+	}
+	return nil
 }
 
 func classifyTargetError(operation, target string, err error) error {

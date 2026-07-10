@@ -51,7 +51,7 @@ func (m *Manager) rollbackVerificationFailureLocked(ctx context.Context, value *
 		journal.Error = &journalError
 		return nil
 	}
-	value, err = m.updateBeforeAutomaticRollback(ctx, value, "persist evaluator verification failure", mutateFailure, func(journal *model.RemediationJournal) bool {
+	updated, err := m.updateBeforeAutomaticRollback(ctx, value, "persist evaluator verification failure", mutateFailure, func(journal *model.RemediationJournal) bool {
 		if !journalErrorMatches(journal.Error, journalError) {
 			return false
 		}
@@ -71,6 +71,7 @@ func (m *Manager) rollbackVerificationFailureLocked(ctx context.Context, value *
 	if err != nil {
 		return err
 	}
+	value = updated
 
 	scope := model.RollbackItem
 	targets := make([]string, 0)

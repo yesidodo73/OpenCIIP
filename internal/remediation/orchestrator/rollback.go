@@ -141,7 +141,7 @@ func (m *Manager) rollbackForFailure(ctx context.Context, value *model.Remediati
 	if len(targets) == 0 {
 		return cause
 	}
-	_, err := m.executeRollback(ctx, value, scope, trigger, []string{failedChangeSet}, targets, true)
+	_, err = m.executeRollback(ctx, value, scope, trigger, []string{failedChangeSet}, targets, true)
 	return err
 }
 
@@ -906,7 +906,6 @@ func (m *Manager) rollbackOperation(
 		(operation.State == model.OperationFailed && operation.RollbackIntentAt == nil) {
 		return value, nil, &rollbackFailure{err: &Error{Code: CodeRecoveryRequired, Operation: "rollback operation", RunID: value.RunID, ChangeSetID: changeSetID, OperationID: operationID, Err: fmt.Errorf("in-flight apply result must be recovered before rollback")}, ambiguous: true}
 	}
-	allowPartialResume := operation.RollbackIntentAt != nil
 	if err := handler.VerifyBackup(ctx, *operation.Backup); err != nil {
 		return value, nil, &rollbackFailure{err: wrapDependency("verify rollback backup", value.RunID, changeSetID, operationID, err), ambiguous: true}
 	}
@@ -957,8 +956,7 @@ func (m *Manager) rollbackOperation(
 		return next, &verified, failure
 	}
 	operationCopy := *operation
-	operationCopy.ObservedAfter = &current
-	restoreObserved, restoreErr := handler.Restore(ctx, operationCopy, *operation.Backup, allowPartialResume)
+	restoreObserved, restoreErr := handler.Restore(ctx, operationCopy, *operation.Backup)
 	restored, captureErr := handler.Capture(persistContext, operation.Resource)
 	if captureErr != nil {
 		next, failure := m.markRollbackAmbiguous(persistContext, value, changeSetID, operationID, captureErr)

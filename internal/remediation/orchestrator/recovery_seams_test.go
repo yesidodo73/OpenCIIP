@@ -77,7 +77,7 @@ type scriptedFileRuntime struct {
 	backup               func(context.Context, string, string, model.CanonicalResource, model.ResourceSnapshot) (model.BackupArtifact, error)
 	verifyBackup         func(context.Context, model.BackupArtifact) error
 	applyMetadata        func(context.Context, model.CanonicalResource, model.ResourceSnapshot, model.ResourceSnapshot) (model.ResourceSnapshot, error)
-	restore              func(context.Context, model.OperationRecord, model.BackupArtifact, bool) (model.ResourceSnapshot, error)
+	restore              func(context.Context, model.OperationRecord, model.BackupArtifact) (model.ResourceSnapshot, error)
 	captureCalls         []string
 	mutationCalls        []string
 }
@@ -126,12 +126,12 @@ func (s *scriptedFileRuntime) ApplyMetadata(ctx context.Context, resource model.
 	return s.applyMetadata(ctx, resource, before, desired)
 }
 
-func (s *scriptedFileRuntime) Restore(ctx context.Context, operation model.OperationRecord, artifact model.BackupArtifact, allowPartialResume bool) (model.ResourceSnapshot, error) {
+func (s *scriptedFileRuntime) Restore(ctx context.Context, operation model.OperationRecord, artifact model.BackupArtifact) (model.ResourceSnapshot, error) {
 	s.mutationCalls = append(s.mutationCalls, "restore:"+operation.Resource.Key)
 	if s.restore == nil {
 		return model.ResourceSnapshot{}, errUnscriptedTestCall
 	}
-	return s.restore(ctx, operation, artifact, allowPartialResume)
+	return s.restore(ctx, operation, artifact)
 }
 
 type scriptedHostCollector struct {
@@ -306,6 +306,47 @@ func TestCanInferInterruptedApplyRequiresMarkerlessStateInferableIntent(t *testi
 				t.Fatalf("canInferInterruptedApply() = %t, want %t", got, test.want)
 			}
 		})
+	}
+}
+
+func TestResolveOperationPreservesExistingAppliedAt(t *testing.T) {
+	operation := testInterruptedOperation(model.OperationAmbiguous)
+	observed := operation.Desired
+	originalAppliedAt := testTime().Add(3 * time.Second)
+	operation.ObservedAfter = &observed
+	operation.AppliedAt = &originalAppliedAt
+	value := &model.RemediationJournal{
+		Revision: 1,
+		RunID:    "run-a",
+		ChangeSets: []model.ChangeSet{{
+			ID:         "change-a",
+			Operations: []model.OperationRecord{operation},
+		}},
+	}
+	store := &scriptedJournalStore{
+		update: func(_ context.Context, runID string, expectedRevision uint64, mutate func(*model.RemediationJournal) error) (*model.RemediationJournal, error) {
+			if runID != value.RunID || expectedRevision != value.Revision {
+				t.Fatalf("Update(%q, %d), want (%q, %d)", runID, expectedRevision, value.RunID, value.Revision)
+			}
+			if err := mutate(value); err != nil {
+				return nil, err
+			}
+			value.Revision++
+			return value, nil
+		},
+	}
+	manager := &Manager{store: store, now: func() time.Time { return testTime().Add(time.Hour) }}
+
+	got, err := manager.resolveOperation(context.Background(), value, "change-a", operation.ID, model.OperationApplied, &observed)
+	if err != nil {
+		t.Fatalf("resolveOperation() error = %v", err)
+	}
+	resolved, _, _, err := findOperation(got, "change-a", operation.ID)
+	if err != nil {
+		t.Fatalf("findOperation() error = %v", err)
+	}
+	if resolved.AppliedAt == nil || !resolved.AppliedAt.Equal(originalAppliedAt) {
+		t.Fatalf("AppliedAt = %v, want preserved %s", resolved.AppliedAt, originalAppliedAt)
 	}
 }
 

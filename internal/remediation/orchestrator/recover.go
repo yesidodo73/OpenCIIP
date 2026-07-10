@@ -634,7 +634,9 @@ func (m *Manager) resolveOperation(ctx context.Context, value *model.Remediation
 				// rollback is safe rollback input, but it must not replace the
 				// immutable durable after snapshot recorded by the original apply.
 			}
-			operation.AppliedAt = &resolvedAt
+			if operation.AppliedAt == nil {
+				operation.AppliedAt = &resolvedAt
+			}
 		case model.OperationRolledBack:
 			if observed == nil {
 				return fmt.Errorf("rolled back recovery state requires an observed snapshot")
@@ -645,7 +647,9 @@ func (m *Manager) resolveOperation(ctx context.Context, value *model.Remediation
 			} else if !exactEqual(*operation.ObservedRollback, *observed) {
 				return fmt.Errorf("recovered rollback state differs from the durable observed rollback state")
 			}
-			operation.RolledBackAt = &resolvedAt
+			if operation.RolledBackAt == nil {
+				operation.RolledBackAt = &resolvedAt
+			}
 		}
 		return nil
 	})
@@ -776,7 +780,9 @@ func (m *Manager) reconcileRecoveredChangeSet(ctx context.Context, value *model.
 				return findErr
 			}
 			target.State = model.ChangeRolledBack
-			target.RolledBackAt = &rolledBackAt
+			if target.RolledBackAt == nil {
+				target.RolledBackAt = &rolledBackAt
+			}
 			target.Error = nil
 			return nil
 		})
@@ -831,7 +837,9 @@ func (m *Manager) reconcileRecoveredChangeSet(ctx context.Context, value *model.
 				return findErr
 			}
 			target.After = orderedAfter
-			target.AppliedAt = &appliedAt
+			if target.AppliedAt == nil {
+				target.AppliedAt = &appliedAt
+			}
 			target.State = model.ChangeApplied
 			return nil
 		})

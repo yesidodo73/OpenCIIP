@@ -262,7 +262,7 @@ func TestEvaluatorFailureSelectsRollbackScopeFromFailurePolicy(t *testing.T) {
 					return desired[resource.Key], nil
 				},
 				verifyBackup: func(context.Context, model.BackupArtifact) error { return nil },
-				restore: func(context.Context, model.OperationRecord, model.BackupArtifact, bool) (model.ResourceSnapshot, error) {
+				restore: func(context.Context, model.OperationRecord, model.BackupArtifact) (model.ResourceSnapshot, error) {
 					t.Fatal("Restore() was called before rollback scope persistence completed")
 					return model.ResourceSnapshot{}, nil
 				},
@@ -310,7 +310,7 @@ func TestRollbackItemRejectsStaleDigestAndUnapprovedCascadeBeforeRestore(t *test
 		value := faultVerifiedJournal(t, 1, false, model.FailureRollbackItem, model.RunCompleted)
 		harness := newFaultStoreHarness(t, value)
 		runtime := &scriptedFileRuntime{
-			restore: func(context.Context, model.OperationRecord, model.BackupArtifact, bool) (model.ResourceSnapshot, error) {
+			restore: func(context.Context, model.OperationRecord, model.BackupArtifact) (model.ResourceSnapshot, error) {
 				t.Fatal("Restore() was called with a stale rollback preview digest")
 				return model.ResourceSnapshot{}, nil
 			},
@@ -330,7 +330,7 @@ func TestRollbackItemRejectsStaleDigestAndUnapprovedCascadeBeforeRestore(t *test
 		value := faultVerifiedJournal(t, 2, true, model.FailureRollbackItem, model.RunCompleted)
 		harness := newFaultStoreHarness(t, value)
 		runtime := &scriptedFileRuntime{
-			restore: func(context.Context, model.OperationRecord, model.BackupArtifact, bool) (model.ResourceSnapshot, error) {
+			restore: func(context.Context, model.OperationRecord, model.BackupArtifact) (model.ResourceSnapshot, error) {
 				t.Fatal("Restore() was called without cascade approval")
 				return model.ResourceSnapshot{}, nil
 			},

@@ -652,6 +652,87 @@ func TestAppliedAndVerifiedOperationEvidenceContract(t *testing.T) {
 	}
 }
 
+func TestResourceSnapshotRequiresFullCanonicalIdentity(t *testing.T) {
+	t.Run("exact snapshot compares every canonical field", func(t *testing.T) {
+		left := journalContractBefore()
+		right := journalContractBefore()
+		right.Reference.AliasKeys = []string{"inode:11:22"}
+		if exactResourceSnapshot(left, right) {
+			t.Fatal("exactResourceSnapshot() accepted a different canonical alias set")
+		}
+	})
+
+	t.Run("file path matches resource id", func(t *testing.T) {
+		snapshot := journalContractBefore()
+		snapshot.File.Path = "/etc/other"
+		err := snapshot.Validate()
+		if err == nil || !strings.Contains(err.Error(), "file snapshot path does not match its resource id") {
+			t.Fatalf("Validate() error = %v", err)
+		}
+	})
+
+	t.Run("exact observation includes aliases", func(t *testing.T) {
+		operation := journalContractAppliedOperation(OperationVerified)
+		observed := *operation.ObservedAfter
+		observed.Reference.AliasKeys = []string{"inode:11:22"}
+		operation.ObservedAfter = &observed
+		err := operation.Validate()
+		if err == nil || !strings.Contains(err.Error(), "observed resource does not match its target") {
+			t.Fatalf("Validate() error = %v", err)
+		}
+	})
+
+	t.Run("operation target includes aliases", func(t *testing.T) {
+		operation := journalContractBase().ChangeSets[0].Operations[0]
+		operation.Resource.AliasKeys = []string{"inode:11:22"}
+		err := operation.Validate()
+		if err == nil || !strings.Contains(err.Error(), "expected before resource does not match its target") {
+			t.Fatalf("Validate() error = %v", err)
+		}
+	})
+}
+
+func TestOperationMarkerTimelineContract(t *testing.T) {
+	t.Run("apply completion cannot precede intent", func(t *testing.T) {
+		operation := journalContractAppliedOperation(OperationApplied)
+		appliedAt := operation.ApplyIntentAt.Add(-time.Second)
+		operation.AppliedAt = &appliedAt
+		err := operation.Validate()
+		if err == nil || !strings.Contains(err.Error(), "apply completion precedes its durable intent") {
+			t.Fatalf("Validate() error = %v", err)
+		}
+	})
+
+	t.Run("rollback intent cannot precede apply intent", func(t *testing.T) {
+		operation := journalContractAppliedOperation(OperationApplied)
+		rollbackIntentAt := operation.ApplyIntentAt.Add(-time.Second)
+		operation.RollbackIntentAt = &rollbackIntentAt
+		err := operation.Validate()
+		if err == nil || !strings.Contains(err.Error(), "rollback intent precedes the durable apply intent") {
+			t.Fatalf("Validate() error = %v", err)
+		}
+	})
+
+	t.Run("rollback completion cannot precede intent", func(t *testing.T) {
+		operation := journalContractRolledBack().ChangeSets[0].Operations[0]
+		rolledBackAt := operation.RollbackIntentAt.Add(-time.Second)
+		operation.RolledBackAt = &rolledBackAt
+		err := operation.Validate()
+		if err == nil || !strings.Contains(err.Error(), "rollback completion precedes its durable intent") {
+			t.Fatalf("Validate() error = %v", err)
+		}
+	})
+
+	t.Run("completion marker requires its observation", func(t *testing.T) {
+		operation := journalContractAppliedOperation(OperationAmbiguous)
+		operation.ObservedAfter = nil
+		err := operation.Validate()
+		if err == nil || !strings.Contains(err.Error(), "apply completion requires its durable intent and observation") {
+			t.Fatalf("Validate() error = %v", err)
+		}
+	})
+}
+
 func TestVerifiedChangeSetEvidenceContract(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -756,6 +837,27 @@ func TestRemediationJournalSchemaStateContract(t *testing.T) {
 			want: map[string]any{
 				"if":   map[string]any{"properties": map[string]any{"state": map[string]any{"enum": []any{"applied", "verified"}}}},
 				"then": map[string]any{"required": []any{"observed_after", "applied_at"}},
+			},
+		},
+		{
+			name: "any apply completion marker requires intent and observation",
+			want: map[string]any{
+				"if":   map[string]any{"required": []any{"applied_at"}},
+				"then": map[string]any{"required": []any{"apply_intent_at", "observed_after"}},
+			},
+		},
+		{
+			name: "any rollback completion marker requires observation",
+			want: map[string]any{
+				"if":   map[string]any{"required": []any{"rolled_back_at"}},
+				"then": map[string]any{"required": []any{"observed_rollback"}},
+			},
+		},
+		{
+			name: "any rollback intent requires apply intent",
+			want: map[string]any{
+				"if":   map[string]any{"required": []any{"rollback_intent_at"}},
+				"then": map[string]any{"required": []any{"apply_intent_at"}},
 			},
 		},
 		{

@@ -61,8 +61,20 @@ func TestApplyAndRestoreMetadataInTempDir(t *testing.T) {
 		Backup:           &artifact,
 		ApplyIntentAt:    &now,
 		AppliedAt:        &now,
+		RollbackIntentAt: &now,
 	}
-	restored, err := fixture.handler.Restore(ctx, operation, artifact, false)
+	withoutIntent := operation
+	withoutIntent.RollbackIntentAt = nil
+	if _, err := fixture.handler.Restore(ctx, withoutIntent, artifact); CodeOf(err) != CodePreconditionFailed {
+		t.Fatalf("Restore() without durable rollback intent error = %v, want %s", err, CodePreconditionFailed)
+	}
+	stillApplied, err := fixture.handler.Capture(ctx, resource)
+	if err != nil {
+		t.Fatalf("Capture() after rejected restore error = %v", err)
+	}
+	assertMutationFixtureState(t, fixture, stillApplied, before, desired.File.Mode)
+
+	restored, err := fixture.handler.Restore(ctx, operation, artifact)
 	if err != nil {
 		t.Fatalf("Restore() error = %v", err)
 	}

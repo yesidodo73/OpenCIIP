@@ -207,6 +207,6 @@ func (h *Handler) ApplyMetadata(ctx context.Context, resource model.CanonicalRes
 	return h.applyMetadataPlatform(ctx, resource, expectedBefore, desired)
 }
 
-func (h *Handler) Restore(ctx context.Context, operation model.OperationRecord, artifact model.BackupArtifact, allowPartialResume bool) (model.ResourceSnapshot, error) {
-	return h.restorePlatform(ctx, operation, artifact, allowPartialResume)
+func (h *Handler) Restore(ctx context.Context, operation model.OperationRecord, artifact model.BackupArtifact) (model.ResourceSnapshot, error) {
+	return h.restorePlatform(ctx, operation, artifact)
 }

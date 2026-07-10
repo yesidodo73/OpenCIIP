@@ -20,20 +20,31 @@ func newMetadataCleanupContext(parent context.Context) (context.Context, context
 }
 
 func (h *Handler) applyMetadataPlatform(ctx context.Context, resource model.CanonicalResource, expectedBefore, desired model.ResourceSnapshot) (model.ResourceSnapshot, error) {
+	return h.applyMetadataTransitionPlatform(ctx, resource, expectedBefore, desired, false, "apply metadata")
+}
+
+func (h *Handler) applyMetadataTransitionPlatform(
+	ctx context.Context,
+	resource model.CanonicalResource,
+	expectedBefore model.ResourceSnapshot,
+	desired model.ResourceSnapshot,
+	allowPermissionRestore bool,
+	operation string,
+) (model.ResourceSnapshot, error) {
 	if h == nil {
-		return model.ResourceSnapshot{}, &Error{Code: CodeInvalidInput, Operation: "apply metadata", Err: fmt.Errorf("handler is nil")}
+		return model.ResourceSnapshot{}, &Error{Code: CodeInvalidInput, Operation: operation, Err: fmt.Errorf("handler is nil")}
 	}
-	target, err := h.validateResource(resource, "apply metadata")
+	target, err := h.validateResource(resource, operation)
 	if err != nil {
 		return model.ResourceSnapshot{}, err
 	}
-	if err := h.validateMetadataInputs(resource, expectedBefore, desired); err != nil {
+	if err := h.validateMetadataInputs(resource, expectedBefore, desired, allowPermissionRestore, operation); err != nil {
 		return model.ResourceSnapshot{}, err
 	}
 	if err := ctx.Err(); err != nil {
 		return model.ResourceSnapshot{}, err
 	}
-	opened, err := h.openCurrentWritable(target, "apply metadata")
+	opened, err := h.openCurrentWritable(target, operation)
 	if err != nil {
 		return model.ResourceSnapshot{}, err
 	}
@@ -43,12 +54,15 @@ func (h *Handler) applyMetadataPlatform(ctx context.Context, resource model.Cano
 		return model.ResourceSnapshot{}, err
 	}
 	if !exactSnapshotEqual(expectedBefore, current) {
-		return model.ResourceSnapshot{}, &Error{Code: CodePreconditionFailed, Operation: "apply metadata", Path: target, Err: fmt.Errorf("current file does not match the approved inode and fingerprint")}
+		return model.ResourceSnapshot{}, &Error{Code: CodePreconditionFailed, Operation: operation, Path: target, Err: fmt.Errorf("current file does not match the approved inode and fingerprint")}
 	}
 	if exactSnapshotEqual(desired, current) {
 		return current, nil
 	}
 	if err := ctx.Err(); err != nil {
+		return model.ResourceSnapshot{}, err
+	}
+	if err := h.validateOpenedPathIdentity(opened, operation, target); err != nil {
 		return model.ResourceSnapshot{}, err
 	}
 	ownershipChange := current.File.UID != desired.File.UID || current.File.GID != desired.File.GID
@@ -84,44 +98,50 @@ func (h *Handler) applyMetadataPlatform(ctx context.Context, resource model.Cano
 	return observed, nil
 }
 
-func (h *Handler) validateMetadataInputs(resource model.CanonicalResource, expectedBefore, desired model.ResourceSnapshot) error {
+func (h *Handler) validateMetadataInputs(
+	resource model.CanonicalResource,
+	expectedBefore model.ResourceSnapshot,
+	desired model.ResourceSnapshot,
+	allowPermissionRestore bool,
+	operation string,
+) error {
 	target := resource.Reference.ID
 	for label, snapshot := range map[string]model.ResourceSnapshot{"expected before": expectedBefore, "desired": desired} {
 		if err := snapshot.Validate(); err != nil {
-			return &Error{Code: CodeInvalidInput, Operation: "apply metadata", Path: target, Err: fmt.Errorf("%s snapshot: %w", label, err)}
+			return &Error{Code: CodeInvalidInput, Operation: operation, Path: target, Err: fmt.Errorf("%s snapshot: %w", label, err)}
 		}
 		if snapshot.Reference.Key != resource.Key || snapshot.File == nil || !snapshot.File.Exists || snapshot.File.FileType != "regular" || snapshot.File.Path != target {
-			return &Error{Code: CodeInvalidInput, Operation: "apply metadata", Path: target, Err: fmt.Errorf("%s snapshot does not describe the target regular file", label)}
+			return &Error{Code: CodeInvalidInput, Operation: operation, Path: target, Err: fmt.Errorf("%s snapshot does not describe the target regular file", label)}
 		}
 		metadataDigest, err := digestFileMetadata(*snapshot.File)
 		if err != nil || metadataDigest != snapshot.File.MetadataDigest {
 			if err == nil {
 				err = fmt.Errorf("metadata digest is inconsistent")
 			}
-			return &Error{Code: CodeInvalidInput, Operation: "apply metadata", Path: target, Err: fmt.Errorf("%s snapshot: %w", label, err)}
+			return &Error{Code: CodeInvalidInput, Operation: operation, Path: target, Err: fmt.Errorf("%s snapshot: %w", label, err)}
 		}
 		fingerprint, err := fingerprintFile(*snapshot.File)
 		if err != nil || fingerprint != snapshot.Fingerprint {
 			if err == nil {
 				err = fmt.Errorf("fingerprint is inconsistent")
 			}
-			return &Error{Code: CodeInvalidInput, Operation: "apply metadata", Path: target, Err: fmt.Errorf("%s snapshot: %w", label, err)}
+			return &Error{Code: CodeInvalidInput, Operation: operation, Path: target, Err: fmt.Errorf("%s snapshot: %w", label, err)}
 		}
 	}
 	if expectedBefore.File.NLink != 1 || desired.File.NLink != 1 {
-		return &Error{Code: CodeHardLinkNotSupported, Operation: "apply metadata", Path: target, Err: fmt.Errorf("metadata remediation requires a single-link file")}
+		return &Error{Code: CodeHardLinkNotSupported, Operation: operation, Path: target, Err: fmt.Errorf("metadata remediation requires a single-link file")}
 	}
 	if !metadataImmutableEqual(*expectedBefore.File, *desired.File) {
-		return &Error{Code: CodeUnsupportedMetadata, Operation: "apply metadata", Path: target, Err: fmt.Errorf("file metadata remediation must preserve inode, parent, content, links, xattrs, ACL, and SELinux context")}
+		return &Error{Code: CodeUnsupportedMetadata, Operation: operation, Path: target, Err: fmt.Errorf("file metadata remediation must preserve inode, parent, content, links, xattrs, ACL, and SELinux context")}
 	}
-	if desired.File.Mode&^expectedBefore.File.Mode != 0 {
-		return &Error{Code: CodeUnsupportedMetadata, Operation: "apply metadata", Path: target, Err: fmt.Errorf("file metadata remediation must not add permission or special-mode bits")}
+	if !allowPermissionRestore && desired.File.Mode&^expectedBefore.File.Mode != 0 {
+		return &Error{Code: CodeUnsupportedMetadata, Operation: operation, Path: target, Err: fmt.Errorf("file metadata remediation must not add permission or special-mode bits")}
 	}
 	if desired.File.UID < 0 || desired.File.GID < 0 || desired.File.Mode&^uint32(0o7777) != 0 {
-		return &Error{Code: CodeUnsupportedMetadata, Operation: "apply metadata", Path: target, Err: fmt.Errorf("desired ownership or mode is unsupported")}
+		return &Error{Code: CodeUnsupportedMetadata, Operation: operation, Path: target, Err: fmt.Errorf("desired ownership or mode is unsupported")}
 	}
 	if h.selinuxActive && desired.File.SELinuxContext == "" {
-		return &Error{Code: CodeSELinuxUnknown, Operation: "apply metadata", Path: target, Err: fmt.Errorf("SELinux is active but the preserved context is unknown")}
+		return &Error{Code: CodeSELinuxUnknown, Operation: operation, Path: target, Err: fmt.Errorf("SELinux is active but the preserved context is unknown")}
 	}
 	return nil
 }
@@ -158,7 +178,7 @@ func committedMetadataError(target, operation string, err error) error {
 	return &Error{Code: code, Operation: operation, Path: target, Committed: true, Err: err}
 }
 
-func (h *Handler) restorePlatform(ctx context.Context, operation model.OperationRecord, artifact model.BackupArtifact, allowPartialResume bool) (model.ResourceSnapshot, error) {
+func (h *Handler) restorePlatform(ctx context.Context, operation model.OperationRecord, artifact model.BackupArtifact) (model.ResourceSnapshot, error) {
 	if h == nil {
 		return model.ResourceSnapshot{}, &Error{Code: CodeInvalidInput, Operation: "restore metadata", Err: fmt.Errorf("handler is nil")}
 	}
@@ -170,6 +190,9 @@ func (h *Handler) restorePlatform(ctx context.Context, operation model.Operation
 	}
 	if operation.Kind != model.OperationFileMetadata {
 		return model.ResourceSnapshot{}, &Error{Code: CodeUnsupportedFileType, Operation: "restore metadata", Path: operation.Resource.Reference.ID, Err: fmt.Errorf("only regular-file metadata rollback is implemented")}
+	}
+	if operation.RollbackIntentAt == nil || operation.RollbackIntentAt.IsZero() {
+		return model.ResourceSnapshot{}, &Error{Code: CodePreconditionFailed, Operation: "restore metadata", Path: operation.Resource.Reference.ID, Err: fmt.Errorf("operation has no durable rollback intent")}
 	}
 	if operation.Backup == nil {
 		return model.ResourceSnapshot{}, &Error{Code: CodeBackupMissing, Operation: "restore metadata", Path: operation.Resource.Reference.ID, Err: fmt.Errorf("operation has no durable backup reference")}
@@ -204,11 +227,11 @@ func (h *Handler) restorePlatform(ctx context.Context, operation model.Operation
 		return current, nil
 	}
 	observedAfter := operation.ObservedAfter != nil && exactSnapshotEqual(*operation.ObservedAfter, current)
-	partial := allowPartialResume && MetadataTransitionCandidate(operation.Before, operation.Desired, current)
+	partial := MetadataTransitionCandidate(operation.Before, operation.Desired, current)
 	if !observedAfter && !partial {
 		return model.ResourceSnapshot{}, &Error{Code: CodeFileChanged, Operation: "restore metadata", Path: target, Err: fmt.Errorf("current file is neither the durable after state nor a safe metadata transition on the original inode")}
 	}
-	restored, err := h.applyMetadataPlatform(ctx, operation.Resource, current, operation.Before)
+	restored, err := h.applyMetadataTransitionPlatform(ctx, operation.Resource, current, operation.Before, true, "restore metadata")
 	if err != nil {
 		return restored, err
 	}

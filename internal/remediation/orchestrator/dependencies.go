@@ -16,7 +16,7 @@ type fileRuntime interface {
 	Backup(context.Context, string, string, model.CanonicalResource, model.ResourceSnapshot) (model.BackupArtifact, error)
 	VerifyBackup(context.Context, model.BackupArtifact) error
 	ApplyMetadata(context.Context, model.CanonicalResource, model.ResourceSnapshot, model.ResourceSnapshot) (model.ResourceSnapshot, error)
-	Restore(context.Context, model.OperationRecord, model.BackupArtifact, bool) (model.ResourceSnapshot, error)
+	Restore(context.Context, model.OperationRecord, model.BackupArtifact) (model.ResourceSnapshot, error)
 }
 
 type fileRuntimeFactory func(systemRoot, runDirectory string) (fileRuntime, error)

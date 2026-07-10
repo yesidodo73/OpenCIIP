@@ -207,7 +207,12 @@ func TestValidateTransitionPreservesPreviouslyDurablePlanSlices(t *testing.T) {
 
 	initial := testInitialJournal(t)
 	approved := testApprovedJournal(t, initial)
-	approved.ChangeSets[0].Resources[0].AliasKeys = []string{"file:/etc/hosts-alias"}
+	aliasKeys := []string{"file:/etc/hosts-alias"}
+	approved.ChangeSets[0].Resources[0].AliasKeys = append([]string(nil), aliasKeys...)
+	operation := &approved.ChangeSets[0].Operations[0]
+	operation.Resource.AliasKeys = append([]string(nil), aliasKeys...)
+	operation.ExpectedBefore.Reference.AliasKeys = append([]string(nil), aliasKeys...)
+	operation.Desired.Reference.AliasKeys = append([]string(nil), aliasKeys...)
 	if err := approved.Validate(); err != nil {
 		t.Fatalf("mutated fixture Validate() error = %v", err)
 	}

@@ -71,6 +71,32 @@ func TestNormalizeRejectsSymbolicLink(t *testing.T) {
 	}
 }
 
+func TestOpenedTargetIdentityRejectsReplacedParentPath(t *testing.T) {
+	fixture := newReadOnlyLinuxFixture(t, 0o640)
+	opened, err := fixture.handler.openCurrent(fixture.reference.ID, "test identity")
+	if err != nil {
+		t.Fatalf("openCurrent() error = %v", err)
+	}
+	defer opened.close()
+
+	parent := filepath.Dir(fixture.physicalPath)
+	detachedParent := parent + "-detached"
+	if err := os.Rename(parent, detachedParent); err != nil {
+		t.Fatalf("detach fixture parent: %v", err)
+	}
+	if err := os.Mkdir(parent, 0o755); err != nil {
+		t.Fatalf("replace fixture parent: %v", err)
+	}
+	if err := os.WriteFile(fixture.physicalPath, fixture.content, 0o640); err != nil {
+		t.Fatalf("replace fixture target: %v", err)
+	}
+
+	err = fixture.handler.validateOpenedPathIdentity(opened, "test identity", fixture.reference.ID)
+	if got := CodeOf(err); got != CodeFileChanged {
+		t.Fatalf("validateOpenedPathIdentity() error code = %q, want %q (error: %v)", got, CodeFileChanged, err)
+	}
+}
+
 func TestBuildDesiredMetadataRejectsHardLinkedFile(t *testing.T) {
 	fixture := newReadOnlyLinuxFixture(t, 0o640)
 	hardLinkPath := filepath.Join(filepath.Dir(fixture.physicalPath), "hard-link.conf")

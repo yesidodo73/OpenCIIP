@@ -3,7 +3,7 @@
   "$id": "https://raw.githubusercontent.com/yesidodo73/OpenCIIP/main/schemas/remediation-journal.schema.json",
   "title": "OpenCIIP Remediation Journal",
   "description": "OpenCIIP 자동 조치 실행 저널 형식입니다. 스키마 버전 1은 승인된 계획, 실행 상태, 복구 및 롤백 기록을 함께 보존합니다.",
-  "$comment": "계획 digest 일치, 배열 간 ID 참조, 순서의 단조 증가, 스냅샷 fingerprint 및 file_metadata 전후 값의 동일성은 표준 JSON Schema로 표현할 수 없어 Go 검증기가 추가로 확인합니다.",
+  "$comment": "계획 digest 일치, 배열 간 ID 참조, 순서의 단조 증가, 시간 마커의 선후 관계, 스냅샷 fingerprint 및 file_metadata 전후 값의 동일성은 표준 JSON Schema로 표현할 수 없어 Go 검증기가 추가로 확인합니다.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -1604,6 +1604,68 @@
             "required": [
               "observed_after",
               "applied_at"
+            ]
+          }
+        },
+        {
+          "$comment": "상태와 무관하게 적용 완료 마커가 존재하면 해당 durable intent와 관측도 보존해야 합니다.",
+          "if": {
+            "required": [
+              "applied_at"
+            ]
+          },
+          "then": {
+            "required": [
+              "apply_intent_at",
+              "observed_after"
+            ]
+          }
+        },
+        {
+          "$comment": "롤백 관측 또는 완료 마커는 durable rollback intent 없이 존재할 수 없습니다.",
+          "if": {
+            "anyOf": [
+              {
+                "required": [
+                  "observed_rollback"
+                ]
+              },
+              {
+                "required": [
+                  "rolled_back_at"
+                ]
+              }
+            ]
+          },
+          "then": {
+            "required": [
+              "rollback_intent_at"
+            ]
+          }
+        },
+        {
+          "$comment": "rollback intent는 선행 durable apply intent 없이 존재할 수 없습니다.",
+          "if": {
+            "required": [
+              "rollback_intent_at"
+            ]
+          },
+          "then": {
+            "required": [
+              "apply_intent_at"
+            ]
+          }
+        },
+        {
+          "$comment": "롤백 완료 마커는 정확한 롤백 관측을 함께 보존해야 합니다.",
+          "if": {
+            "required": [
+              "rolled_back_at"
+            ]
+          },
+          "then": {
+            "required": [
+              "observed_rollback"
             ]
           }
         },

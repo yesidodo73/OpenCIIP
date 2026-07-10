@@ -461,6 +461,9 @@ func (s ResourceSnapshot) Validate() error {
 		if err := s.File.Validate(); err != nil {
 			return err
 		}
+		if s.File.Path != s.Reference.Reference.ID {
+			return fmt.Errorf("resource %s file snapshot path does not match its resource id", s.Reference.Key)
+		}
 	}
 	if s.Service != nil {
 		present++
@@ -659,13 +662,13 @@ func (o OperationRecord) Validate() error {
 	if err := o.ExpectedBefore.Validate(); err != nil {
 		return fmt.Errorf("operation %s expected before state: %w", o.ID, err)
 	}
-	if o.ExpectedBefore.Reference.Key != o.Resource.Key {
+	if !sameCanonicalResource(o.ExpectedBefore.Reference, o.Resource) {
 		return fmt.Errorf("operation %s expected before resource does not match its target", o.ID)
 	}
 	if err := o.Desired.Validate(); err != nil {
 		return fmt.Errorf("operation %s desired state: %w", o.ID, err)
 	}
-	if o.Desired.Reference.Key != o.Resource.Key {
+	if !sameCanonicalResource(o.Desired.Reference, o.Resource) {
 		return fmt.Errorf("operation %s desired resource does not match its target", o.ID)
 	}
 	if o.RecoveryMode == RecoveryStateInferable && o.ExpectedBefore.Fingerprint == o.Desired.Fingerprint {
@@ -680,7 +683,7 @@ func (o OperationRecord) Validate() error {
 		if err := o.Before.Validate(); err != nil {
 			return fmt.Errorf("operation %s before state: %w", o.ID, err)
 		}
-		if o.Before.Reference.Key != o.Resource.Key {
+		if !sameCanonicalResource(o.Before.Reference, o.Resource) {
 			return fmt.Errorf("operation %s before resource does not match its target", o.ID)
 		}
 		if !exactResourceSnapshot(o.ExpectedBefore, o.Before) {
@@ -699,15 +702,30 @@ func (o OperationRecord) Validate() error {
 	if (o.State == OperationApplied || o.State == OperationVerified) && (o.ObservedAfter == nil || o.AppliedAt == nil || o.AppliedAt.IsZero()) {
 		return fmt.Errorf("operation %s has no durable observed after state or apply completion time", o.ID)
 	}
+	if err := validateOperationMarkers(o); err != nil {
+		return fmt.Errorf("operation %s: %w", o.ID, err)
+	}
 	if o.ObservedAfter != nil {
 		if err := o.ObservedAfter.Validate(); err != nil {
 			return fmt.Errorf("operation %s observed state: %w", o.ID, err)
 		}
-		if o.ObservedAfter.Reference.Key != o.Resource.Key {
+		if !sameCanonicalResource(o.ObservedAfter.Reference, o.Resource) {
 			return fmt.Errorf("operation %s observed resource does not match its target", o.ID)
 		}
 		if o.State == OperationVerified && !exactResourceSnapshot(o.Desired, *o.ObservedAfter) {
 			return fmt.Errorf("operation %s verified state does not exactly match its desired state", o.ID)
+		}
+		if o.State == OperationApplied {
+			before := o.Before
+			if before.IsZero() {
+				before = o.ExpectedBefore
+			}
+			if sameResourceSnapshotSemantics(before, *o.ObservedAfter) {
+				return fmt.Errorf("operation %s applied state does not exactly match its desired state or preserve an active partial transition", o.ID)
+			}
+			if o.Kind != OperationFileMetadata && !exactResourceSnapshot(o.Desired, *o.ObservedAfter) {
+				return fmt.Errorf("operation %s applied state does not exactly match its desired state", o.ID)
+			}
 		}
 		if o.Kind == OperationFileMetadata {
 			before := o.Before
@@ -729,7 +747,7 @@ func (o OperationRecord) Validate() error {
 		if err := o.ObservedRollback.Validate(); err != nil {
 			return fmt.Errorf("operation %s observed rollback state: %w", o.ID, err)
 		}
-		if o.ObservedRollback.Reference.Key != o.Resource.Key {
+		if !sameCanonicalResource(o.ObservedRollback.Reference, o.Resource) {
 			return fmt.Errorf("operation %s observed rollback resource does not match its target", o.ID)
 		}
 		if !o.Before.IsZero() && !exactResourceSnapshot(o.Before, *o.ObservedRollback) {
@@ -744,6 +762,53 @@ func (o OperationRecord) Validate() error {
 	if o.Error != nil {
 		if err := o.Error.Validate(); err != nil {
 			return fmt.Errorf("operation %s: %w", o.ID, err)
+		}
+	}
+	return nil
+}
+
+func validateOperationMarkers(operation OperationRecord) error {
+	markers := []struct {
+		name  string
+		value *time.Time
+	}{
+		{name: "apply intent", value: operation.ApplyIntentAt},
+		{name: "apply completion", value: operation.AppliedAt},
+		{name: "rollback intent", value: operation.RollbackIntentAt},
+		{name: "rollback completion", value: operation.RolledBackAt},
+	}
+	for _, marker := range markers {
+		if marker.value != nil && marker.value.IsZero() {
+			return fmt.Errorf("%s time is zero", marker.name)
+		}
+	}
+	if operation.AppliedAt != nil {
+		if operation.ApplyIntentAt == nil || operation.ObservedAfter == nil {
+			return fmt.Errorf("apply completion requires its durable intent and observation")
+		}
+		if operation.AppliedAt.Before(*operation.ApplyIntentAt) {
+			return fmt.Errorf("apply completion precedes its durable intent")
+		}
+	}
+	if operation.RollbackIntentAt != nil {
+		if operation.ApplyIntentAt == nil {
+			return fmt.Errorf("rollback intent requires a durable apply intent")
+		}
+		if operation.RollbackIntentAt.Before(*operation.ApplyIntentAt) {
+			return fmt.Errorf("rollback intent precedes the durable apply intent")
+		}
+	}
+	if operation.ObservedRollback != nil || operation.RolledBackAt != nil {
+		if operation.RollbackIntentAt == nil {
+			return fmt.Errorf("rollback observation or completion requires a durable rollback intent")
+		}
+	}
+	if operation.RolledBackAt != nil {
+		if operation.ObservedRollback == nil {
+			return fmt.Errorf("rollback completion requires an observation")
+		}
+		if operation.RolledBackAt.Before(*operation.RollbackIntentAt) {
+			return fmt.Errorf("rollback completion precedes its durable intent")
 		}
 	}
 	return nil
@@ -795,7 +860,11 @@ func sameFileIdentity(left, right ResourceSnapshot) bool {
 }
 
 func exactResourceSnapshot(left, right ResourceSnapshot) bool {
-	if left.Reference.Key != right.Reference.Key || left.Fingerprint != right.Fingerprint {
+	return left.Fingerprint == right.Fingerprint && sameResourceSnapshotSemantics(left, right)
+}
+
+func sameResourceSnapshotSemantics(left, right ResourceSnapshot) bool {
+	if !sameCanonicalResource(left.Reference, right.Reference) {
 		return false
 	}
 	switch {
@@ -814,6 +883,18 @@ func exactResourceSnapshot(left, right ResourceSnapshot) bool {
 	default:
 		return false
 	}
+}
+
+func sameCanonicalResource(left, right CanonicalResource) bool {
+	if left.Reference != right.Reference || left.Key != right.Key || len(left.AliasKeys) != len(right.AliasKeys) {
+		return false
+	}
+	for index := range left.AliasKeys {
+		if left.AliasKeys[index] != right.AliasKeys[index] {
+			return false
+		}
+	}
+	return true
 }
 
 func snapshotHasCaptureTime(snapshot ResourceSnapshot) bool {
@@ -876,30 +957,34 @@ func (c ChangeSet) Validate(planDigest string) error {
 	if strings.TrimSpace(c.DryRun) == "" || strings.TrimSpace(c.ExpectedImpact) == "" {
 		return fmt.Errorf("change set %s is missing dry-run or impact information", c.ID)
 	}
-	resourceKeys := make(map[string]struct{}, len(c.Resources))
+	resourcesByKey := make(map[string]CanonicalResource, len(c.Resources))
 	for _, resource := range c.Resources {
 		if err := resource.Validate(); err != nil {
 			return fmt.Errorf("change set %s: %w", c.ID, err)
 		}
-		if _, exists := resourceKeys[resource.Key]; exists {
+		if _, exists := resourcesByKey[resource.Key]; exists {
 			return fmt.Errorf("change set %s repeats resource %s", c.ID, resource.Key)
 		}
-		resourceKeys[resource.Key] = struct{}{}
+		resourcesByKey[resource.Key] = resource
 	}
 	beforeKeys := make(map[string]struct{}, len(c.Before))
 	for _, snapshot := range c.Before {
 		if err := snapshot.Validate(); err != nil {
 			return fmt.Errorf("change set %s before state: %w", c.ID, err)
 		}
-		if _, exists := resourceKeys[snapshot.Reference.Key]; !exists {
+		resource, exists := resourcesByKey[snapshot.Reference.Key]
+		if !exists {
 			return fmt.Errorf("change set %s has before state for unknown resource %s", c.ID, snapshot.Reference.Key)
+		}
+		if !sameCanonicalResource(snapshot.Reference, resource) {
+			return fmt.Errorf("change set %s before state resource differs from its canonical resource", c.ID)
 		}
 		if _, exists := beforeKeys[snapshot.Reference.Key]; exists {
 			return fmt.Errorf("change set %s repeats before state for %s", c.ID, snapshot.Reference.Key)
 		}
 		beforeKeys[snapshot.Reference.Key] = struct{}{}
 	}
-	if c.State != ChangePlanned && c.State != ChangeApplyFailed && len(beforeKeys) != len(resourceKeys) {
+	if c.State != ChangePlanned && c.State != ChangeApplyFailed && len(beforeKeys) != len(resourcesByKey) {
 		return fmt.Errorf("change set %s does not have a complete before state", c.ID)
 	}
 	afterKeys := make(map[string]struct{}, len(c.After))
@@ -908,8 +993,12 @@ func (c ChangeSet) Validate(planDigest string) error {
 		if err := snapshot.Validate(); err != nil {
 			return fmt.Errorf("change set %s after state: %w", c.ID, err)
 		}
-		if _, exists := resourceKeys[snapshot.Reference.Key]; !exists {
+		resource, exists := resourcesByKey[snapshot.Reference.Key]
+		if !exists {
 			return fmt.Errorf("change set %s has after state for unknown resource %s", c.ID, snapshot.Reference.Key)
+		}
+		if !sameCanonicalResource(snapshot.Reference, resource) {
+			return fmt.Errorf("change set %s after state resource differs from its canonical resource", c.ID)
 		}
 		if _, exists := afterKeys[snapshot.Reference.Key]; exists {
 			return fmt.Errorf("change set %s repeats after state for %s", c.ID, snapshot.Reference.Key)
@@ -931,8 +1020,12 @@ func (c ChangeSet) Validate(planDigest string) error {
 		if c.State != ChangePlanned && c.State != ChangeApplyFailed && operation.Before.IsZero() {
 			return fmt.Errorf("change set %s operation %s has no prepared before state", c.ID, operation.ID)
 		}
-		if _, exists := resourceKeys[operation.Resource.Key]; !exists {
+		resource, exists := resourcesByKey[operation.Resource.Key]
+		if !exists {
 			return fmt.Errorf("change set %s operation %s uses unknown resource %s", c.ID, operation.ID, operation.Resource.Key)
+		}
+		if !sameCanonicalResource(operation.Resource, resource) {
+			return fmt.Errorf("change set %s operation %s resource differs from its canonical resource", c.ID, operation.ID)
 		}
 		if _, exists := operationIDs[operation.ID]; exists {
 			return fmt.Errorf("change set %s repeats operation %s", c.ID, operation.ID)
@@ -989,17 +1082,21 @@ func (c ChangeSet) Validate(planDigest string) error {
 		if c.PreparedAt == nil || c.PreparedAt.IsZero() || c.AppliedAt == nil || c.AppliedAt.IsZero() {
 			return fmt.Errorf("change set %s in state %s has no preparation or apply completion time", c.ID, c.State)
 		}
-		if len(afterKeys) != len(resourceKeys) || len(finalDesiredByResource) != len(resourceKeys) {
+		if len(afterKeys) != len(resourcesByKey) || len(finalDesiredByResource) != len(resourcesByKey) {
 			return fmt.Errorf("change set %s in state %s does not have a complete after state", c.ID, c.State)
 		}
 		for resourceKey, desired := range finalDesiredByResource {
 			after, afterExists := afterByResource[resourceKey]
 			observed, observedExists := finalObservedByResource[resourceKey]
-			if !afterExists || !observedExists || !exactResourceSnapshot(observed, after) {
-				return fmt.Errorf("change set %s after state for %s does not match the final observed state", c.ID, resourceKey)
+			if !afterExists || !observedExists {
+				return fmt.Errorf("change set %s in state %s does not have a complete after state for %s", c.ID, c.State, resourceKey)
 			}
-			if (c.State == ChangeVerifying || c.State == ChangeVerified) && !exactResourceSnapshot(desired, observed) {
-				return fmt.Errorf("change set %s in state %s does not exactly match the final desired state for %s", c.ID, c.State, resourceKey)
+			if c.State == ChangeVerifying || c.State == ChangeVerified {
+				if !exactResourceSnapshot(desired, observed) || !exactResourceSnapshot(desired, after) {
+					return fmt.Errorf("change set %s in state %s does not match the final desired and observed state for %s", c.ID, c.State, resourceKey)
+				}
+			} else if !exactResourceSnapshot(observed, after) {
+				return fmt.Errorf("change set %s after state for %s does not match the final observed state", c.ID, resourceKey)
 			}
 		}
 	}

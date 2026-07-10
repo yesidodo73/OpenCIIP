@@ -67,8 +67,8 @@ func (h *Handler) snapshotOpened(ctx context.Context, resource model.CanonicalRe
 	if !sameStableTarget(before, after) {
 		return model.ResourceSnapshot{}, nil, &Error{Code: CodeFileChanged, Operation: "capture", Path: target, Err: fmt.Errorf("file changed while its snapshot was captured")}
 	}
-	var pathStat syscall.Stat_t
-	if err := syscall.Lstat(opened.physical, &pathStat); err != nil {
+	pathStat, err := statTargetAt(opened.parentFD, opened.name)
+	if err != nil {
 		return model.ResourceSnapshot{}, nil, classifyTargetError("capture", target, err)
 	}
 	if !sameStableTarget(after, pathStat) {
@@ -80,6 +80,9 @@ func (h *Handler) snapshotOpened(ctx context.Context, resource model.CanonicalRe
 	}
 	if opened.parentStat.Dev != parentAfter.Dev || opened.parentStat.Ino != parentAfter.Ino {
 		return model.ResourceSnapshot{}, nil, &Error{Code: CodeFileChanged, Operation: "capture", Path: target, Err: fmt.Errorf("target parent changed while the snapshot was captured")}
+	}
+	if err := h.validateOpenedPathIdentity(opened, "capture", target); err != nil {
+		return model.ResourceSnapshot{}, nil, err
 	}
 
 	contentDigest := sha256.Sum256(content)

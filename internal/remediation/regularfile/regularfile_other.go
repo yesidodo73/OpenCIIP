@@ -41,6 +41,6 @@ func (*Handler) applyMetadataPlatform(context.Context, model.CanonicalResource, 
 	return model.ResourceSnapshot{}, unsupported("apply metadata")
 }
 
-func (*Handler) restorePlatform(context.Context, model.OperationRecord, model.BackupArtifact, bool) (model.ResourceSnapshot, error) {
+func (*Handler) restorePlatform(context.Context, model.OperationRecord, model.BackupArtifact) (model.ResourceSnapshot, error) {
 	return model.ResourceSnapshot{}, unsupported("restore")
 }
