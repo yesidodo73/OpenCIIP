@@ -1,0 +1,56 @@
+schema_version: 1
+recipes:
+  - id: u19-hosts-permissions-rocky-9.8
+    guide_year: 2026
+    rule_id: U-19
+    selector:
+      id: rocky
+      version: "9.8"
+    verification:
+      state: pending
+      environments:
+        - Rocky Linux 9.8
+    risk: CAUTION
+    expected_impact: "/etc/hosts의 내용, inode, GID, 확장 속성, ACL, SELinux context와 이미 더 엄격한 권한을 보존하고, 필요한 경우에만 소유자를 root로 바꾸고 0644에서 허용하지 않는 권한 비트를 제거합니다."
+    operations:
+      - type: preserve_content_file_metadata
+        path: /etc/hosts
+        allowed_owners: [root]
+        remediation_owner: root
+        maximum_mode: "0644"
+  - id: u22-services-permissions-rocky-9.8
+    guide_year: 2026
+    rule_id: U-22
+    selector:
+      id: rocky
+      version: "9.8"
+    verification:
+      state: pending
+      environments:
+        - Rocky Linux 9.8
+    risk: CAUTION
+    expected_impact: "/etc/services의 내용, inode, GID, 확장 속성, ACL, SELinux context와 root/bin/sys 중 현재 허용 소유자 및 이미 더 엄격한 권한을 보존하고, 필요한 경우에만 소유자를 root로 바꾸고 0644에서 허용하지 않는 권한 비트를 제거합니다."
+    operations:
+      - type: preserve_content_file_metadata
+        path: /etc/services
+        allowed_owners: [root, bin, sys]
+        remediation_owner: root
+        maximum_mode: "0644"
+  - id: u29-hosts-lpd-permissions-rocky-9.8
+    guide_year: 2026
+    rule_id: U-29
+    selector:
+      id: rocky
+      version: "9.8"
+    verification:
+      state: pending
+      environments:
+        - Rocky Linux 9.8
+    risk: CAUTION
+    expected_impact: "/etc/hosts.lpd의 내용, inode, GID, 확장 속성, ACL, SELinux context와 이미 더 엄격한 권한을 보존하고, 필요한 경우에만 소유자를 root로 바꾸고 0600에서 허용하지 않는 권한 비트를 제거합니다."
+    operations:
+      - type: preserve_content_file_metadata
+        path: /etc/hosts.lpd
+        allowed_owners: [root]
+        remediation_owner: root
+        maximum_mode: "0600"

@@ -1,0 +1,900 @@
+schema_version: 1
+
+guide:
+  year: 2026
+  title: "2026 주요정보통신기반시설 기술적 취약점 분석·평가 방법 상세가이드"
+  domain: "Unix 서버"
+
+rules:
+  - id: U-01
+    title: "root 계정 원격 접속 제한"
+    category: account
+    severity: high
+    evaluator: ""
+    criteria:
+      summary: "원격터미널 서비스에서 root 계정의 직접 접속 차단 여부를 점검합니다."
+      pass: "원격터미널 서비스를 사용하지 않거나, 사용 시 root 직접 접속을 차단한 경우 양호합니다."
+      fail: "원격터미널 서비스를 사용하면서 root 직접 접속을 허용한 경우 취약합니다."
+    reference:
+      section: "Unix 서버 > 1. 계정 관리"
+      pages: [12]
+
+  - id: U-02
+    title: "비밀번호 관리정책 설정"
+    category: account
+    severity: high
+    evaluator: ""
+    criteria:
+      summary: "비밀번호 관리 정책의 설정 여부를 점검합니다."
+      pass: "비밀번호 관리 정책이 설정된 경우 양호합니다."
+      fail: "비밀번호 관리 정책이 설정되지 않은 경우 취약합니다."
+    reference:
+      section: "Unix 서버 > 1. 계정 관리"
+      pages: [15]
+
+  - id: U-03
+    title: "계정 잠금 임계값 설정"
+    category: account
+    severity: high
+    evaluator: ""
+    criteria:
+      summary: "로그인 실패에 대한 계정 잠금 임계값을 점검합니다."
+      pass: "계정 잠금 임계값이 10회 이하로 설정된 경우 양호합니다."
+      fail: "계정 잠금 임계값이 없거나 10회 이하로 설정되지 않은 경우 취약합니다."
+    reference:
+      section: "Unix 서버 > 1. 계정 관리"
+      pages: [21]
+
+  - id: U-04
+    title: "비밀번호 파일 보호"
+    category: account
+    severity: high
+    evaluator: ""
+    criteria:
+      summary: "비밀번호의 쉐도우 사용 또는 암호화 저장 여부를 점검합니다."
+      pass: "쉐도우 비밀번호를 사용하거나 비밀번호를 암호화하여 저장하는 경우 양호합니다."
+      fail: "쉐도우 비밀번호를 사용하지 않고 비밀번호도 암호화하여 저장하지 않는 경우 취약합니다."
+    reference:
+      section: "Unix 서버 > 1. 계정 관리"
+      pages: [25]
+
+  - id: U-05
+    title: "root 이외의 UID가 ‘0’ 금지"
+    category: account
+    severity: high
+    evaluator: ""
+    criteria:
+      summary: "root 계정과 동일한 UID를 사용하는 계정의 존재 여부를 점검합니다."
+      pass: "root 계정과 동일한 UID를 갖는 계정이 존재하지 않는 경우 양호합니다."
+      fail: "root 계정과 동일한 UID를 갖는 계정이 존재하는 경우 취약합니다."
+    reference:
+      section: "Unix 서버 > 1. 계정 관리"
+      pages: [27]
+
+  - id: U-06
+    title: "사용자 계정 su 기능 제한"
+    category: account
+    severity: high
+    evaluator: ""
+    criteria:
+      summary: "su 명령어를 특정 그룹의 사용자만 사용할 수 있도록 제한했는지 점검합니다."
+      pass: "su 명령어 사용이 특정 그룹 소속 사용자로 제한된 경우 양호합니다. 일반 사용자 계정 없이 root 계정만 사용하는 경우에는 제한이 불필요합니다."
+      fail: "모든 사용자가 su 명령어를 사용할 수 있도록 설정된 경우 취약합니다."
+    reference:
+      section: "Unix 서버 > 1. 계정 관리"
+      pages: [29]
+
+  - id: U-07
+    title: "불필요한 계정 제거"
+    category: account
+    severity: low
+    evaluator: ""
+    criteria:
+      summary: "시스템에 불필요한 계정이 존재하는지 점검합니다."
+      pass: "불필요한 계정이 존재하지 않는 경우 양호합니다."
+      fail: "불필요한 계정이 존재하는 경우 취약합니다."
+      manual_review_required: true
+    reference:
+      section: "Unix 서버 > 1. 계정 관리"
+      pages: [31]
+
+  - id: U-08
+    title: "관리자 그룹에 최소한의 계정 포함"
+    category: account
+    severity: medium
+    evaluator: ""
+    criteria:
+      summary: "관리자 그룹에 불필요한 계정이 등록되어 있는지 점검합니다."
+      pass: "관리자 그룹에 불필요한 계정이 등록되어 있지 않은 경우 양호합니다."
+      fail: "관리자 그룹에 불필요한 계정이 등록된 경우 취약합니다."
+      manual_review_required: true
+    reference:
+      section: "Unix 서버 > 1. 계정 관리"
+      pages: [32]
+
+  - id: U-09
+    title: "계정이 존재하지 않는 GID 금지"
+    category: account
+    severity: low
+    evaluator: ""
+    criteria:
+      summary: "시스템 관리나 운용에 불필요한 그룹이 존재하는지 점검합니다."
+      pass: "시스템 관리나 운용에 불필요한 그룹이 제거된 경우 양호합니다."
+      fail: "시스템 관리나 운용에 불필요한 그룹이 존재하는 경우 취약합니다."
+      manual_review_required: true
+    reference:
+      section: "Unix 서버 > 1. 계정 관리"
+      pages: [33]
+
+  - id: U-10
+    title: "동일한 UID 금지"
+    category: account
+    severity: medium
+    evaluator: ""
+    criteria:
+      summary: "서로 다른 사용자 계정에 동일한 UID가 설정되어 있는지 점검합니다."
+      pass: "동일한 UID로 설정된 사용자 계정이 존재하지 않는 경우 양호합니다."
+      fail: "동일한 UID로 설정된 사용자 계정이 존재하는 경우 취약합니다."
+    reference:
+      section: "Unix 서버 > 1. 계정 관리"
+      pages: [34]
+
+  - id: U-11
+    title: "사용자 Shell 점검"
+    category: account
+    severity: low
+    evaluator: ""
+    criteria:
+      summary: "로그인이 필요하지 않은 계정의 셸 제한 여부를 점검합니다."
+      pass: "로그인이 필요하지 않은 계정에 /bin/false 또는 /sbin/nologin 셸이 부여된 경우 양호합니다."
+      fail: "로그인이 필요하지 않은 계정에 /bin/false 또는 /sbin/nologin 셸이 부여되지 않은 경우 취약합니다."
+      manual_review_required: true
+    reference:
+      section: "Unix 서버 > 1. 계정 관리"
+      pages: [35]
+
+  - id: U-12
+    title: "세션 종료 시간 설정"
+    category: account
+    severity: low
+    evaluator: ""
+    criteria:
+      summary: "사용자 세션의 자동 종료 시간 설정을 점검합니다."
+      pass: "Session Timeout이 600초(10분) 이하로 설정된 경우 양호합니다."
+      fail: "Session Timeout이 600초(10분) 이하로 설정되지 않은 경우 취약합니다."
+    reference:
+      section: "Unix 서버 > 1. 계정 관리"
+      pages: [36]
+
+  - id: U-13
+    title: "안전한 비밀번호 암호화 알고리즘 사용"
+    category: account
+    severity: medium
+    evaluator: ""
+    criteria:
+      summary: "비밀번호 저장에 사용되는 암호화 알고리즘의 안전성을 점검합니다."
+      pass: "SHA-2 이상의 안전한 비밀번호 암호화 알고리즘을 사용하는 경우 양호합니다."
+      fail: "취약한 비밀번호 암호화 알고리즘을 사용하는 경우 취약합니다."
+    reference:
+      section: "Unix 서버 > 1. 계정 관리"
+      pages: [37]
+
+  - id: U-14
+    title: "root 홈, 패스 디렉터리 권한 및 패스 설정"
+    category: file_directory
+    severity: high
+    evaluator: ""
+    criteria:
+      summary: "root 계정의 PATH 환경변수에 현재 디렉터리가 앞이나 중간에 포함되어 있는지 점검합니다."
+      pass: "PATH 환경변수의 맨 앞이나 중간에 현재 디렉터리를 뜻하는 마침표(.)가 포함되지 않은 경우 양호합니다."
+      fail: "PATH 환경변수의 맨 앞이나 중간에 현재 디렉터리를 뜻하는 마침표(.)가 포함된 경우 취약합니다."
+    reference:
+      section: "Unix 서버 > 2. 파일 및 디렉토리 관리"
+      pages: [39]
+
+  - id: U-15
+    title: "파일 및 디렉터리 소유자 설정"
+    category: file_directory
+    severity: high
+    evaluator: ""
+    criteria:
+      summary: "소유자가 존재하지 않는 파일과 디렉터리의 존재 여부를 점검합니다."
+      pass: "소유자가 존재하지 않는 파일 및 디렉터리가 존재하지 않는 경우 양호합니다."
+      fail: "소유자가 존재하지 않는 파일 및 디렉터리가 존재하는 경우 취약합니다."
+    reference:
+      section: "Unix 서버 > 2. 파일 및 디렉토리 관리"
+      pages: [40]
+
+  - id: U-16
+    title: "/etc/passwd 파일 소유자 및 권한 설정"
+    category: file_directory
+    severity: high
+    evaluator: ""
+    criteria:
+      summary: "/etc/passwd 파일의 소유자와 권한을 점검합니다."
+      pass: "/etc/passwd 파일의 소유자가 root이고 권한이 644 이하인 경우 양호합니다."
+      fail: "/etc/passwd 파일의 소유자가 root가 아니거나 권한이 644 이하가 아닌 경우 취약합니다."
+    reference:
+      section: "Unix 서버 > 2. 파일 및 디렉토리 관리"
+      pages: [41]
+
+  - id: U-17
+    title: "시스템 시작 스크립트 권한 설정"
+    category: file_directory
+    severity: high
+    evaluator: ""
+    criteria:
+      summary: "시스템 시작 스크립트의 소유자와 일반 사용자 쓰기 권한을 점검합니다."
+      pass: "시스템 시작 스크립트의 소유자가 root이고 일반 사용자의 쓰기 권한이 제거된 경우 양호합니다."
+      fail: "시스템 시작 스크립트의 소유자가 root가 아니거나 일반 사용자에게 쓰기 권한이 부여된 경우 취약합니다."
+    reference:
+      section: "Unix 서버 > 2. 파일 및 디렉토리 관리"
+      pages: [42]
+
+  - id: U-18
+    title: "/etc/shadow 파일 소유자 및 권한 설정"
+    category: file_directory
+    severity: high
+    evaluator: ""
+    criteria:
+      summary: "/etc/shadow 파일의 소유자와 권한을 점검합니다."
+      pass: "/etc/shadow 파일의 소유자가 root이고 권한이 400 이하인 경우 양호합니다."
+      fail: "/etc/shadow 파일의 소유자가 root가 아니거나 권한이 400 이하가 아닌 경우 취약합니다."
+    reference:
+      section: "Unix 서버 > 2. 파일 및 디렉토리 관리"
+      pages: [44]
+
+  - id: U-19
+    title: "/etc/hosts 파일 소유자 및 권한 설정"
+    category: file_directory
+    severity: high
+    evaluator: ""
+    criteria:
+      summary: "/etc/hosts 파일의 소유자와 권한을 점검합니다."
+      pass: "/etc/hosts 파일의 소유자가 root이고 권한이 644 이하인 경우 양호합니다."
+      fail: "/etc/hosts 파일의 소유자가 root가 아니거나 권한이 644 이하가 아닌 경우 취약합니다."
+    reference:
+      section: "Unix 서버 > 2. 파일 및 디렉토리 관리"
+      pages: [45]
+
+  - id: U-20
+    title: "/etc/(x)inetd.conf 파일 소유자 및 권한 설정"
+    category: file_directory
+    severity: high
+    evaluator: ""
+    criteria:
+      summary: "/etc/(x)inetd.conf 파일의 소유자와 권한을 점검합니다."
+      pass: "/etc/(x)inetd.conf 파일의 소유자가 root이고 권한이 600 이하인 경우 양호합니다."
+      fail: "/etc/(x)inetd.conf 파일의 소유자가 root가 아니거나 권한이 600 이하가 아닌 경우 취약합니다."
+    reference:
+      section: "Unix 서버 > 2. 파일 및 디렉토리 관리"
+      pages: [46]
+
+  - id: U-21
+    title: "/etc/(r)syslog.conf 파일 소유자 및 권한 설정"
+    category: file_directory
+    severity: high
+    evaluator: ""
+    criteria:
+      summary: "/etc/(r)syslog.conf 파일의 소유자와 권한을 점검합니다."
+      pass: "/etc/(r)syslog.conf 파일의 소유자가 root, bin 또는 sys이고 권한이 640 이하인 경우 양호합니다."
+      fail: "/etc/(r)syslog.conf 파일의 소유자가 root, bin 또는 sys가 아니거나 권한이 640 이하가 아닌 경우 취약합니다."
+    reference:
+      section: "Unix 서버 > 2. 파일 및 디렉토리 관리"
+      pages: [48]
+
+  - id: U-22
+    title: "/etc/services 파일 소유자 및 권한 설정"
+    category: file_directory
+    severity: high
+    evaluator: ""
+    criteria:
+      summary: "/etc/services 파일의 소유자와 권한을 점검합니다."
+      pass: "/etc/services 파일의 소유자가 root, bin 또는 sys이고 권한이 644 이하인 경우 양호합니다."
+      fail: "/etc/services 파일의 소유자가 root, bin 또는 sys가 아니거나 권한이 644 이하가 아닌 경우 취약합니다."
+    reference:
+      section: "Unix 서버 > 2. 파일 및 디렉토리 관리"
+      pages: [49]
+
+  - id: U-23
+    title: "SUID, SGID, Sticky bit 설정 파일 점검"
+    category: file_directory
+    severity: high
+    evaluator: ""
+    criteria:
+      summary: "주요 실행 파일에 불필요한 SUID 및 SGID 권한이 설정되어 있는지 점검합니다."
+      pass: "주요 실행 파일에 SUID와 SGID 권한이 부여되어 있지 않은 경우 양호합니다."
+      fail: "주요 실행 파일에 SUID 또는 SGID 권한이 부여된 경우 취약합니다."
+      manual_review_required: true
+    reference:
+      section: "Unix 서버 > 2. 파일 및 디렉토리 관리"
+      pages: [50]
+
+  - id: U-24
+    title: "사용자, 시스템 환경변수 파일 소유자 및 권한 설정"
+    category: file_directory
+    severity: high
+    evaluator: ""
+    criteria:
+      summary: "홈 디렉터리 환경변수 파일의 소유자와 쓰기 권한을 점검합니다."
+      pass: "환경변수 파일의 소유자가 root 또는 해당 계정이고 root와 소유자에게만 쓰기 권한이 부여된 경우 양호합니다."
+      fail: "환경변수 파일의 소유자가 root 또는 해당 계정이 아니거나 root와 소유자 외의 사용자에게 쓰기 권한이 부여된 경우 취약합니다."
+    reference:
+      section: "Unix 서버 > 2. 파일 및 디렉토리 관리"
+      pages: [51]
+
+  - id: U-25
+    title: "world writable 파일 점검"
+    category: file_directory
+    severity: high
+    evaluator: ""
+    criteria:
+      summary: "world writable 파일의 존재 여부와 설정 이유의 인지 여부를 점검합니다."
+      pass: "world writable 파일이 없거나, 존재하더라도 설정 이유를 인지하고 있는 경우 양호합니다."
+      fail: "world writable 파일이 존재하고 설정 이유를 인지하지 못한 경우 취약합니다."
+      manual_review_required: true
+    reference:
+      section: "Unix 서버 > 2. 파일 및 디렉토리 관리"
+      pages: [52]
+
+  - id: U-26
+    title: "/dev에 존재하지 않는 device 파일 점검"
+    category: file_directory
+    severity: high
+    evaluator: ""
+    criteria:
+      summary: "/dev 디렉터리에 실제 장치와 대응하지 않는 device 파일이 있는지 점검합니다."
+      pass: "/dev 디렉터리를 점검하고 존재하지 않는 device 파일을 제거한 경우 양호합니다."
+      fail: "/dev 디렉터리를 점검하지 않았거나 존재하지 않는 device 파일을 방치한 경우 취약합니다."
+    reference:
+      section: "Unix 서버 > 2. 파일 및 디렉토리 관리"
+      pages: [53]
+
+  - id: U-27
+    title: "$HOME/.rhosts, hosts.equiv 사용 금지"
+    category: file_directory
+    severity: high
+    evaluator: ""
+    criteria:
+      summary: "r 계열 서비스 사용 여부와 hosts.equiv 및 .rhosts 파일의 소유자, 권한, 와일드카드 설정을 점검합니다."
+      pass: "rlogin, rsh, rexec 서비스를 사용하지 않거나, 사용 시 대상 파일의 소유자가 root 또는 해당 계정이고 권한이 600 이하이며 더하기 기호(+) 설정이 없는 경우 양호합니다."
+      fail: "rlogin, rsh, rexec 서비스를 사용하면서 대상 파일의 소유자, 권한 또는 더하기 기호(+) 설정 중 하나라도 기준을 충족하지 않는 경우 취약합니다."
+    reference:
+      section: "Unix 서버 > 2. 파일 및 디렉토리 관리"
+      pages: [54]
+
+  - id: U-28
+    title: "접속 IP 및 포트 제한"
+    category: file_directory
+    severity: high
+    evaluator: ""
+    criteria:
+      summary: "접속을 허용할 호스트의 IP 주소와 포트 제한 설정을 점검합니다."
+      pass: "접속을 허용할 특정 호스트에 대한 IP 주소 및 포트 제한을 설정한 경우 양호합니다."
+      fail: "접속을 허용할 특정 호스트에 대한 IP 주소 및 포트 제한을 설정하지 않은 경우 취약합니다."
+      manual_review_required: true
+    reference:
+      section: "Unix 서버 > 2. 파일 및 디렉토리 관리"
+      pages: [56]
+
+  - id: U-29
+    title: "hosts.lpd 파일 소유자 및 권한 설정"
+    category: file_directory
+    severity: low
+    evaluator: ""
+    criteria:
+      summary: "/etc/hosts.lpd 파일의 존재 여부와 소유자 및 권한을 점검합니다."
+      pass: "/etc/hosts.lpd 파일이 없거나, 불가피하게 사용할 때 소유자가 root이고 권한이 600 이하인 경우 양호합니다."
+      fail: "/etc/hosts.lpd 파일이 존재하면서 소유자가 root가 아니거나 권한이 600 이하가 아닌 경우 취약합니다."
+    reference:
+      section: "Unix 서버 > 2. 파일 및 디렉토리 관리"
+      pages: [61]
+
+  - id: U-30
+    title: "UMASK 설정 관리"
+    category: file_directory
+    severity: medium
+    evaluator: ""
+    criteria:
+      summary: "시스템과 사용자 계정의 UMASK 값을 점검합니다."
+      pass: "UMASK 값이 022 이상으로 설정된 경우 양호합니다."
+      fail: "UMASK 값이 022 미만으로 설정된 경우 취약합니다."
+    reference:
+      section: "Unix 서버 > 2. 파일 및 디렉토리 관리"
+      pages: [62]
+
+  - id: U-31
+    title: "홈 디렉토리 소유자 및 권한 설정"
+    category: file_directory
+    severity: medium
+    evaluator: ""
+    criteria:
+      summary: "사용자 홈 디렉터리의 소유자와 타 사용자 쓰기 권한을 점검합니다."
+      pass: "홈 디렉터리의 소유자가 해당 계정이고 타 사용자의 쓰기 권한이 제거된 경우 양호합니다."
+      fail: "홈 디렉터리의 소유자가 해당 계정이 아니거나 타 사용자에게 쓰기 권한이 부여된 경우 취약합니다."
+    reference:
+      section: "Unix 서버 > 2. 파일 및 디렉토리 관리"
+      pages: [65]
+
+  - id: U-32
+    title: "홈 디렉토리로 지정한 디렉토리의 존재 관리"
+    category: file_directory
+    severity: medium
+    evaluator: ""
+    criteria:
+      summary: "계정에 지정된 홈 디렉터리의 실제 존재 여부를 점검합니다."
+      pass: "홈 디렉터리가 존재하지 않는 계정이 발견되지 않은 경우 양호합니다."
+      fail: "홈 디렉터리가 존재하지 않는 계정이 발견된 경우 취약합니다."
+    reference:
+      section: "Unix 서버 > 2. 파일 및 디렉토리 관리"
+      pages: [66]
+
+  - id: U-33
+    title: "숨겨진 파일 및 디렉토리 검색 및 제거"
+    category: file_directory
+    severity: low
+    evaluator: ""
+    criteria:
+      summary: "불필요하거나 의심스러운 숨겨진 파일과 디렉터리의 제거 여부를 점검합니다."
+      pass: "불필요하거나 의심스러운 숨겨진 파일 및 디렉터리를 제거한 경우 양호합니다."
+      fail: "불필요하거나 의심스러운 숨겨진 파일 및 디렉터리를 제거하지 않은 경우 취약합니다."
+      manual_review_required: true
+    reference:
+      section: "Unix 서버 > 2. 파일 및 디렉토리 관리"
+      pages: [67]
+
+  - id: U-34
+    title: "Finger 서비스 비활성화"
+    category: service
+    severity: high
+    evaluator: ""
+    criteria:
+      summary: "Finger 서비스의 활성화 여부를 점검합니다."
+      pass: "Finger 서비스가 비활성화된 경우 양호합니다."
+      fail: "Finger 서비스가 활성화된 경우 취약합니다."
+    reference:
+      section: "Unix 서버 > 3. 서비스 관리"
+      pages: [68]
+
+  - id: U-35
+    title: "공유 서비스에 대한 익명 접근 제한 설정"
+    category: service
+    severity: high
+    evaluator: ""
+    criteria:
+      summary: "공유 서비스의 익명 접근 제한 여부를 점검합니다."
+      pass: "공유 서비스에 대한 익명 접근을 제한한 경우 양호합니다."
+      fail: "공유 서비스에 대한 익명 접근을 허용한 경우 취약합니다."
+    reference:
+      section: "Unix 서버 > 3. 서비스 관리"
+      pages: [70]
+
+  - id: U-36
+    title: "r 계열 서비스 비활성화"
+    category: service
+    severity: high
+    evaluator: ""
+    criteria:
+      summary: "불필요한 r 계열 서비스의 활성화 여부를 점검합니다."
+      pass: "불필요한 r 계열 서비스가 비활성화된 경우 양호합니다."
+      fail: "불필요한 r 계열 서비스가 활성화된 경우 취약합니다."
+      manual_review_required: true
+    reference:
+      section: "Unix 서버 > 3. 서비스 관리"
+      pages: [77]
+
+  - id: U-37
+    title: "crontab 설정파일 권한 설정 미흡"
+    category: service
+    severity: high
+    evaluator: ""
+    criteria:
+      summary: "crontab 및 at 명령어의 일반 사용자 실행 권한과 관련 파일 권한을 점검합니다."
+      pass: "crontab 및 at 명령어에서 일반 사용자 실행 권한이 제거되어 있고 관련 파일 권한이 640 이하인 경우 양호합니다."
+      fail: "crontab 및 at 명령어에 일반 사용자 실행 권한이 부여되어 있고 관련 파일 권한이 640 이상인 경우 취약합니다."
+      manual_review_required: true
+    reference:
+      section: "Unix 서버 > 3. 서비스 관리"
+      pages: [80]
+
+  - id: U-38
+    title: "DoS 공격에 취약한 서비스 비활성화"
+    category: service
+    severity: high
+    evaluator: ""
+    criteria:
+      summary: "DoS 공격에 취약한 서비스의 활성화 여부를 점검합니다."
+      pass: "DoS 공격에 취약한 서비스가 비활성화된 경우 양호합니다."
+      fail: "DoS 공격에 취약한 서비스가 활성화된 경우 취약합니다."
+    reference:
+      section: "Unix 서버 > 3. 서비스 관리"
+      pages: [83]
+
+  - id: U-39
+    title: "불필요한 NFS 서비스 비활성화"
+    category: service
+    severity: high
+    evaluator: ""
+    criteria:
+      summary: "불필요한 NFS 서비스 관련 데몬의 활성화 여부를 점검합니다."
+      pass: "불필요한 NFS 서비스 관련 데몬이 비활성화된 경우 양호합니다."
+      fail: "불필요한 NFS 서비스 관련 데몬이 활성화된 경우 취약합니다."
+      manual_review_required: true
+    reference:
+      section: "Unix 서버 > 3. 서비스 관리"
+      pages: [86]
+
+  - id: U-40
+    title: "NFS 접근 통제"
+    category: service
+    severity: high
+    evaluator: ""
+    criteria:
+      summary: "NFS 접근 통제 설정과 NFS 설정 파일의 접근 권한을 점검합니다."
+      pass: "접근 통제가 설정되어 있고 NFS 설정 파일의 권한이 644 이하인 경우 양호합니다."
+      fail: "접근 통제가 설정되어 있지 않고 NFS 설정 파일의 권한이 644를 초과하는 경우 취약합니다."
+      manual_review_required: true
+    reference:
+      section: "Unix 서버 > 3. 서비스 관리"
+      pages: [89]
+
+  - id: U-41
+    title: "불필요한 automountd 제거"
+    category: service
+    severity: high
+    evaluator: ""
+    criteria:
+      summary: "automountd 서비스의 활성화 여부를 점검합니다."
+      pass: "automountd 서비스가 비활성화된 경우 양호합니다."
+      fail: "automountd 서비스가 활성화된 경우 취약합니다."
+    reference:
+      section: "Unix 서버 > 3. 서비스 관리"
+      pages: [93]
+
+  - id: U-42
+    title: "불필요한 RPC 서비스 비활성화"
+    category: service
+    severity: high
+    evaluator: ""
+    criteria:
+      summary: "불필요한 RPC 서비스의 활성화 여부를 점검합니다."
+      pass: "불필요한 RPC 서비스가 비활성화된 경우 양호합니다."
+      fail: "불필요한 RPC 서비스가 활성화된 경우 취약합니다."
+      manual_review_required: true
+    reference:
+      section: "Unix 서버 > 3. 서비스 관리"
+      pages: [96]
+
+  - id: U-43
+    title: "NIS, NIS+ 점검"
+    category: service
+    severity: high
+    evaluator: ""
+    criteria:
+      summary: "NIS 서비스의 활성화 여부와 불가피한 사용 시 NIS+ 사용 여부를 점검합니다."
+      pass: "NIS 서비스가 비활성화되어 있거나 불가피하게 사용할 때 NIS+ 서비스를 사용하는 경우 양호합니다."
+      fail: "NIS 서비스가 활성화된 경우 취약합니다."
+    reference:
+      section: "Unix 서버 > 3. 서비스 관리"
+      pages: [99]
+
+  - id: U-44
+    title: "tftp, talk 서비스 비활성화"
+    category: service
+    severity: high
+    evaluator: ""
+    criteria:
+      summary: "tftp, talk 및 ntalk 서비스의 활성화 여부를 점검합니다."
+      pass: "tftp, talk 및 ntalk 서비스가 비활성화된 경우 양호합니다."
+      fail: "tftp, talk 또는 ntalk 서비스가 활성화된 경우 취약합니다."
+    reference:
+      section: "Unix 서버 > 3. 서비스 관리"
+      pages: [102]
+
+  - id: U-45
+    title: "메일 서비스 버전 점검"
+    category: service
+    severity: high
+    evaluator: ""
+    criteria:
+      summary: "메일 서비스가 최신 버전인지 점검합니다."
+      pass: "메일 서비스 버전이 최신 버전인 경우 양호합니다."
+      fail: "메일 서비스 버전이 최신 버전이 아닌 경우 취약합니다."
+      manual_review_required: true
+    reference:
+      section: "Unix 서버 > 3. 서비스 관리"
+      pages: [105]
+
+  - id: U-46
+    title: "일반 사용자의 메일 서비스 실행 방지"
+    category: service
+    severity: high
+    evaluator: ""
+    criteria:
+      summary: "일반 사용자의 메일 서비스 실행 방지 설정 여부를 점검합니다."
+      pass: "일반 사용자의 메일 서비스 실행 방지가 설정된 경우 양호합니다."
+      fail: "일반 사용자의 메일 서비스 실행 방지가 설정되지 않은 경우 취약합니다."
+    reference:
+      section: "Unix 서버 > 3. 서비스 관리"
+      pages: [111]
+
+  - id: U-47
+    title: "스팸 메일 릴레이 제한"
+    category: service
+    severity: high
+    evaluator: ""
+    criteria:
+      summary: "메일 서비스의 릴레이 제한 설정 여부를 점검합니다."
+      pass: "릴레이 제한이 설정된 경우 양호합니다."
+      fail: "릴레이 제한이 설정되지 않은 경우 취약합니다."
+    reference:
+      section: "Unix 서버 > 3. 서비스 관리"
+      pages: [113]
+
+  - id: U-48
+    title: "expn, vrfy 명령어 제한"
+    category: service
+    severity: medium
+    evaluator: ""
+    criteria:
+      summary: "메일 서비스의 expn 및 vrfy 명령어 제한 옵션을 점검합니다."
+      pass: "noexpn 및 novrfy 옵션이 설정된 경우 양호합니다."
+      fail: "noexpn 또는 novrfy 옵션이 설정되지 않은 경우 취약합니다."
+    reference:
+      section: "Unix 서버 > 3. 서비스 관리"
+      pages: [116]
+
+  - id: U-49
+    title: "DNS 보안 버전 패치"
+    category: service
+    severity: high
+    evaluator: ""
+    criteria:
+      summary: "DNS 서비스의 주기적인 패치 관리 여부를 점검합니다."
+      pass: "DNS 서비스 패치를 주기적으로 관리하는 경우 양호합니다."
+      fail: "DNS 서비스 패치를 주기적으로 관리하지 않는 경우 취약합니다."
+      manual_review_required: true
+    reference:
+      section: "Unix 서버 > 3. 서비스 관리"
+      pages: [118]
+
+  - id: U-50
+    title: "DNS Zone Transfer 설정"
+    category: service
+    severity: high
+    evaluator: ""
+    criteria:
+      summary: "DNS Zone Transfer의 허용 대상을 점검합니다."
+      pass: "Zone Transfer를 허가된 사용자에게만 허용한 경우 양호합니다."
+      fail: "Zone Transfer를 모든 사용자에게 허용한 경우 취약합니다."
+      manual_review_required: true
+    reference:
+      section: "Unix 서버 > 3. 서비스 관리"
+      pages: [121]
+
+  - id: U-51
+    title: "DNS 서비스의 취약한 동적 업데이트 설정 금지"
+    category: service
+    severity: medium
+    evaluator: ""
+    criteria:
+      summary: "DNS 동적 업데이트 기능의 비활성화 여부 또는 활성화 시 접근 통제 적용 여부를 점검합니다."
+      pass: "DNS 동적 업데이트 기능이 비활성화되어 있거나 활성화 시 적절한 접근 통제를 수행하는 경우 양호합니다."
+      fail: "DNS 동적 업데이트 기능이 활성화되어 있고 적절한 접근 통제를 수행하지 않는 경우 취약합니다."
+      manual_review_required: true
+    reference:
+      section: "Unix 서버 > 3. 서비스 관리"
+      pages: [122]
+
+  - id: U-52
+    title: "Telnet 서비스 비활성화"
+    category: service
+    severity: medium
+    evaluator: ""
+    criteria:
+      summary: "원격 접속에 Telnet 프로토콜을 사용하는지 점검합니다."
+      pass: "원격 접속 시 Telnet 프로토콜을 비활성화한 경우 양호합니다."
+      fail: "원격 접속 시 Telnet 프로토콜을 사용하는 경우 취약합니다."
+    reference:
+      section: "Unix 서버 > 3. 서비스 관리"
+      pages: [124]
+
+  - id: U-53
+    title: "FTP 서비스 정보 노출 제한"
+    category: service
+    severity: low
+    evaluator: ""
+    criteria:
+      summary: "FTP 접속 배너를 통한 정보 노출 여부를 점검합니다."
+      pass: "FTP 접속 배너에 노출되는 정보가 없는 경우 양호합니다."
+      fail: "FTP 접속 배너에 노출되는 정보가 있는 경우 취약합니다."
+    reference:
+      section: "Unix 서버 > 3. 서비스 관리"
+      pages: [127]
+
+  - id: U-54
+    title: "암호화되지 않는 FTP 서비스 비활성화"
+    category: service
+    severity: medium
+    evaluator: ""
+    criteria:
+      summary: "암호화되지 않은 FTP 서비스의 활성화 여부를 점검합니다."
+      pass: "암호화되지 않은 FTP 서비스가 비활성화된 경우 양호합니다."
+      fail: "암호화되지 않은 FTP 서비스가 활성화된 경우 취약합니다."
+    reference:
+      section: "Unix 서버 > 3. 서비스 관리"
+      pages: [131]
+
+  - id: U-55
+    title: "FTP 계정 Shell 제한"
+    category: service
+    severity: medium
+    evaluator: ""
+    criteria:
+      summary: "FTP 계정에 로그인할 수 없는 셸이 부여되어 있는지 점검합니다."
+      pass: "FTP 계정에 /bin/false 또는 /sbin/nologin 셸이 부여된 경우 양호합니다."
+      fail: "FTP 계정에 /bin/false 또는 /sbin/nologin 셸이 부여되지 않은 경우 취약합니다."
+    reference:
+      section: "Unix 서버 > 3. 서비스 관리"
+      pages: [134]
+
+  - id: U-56
+    title: "FTP 서비스 접근 제어 설정"
+    category: service
+    severity: low
+    evaluator: ""
+    criteria:
+      summary: "FTP 서버에 특정 IP 주소 또는 호스트만 접속하도록 접근 제어했는지 점검합니다."
+      pass: "특정 IP 주소 또는 호스트에서만 FTP 서버에 접속하도록 접근 제어를 설정한 경우 양호합니다."
+      fail: "FTP 서버에 접근 제어를 설정하지 않은 경우 취약합니다."
+      manual_review_required: true
+    reference:
+      section: "Unix 서버 > 3. 서비스 관리"
+      pages: [135]
+
+  - id: U-57
+    title: "Ftpusers 파일 설정"
+    category: service
+    severity: medium
+    evaluator: ""
+    criteria:
+      summary: "FTP 서비스에서 root 계정의 접속 차단 여부를 점검합니다."
+      pass: "FTP 서비스에서 root 계정 접속을 차단한 경우 양호합니다."
+      fail: "FTP 서비스에서 root 계정 접속을 허용한 경우 취약합니다."
+    reference:
+      section: "Unix 서버 > 3. 서비스 관리"
+      pages: [139]
+
+  - id: U-58
+    title: "불필요한 SNMP 서비스 구동 점검"
+    category: service
+    severity: medium
+    evaluator: ""
+    criteria:
+      summary: "SNMP 서비스의 사용 여부를 점검합니다."
+      pass: "SNMP 서비스를 사용하지 않는 경우 양호합니다."
+      fail: "SNMP 서비스를 사용하는 경우 취약합니다."
+    reference:
+      section: "Unix 서버 > 3. 서비스 관리"
+      pages: [141]
+
+  - id: U-59
+    title: "안전한 SNMP 버전 사용"
+    category: service
+    severity: high
+    evaluator: ""
+    criteria:
+      summary: "SNMP 서비스의 프로토콜 버전을 점검합니다."
+      pass: "SNMP 서비스를 v3 이상으로 사용하는 경우 양호합니다."
+      fail: "SNMP 서비스를 v2 이하로 사용하는 경우 취약합니다."
+    reference:
+      section: "Unix 서버 > 3. 서비스 관리"
+      pages: [143]
+
+  - id: U-60
+    title: "SNMP Community String 복잡성 설정"
+    category: service
+    severity: medium
+    evaluator: ""
+    criteria:
+      summary: "SNMP Community String 또는 SNMP v3 인증 비밀번호의 복잡도를 점검합니다."
+      pass: "Community String이 기본값이 아니면서 영문자와 숫자 조합 10자리 이상 또는 영문자, 숫자, 특수문자 조합 8자리 이상인 경우 양호합니다. SNMP v3은 인증 비밀번호가 같은 복잡도 기준을 만족하면 양호합니다."
+      fail: "Community String이 public 또는 private이거나, 영문자와 숫자 조합이 10자리 미만이거나, 영문자, 숫자, 특수문자 조합이 8자리 미만인 경우 취약합니다."
+    reference:
+      section: "Unix 서버 > 3. 서비스 관리"
+      pages: [145]
+
+  - id: U-61
+    title: "SNMP Access Control 설정"
+    category: service
+    severity: high
+    evaluator: ""
+    criteria:
+      summary: "SNMP 서비스의 접근 제어 설정 여부를 점검합니다."
+      pass: "SNMP 서비스에 접근 제어가 설정된 경우 양호합니다."
+      fail: "SNMP 서비스에 접근 제어가 설정되지 않은 경우 취약합니다."
+    reference:
+      section: "Unix 서버 > 3. 서비스 관리"
+      pages: [148]
+
+  - id: U-62
+    title: "로그인 시 경고 메시지 설정"
+    category: service
+    severity: low
+    evaluator: ""
+    criteria:
+      summary: "서버 및 Telnet, FTP, SMTP, DNS 서비스 로그인 시 경고 메시지 설정 여부를 점검합니다."
+      pass: "서버 및 Telnet, FTP, SMTP, DNS 서비스 로그인 시 경고 메시지가 설정된 경우 양호합니다."
+      fail: "서버 및 Telnet, FTP, SMTP, DNS 서비스 로그인 시 경고 메시지가 설정되지 않은 경우 취약합니다."
+    reference:
+      section: "Unix 서버 > 3. 서비스 관리"
+      pages: [150]
+
+  - id: U-63
+    title: "sudo 명령어 접근 관리"
+    category: service
+    severity: medium
+    evaluator: ""
+    criteria:
+      summary: "/etc/sudoers 파일의 소유자와 권한을 점검합니다."
+      pass: "/etc/sudoers 파일의 소유자가 root이고 권한이 640인 경우 양호합니다."
+      fail: "/etc/sudoers 파일의 소유자가 root가 아니거나 권한이 640을 초과하는 경우 취약합니다."
+      manual_review_required: true
+    reference:
+      section: "Unix 서버 > 3. 서비스 관리"
+      pages: [159]
+
+  - id: U-64
+    title: "주기적 보안 패치 및 벤더 권고사항 적용"
+    category: patch
+    severity: high
+    evaluator: ""
+    criteria:
+      summary: "패치 적용 정책 수립, 주기적 패치 관리, 패치 관련 내용 확인 및 적용 여부를 점검합니다."
+      pass: "패치 적용 정책을 수립하여 주기적으로 패치를 관리하고 패치 관련 내용을 확인하여 적용한 경우 양호합니다."
+      fail: "패치 적용 정책을 수립하지 않았거나 주기적으로 패치를 관리하지 않거나 패치 관련 내용을 확인하여 적용하지 않은 경우 취약합니다."
+      manual_review_required: true
+    reference:
+      section: "Unix 서버 > 4. 패치 관리"
+      pages: [160]
+
+  - id: U-65
+    title: "NTP 및 시각 동기화 설정"
+    category: logging
+    severity: medium
+    evaluator: ""
+    criteria:
+      summary: "NTP 및 시각 동기화 설정이 정해진 기준에 따라 적용되었는지 점검합니다."
+      pass: "NTP 및 시각 동기화 설정이 기준에 따라 적용된 경우 양호합니다."
+      fail: "NTP 및 시각 동기화 설정이 기준에 따라 적용되지 않은 경우 취약합니다."
+      manual_review_required: true
+    reference:
+      section: "Unix 서버 > 5. 로그 관리"
+      pages: [164]
+
+  - id: U-66
+    title: "정책에 따른 시스템 로깅 설정"
+    category: logging
+    severity: medium
+    evaluator: ""
+    criteria:
+      summary: "보안 정책에 따른 로그 기록 정책의 수립, 설정 및 실제 기록 여부를 점검합니다."
+      pass: "로그 기록 정책이 보안 정책에 따라 수립 및 설정되어 있고 로그를 남기는 경우 양호합니다."
+      fail: "로그 기록 정책이 없거나 정책에 따라 설정되지 않았거나 로그를 남기지 않는 경우 취약합니다."
+      manual_review_required: true
+    reference:
+      section: "Unix 서버 > 5. 로그 관리"
+      pages: [166]
+
+  - id: U-67
+    title: "로그 디렉터리 소유자 및 권한 설정"
+    category: logging
+    severity: medium
+    evaluator: ""
+    criteria:
+      summary: "로그 디렉터리 내 로그 파일의 소유자와 권한을 점검합니다."
+      pass: "로그 파일의 소유자가 root이고 권한이 644 이하인 경우 양호합니다."
+      fail: "로그 파일의 소유자가 root가 아니거나 권한이 644를 초과하는 경우 취약합니다."
+    reference:
+      section: "Unix 서버 > 5. 로그 관리"
+      pages: [171]

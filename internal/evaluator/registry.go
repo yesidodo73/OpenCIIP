@@ -1,0 +1,174 @@
+package evaluator
+
+import (
+	"context"
+	"fmt"
+	"sort"
+	"strings"
+	"time"
+
+	"github.com/yesidodo73/OpenCIIP/internal/executor"
+	"github.com/yesidodo73/OpenCIIP/internal/model"
+	"github.com/yesidodo73/OpenCIIP/internal/system"
+)
+
+type Environment struct {
+	Files    system.Reader
+	Commands executor.CommandRunner
+	Platform model.PlatformInfo
+}
+
+type Outcome struct {
+	Status        model.Status
+	UnknownReason model.UnknownReason
+	Summary       string
+	Expected      string
+	Observed      string
+	Evidence      []model.Evidence
+	ErrorCode     string
+	ErrorMessage  string
+}
+
+type Func func(context.Context, model.ResolvedRule, Environment) Outcome
+
+type Registry struct {
+	evaluators map[string]Func
+}
+
+func NewRegistry() *Registry {
+	return &Registry{evaluators: make(map[string]Func)}
+}
+
+func (r *Registry) Register(id string, evaluator Func) error {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return fmt.Errorf("evaluator id is required")
+	}
+	if evaluator == nil {
+		return fmt.Errorf("evaluator %s is nil", id)
+	}
+	if _, exists := r.evaluators[id]; exists {
+		return fmt.Errorf("evaluator %s is already registered", id)
+	}
+	r.evaluators[id] = evaluator
+	return nil
+}
+
+func (r *Registry) IDs() []string {
+	ids := make([]string, 0, len(r.evaluators))
+	for id := range r.evaluators {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids
+}
+
+func (r *Registry) Evaluate(ctx context.Context, rule model.ResolvedRule, environment Environment) (result model.CheckResult) {
+	startedAt := time.Now().UTC()
+	result = model.CheckResult{
+		RuleID:         rule.ID,
+		Title:          rule.Title,
+		Category:       rule.Category,
+		Severity:       rule.Severity,
+		Evaluator:      rule.Evaluator,
+		Verification:   rule.Verification,
+		BindingSources: append([]string(nil), rule.BindingSources...),
+		Reference:      rule.Reference,
+		StartedAt:      startedAt,
+		CompletedAt:    startedAt,
+	}
+
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			result.Status = model.StatusError
+			result.Summary = "점검 처리 중 내부 오류가 발생했습니다."
+			result.ErrorCode = "evaluator_panic"
+			result.ErrorMessage = "점검 구현에서 예기치 않은 오류가 발생했습니다."
+		}
+		result.CompletedAt = time.Now().UTC()
+		result.DurationMS = result.CompletedAt.Sub(startedAt).Milliseconds()
+		normalizeResult(&result)
+	}()
+
+	if !rule.Applicable {
+		result.Status = model.StatusNotApplicable
+		result.Summary = "이 시스템에는 해당 점검 항목이 적용되지 않습니다."
+		applyVerificationBoundary(&result, rule.Verification)
+		return result
+	}
+	if rule.Verification.State == model.VerificationRejected {
+		result.Status = model.StatusUnknown
+		result.UnknownReason = model.UnknownUnsupportedConfiguration
+		result.Summary = "이 플랫폼에서 사용할 수 없는 것으로 검증된 점검 구현입니다."
+		result.Expected = rule.Criteria.Pass
+		result.Observed = strings.Join(rule.Verification.Environments, ", ")
+		return result
+	}
+	if strings.TrimSpace(rule.Evaluator) == "" {
+		result.Status = model.StatusUnknown
+		result.UnknownReason = model.UnknownUnsupportedConfiguration
+		result.Summary = "이 플랫폼에 연결된 점검 구현이 없습니다."
+		return result
+	}
+	evaluate, exists := r.evaluators[rule.Evaluator]
+	if !exists {
+		result.Status = model.StatusError
+		result.Summary = "규칙에 지정된 점검 구현을 찾지 못했습니다."
+		result.ErrorCode = "evaluator_not_registered"
+		result.ErrorMessage = rule.Evaluator
+		return result
+	}
+
+	outcome := evaluate(ctx, rule, environment)
+	result.Status = outcome.Status
+	result.UnknownReason = outcome.UnknownReason
+	result.Summary = outcome.Summary
+	result.Expected = outcome.Expected
+	result.Observed = outcome.Observed
+	result.Evidence = append([]model.Evidence(nil), outcome.Evidence...)
+	result.ErrorCode = outcome.ErrorCode
+	result.ErrorMessage = outcome.ErrorMessage
+	applyVerificationBoundary(&result, rule.Verification)
+	return result
+}
+
+func applyVerificationBoundary(result *model.CheckResult, verification model.Verification) {
+	if verification.State == model.VerificationVerified || result.Status == model.StatusError ||
+		result.Status == model.StatusUnknown || result.Status == model.StatusSkipped {
+		return
+	}
+	provisionalStatus := result.Status
+	provisionalSummary := result.Summary
+	provisionalObserved := result.Observed
+	result.Status = model.StatusUnknown
+	result.UnknownReason = model.UnknownUnsupportedConfiguration
+	result.Summary = "대상 운영체제의 실제 VM 검증 전이므로 예비 판정을 최종 결과로 확정하지 않았습니다."
+	parts := []string{fmt.Sprintf("예비 상태=%s", provisionalStatus)}
+	if strings.TrimSpace(provisionalSummary) != "" {
+		parts = append(parts, "예비 판정="+provisionalSummary)
+	}
+	if strings.TrimSpace(provisionalObserved) != "" {
+		parts = append(parts, "예비 확인값="+provisionalObserved)
+	}
+	result.Observed = strings.Join(parts, "; ")
+}
+
+func normalizeResult(result *model.CheckResult) {
+	if !result.Status.Valid() {
+		result.Status = model.StatusError
+		result.Summary = "점검 구현이 유효한 판정 상태를 반환하지 않았습니다."
+		result.ErrorCode = "invalid_evaluator_status"
+	}
+	if result.Status != model.StatusUnknown {
+		result.UnknownReason = ""
+	} else if !result.UnknownReason.Valid() {
+		result.UnknownReason = model.UnknownInsufficientEvidence
+	}
+	if result.Status != model.StatusError {
+		result.ErrorCode = ""
+		result.ErrorMessage = ""
+	}
+	if strings.TrimSpace(result.Summary) == "" {
+		result.Summary = "점검 결과에 대한 설명이 없습니다."
+	}
+}

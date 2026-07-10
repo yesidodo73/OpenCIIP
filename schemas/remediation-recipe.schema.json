@@ -1,0 +1,127 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/yesidodo73/OpenCIIP/main/schemas/remediation-recipe.schema.json",
+  "title": "OpenCIIP Remediation Recipe Catalog",
+  "description": "사용자 승인과 분리된, 가이드 및 플랫폼별 내장 조치 정의 형식입니다.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "recipes"],
+  "properties": {
+    "schema_version": {"type": "integer", "const": 1},
+    "recipes": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/recipe"}
+    }
+  },
+  "$defs": {
+    "canonicalNonBlankString": {
+      "type": "string",
+      "pattern": "^\\S(?:[\\s\\S]*\\S)?$",
+      "not": {"pattern": "\\u0000"}
+    },
+    "canonicalString": {
+      "type": "string",
+      "pattern": "^(?:|\\S(?:[\\s\\S]*\\S)?)$",
+      "not": {"pattern": "\\u0000"}
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "verificationEnvironment": {
+      "type": "string",
+      "pattern": "^\\S(?:[^\\r\\n]*\\S)?$",
+      "not": {"pattern": "\\u0000"}
+    },
+    "selector": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "version"],
+      "properties": {
+        "os": {"$ref": "#/$defs/canonicalString"},
+        "family": {"$ref": "#/$defs/canonicalString"},
+        "id": {"$ref": "#/$defs/canonicalNonBlankString"},
+        "version": {"$ref": "#/$defs/canonicalNonBlankString"},
+        "architecture": {"$ref": "#/$defs/canonicalString"}
+      }
+    },
+    "operation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "path", "allowed_owners", "remediation_owner", "maximum_mode"],
+      "properties": {
+        "type": {"type": "string", "const": "preserve_content_file_metadata"},
+        "path": {"type": "string", "pattern": "^/"},
+        "allowed_owners": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_.-]{0,63}\\$?$"}
+        },
+        "remediation_owner": {"type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_.-]{0,63}\\$?$"},
+        "maximum_mode": {"type": "string", "pattern": "^0[0-7]{3,4}$"}
+      }
+    },
+    "verification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state"],
+      "properties": {
+        "state": {"type": "string", "enum": ["pending", "verified", "rejected"]},
+        "environments": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/verificationEnvironment"}
+        },
+        "verified_at": {"type": "string"},
+        "evidence_sha256": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/sha256"}
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": ["state"],
+            "properties": {"state": {"const": "verified"}}
+          },
+          "then": {
+            "required": ["environments", "verified_at", "evidence_sha256"],
+            "properties": {
+              "environments": {"minItems": 1},
+              "verified_at": {"minLength": 1, "format": "date-time"},
+              "evidence_sha256": {"minItems": 1}
+            }
+          },
+          "else": {
+            "properties": {
+              "verified_at": {"maxLength": 0},
+              "evidence_sha256": {"maxItems": 0}
+            }
+          }
+        }
+      ]
+    },
+    "recipe": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "guide_year", "rule_id", "selector", "verification", "risk", "expected_impact", "operations"],
+      "properties": {
+        "id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"},
+        "guide_year": {"type": "integer", "minimum": 1},
+        "rule_id": {"type": "string", "pattern": "^U-[0-9]{2}$"},
+        "selector": {"$ref": "#/$defs/selector"},
+        "verification": {"$ref": "#/$defs/verification"},
+        "risk": {"type": "string", "enum": ["SAFE", "CAUTION", "DANGEROUS"]},
+        "expected_impact": {"$ref": "#/$defs/canonicalNonBlankString"},
+        "operations": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/operation"}
+        }
+      }
+    }
+  }
+}

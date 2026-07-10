@@ -1,0 +1,187 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/yesidodo73/OpenCIIP/main/schemas/rule-catalog.schema.json",
+  "title": "OpenCIIP Rule Catalog",
+  "description": "OpenCIIP 가이드 점검 규칙 카탈로그 형식입니다.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "guide",
+    "rules"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 1
+    },
+    "guide": {
+      "$ref": "#/$defs/guide"
+    },
+    "rules": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ruleDefinition"
+      }
+    }
+  },
+  "$defs": {
+    "guide": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "year",
+        "title",
+        "domain"
+      ],
+      "properties": {
+        "year": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "title": {
+          "type": "string",
+          "pattern": "\\S"
+        },
+        "domain": {
+          "type": "string",
+          "pattern": "\\S"
+        }
+      }
+    },
+    "criteria": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "summary",
+        "pass",
+        "fail"
+      ],
+      "properties": {
+        "summary": {
+          "type": "string"
+        },
+        "pass": {
+          "type": "string"
+        },
+        "fail": {
+          "type": "string"
+        },
+        "manual_review_required": {
+          "type": "boolean"
+        }
+      }
+    },
+    "reference": {
+      "description": "guide와 item은 로더가 카탈로그 메타데이터와 규칙 ID로 보완할 수 있습니다.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "section",
+        "pages"
+      ],
+      "properties": {
+        "guide": {
+          "type": "string"
+        },
+        "section": {
+          "type": "string"
+        },
+        "item": {
+          "type": "string",
+          "pattern": "^U-[0-9]{2}$"
+        },
+        "pages": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 1
+          }
+        }
+      }
+    },
+    "jsonValue": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "number"
+        },
+        {
+          "type": "string"
+        },
+        {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/jsonValue"
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/jsonValue"
+          }
+        }
+      ]
+    },
+    "ruleDefinition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "title",
+        "category",
+        "severity",
+        "criteria",
+        "reference"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^U-[0-9]{2}$"
+        },
+        "title": {
+          "type": "string",
+          "pattern": "\\S"
+        },
+        "category": {
+          "type": "string",
+          "enum": [
+            "account",
+            "file_directory",
+            "service",
+            "patch",
+            "logging"
+          ]
+        },
+        "severity": {
+          "type": "string",
+          "enum": [
+            "high",
+            "medium",
+            "low"
+          ]
+        },
+        "evaluator": {
+          "type": "string"
+        },
+        "criteria": {
+          "$ref": "#/$defs/criteria"
+        },
+        "reference": {
+          "$ref": "#/$defs/reference"
+        },
+        "parameters": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/jsonValue"
+          }
+        }
+      }
+    }
+  }
+}

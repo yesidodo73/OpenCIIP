@@ -1,0 +1,498 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/yesidodo73/OpenCIIP/main/schemas/check-results.schema.json",
+  "title": "OpenCIIP Check Results",
+  "description": "OpenCIIP 점검 보고서의 results.json 배열 형식입니다.",
+  "type": "array",
+  "minItems": 1,
+  "items": {
+    "$ref": "#/$defs/checkResult"
+  },
+  "$defs": {
+    "canonicalNonBlankString": {
+      "type": "string",
+      "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+    },
+    "verificationEnvironment": {
+      "type": "string",
+      "pattern": "^\\S(?:[^\\r\\n]*\\S)?$",
+      "not": {
+        "pattern": "\\u0000"
+      }
+    },
+    "category": {
+      "type": "string",
+      "enum": [
+        "account",
+        "file_directory",
+        "service",
+        "patch",
+        "logging"
+      ]
+    },
+    "severity": {
+      "type": "string",
+      "enum": [
+        "high",
+        "medium",
+        "low"
+      ]
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "PASS",
+        "FAIL",
+        "UNKNOWN",
+        "NOT_APPLICABLE",
+        "ERROR",
+        "SKIPPED"
+      ]
+    },
+    "unknownReason": {
+      "type": "string",
+      "enum": [
+        "insufficient_evidence",
+        "manual_verification_required",
+        "unsupported_configuration",
+        "ambiguous_result"
+      ]
+    },
+    "verification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state"
+      ],
+      "properties": {
+        "state": {
+          "type": "string",
+          "enum": [
+            "pending",
+            "verified",
+            "rejected"
+          ]
+        },
+        "environments": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/verificationEnvironment"
+          }
+        },
+        "verified_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "verified"
+              }
+            },
+            "required": [
+              "state"
+            ]
+          },
+          "then": {
+            "required": [
+              "environments",
+              "verified_at"
+            ],
+            "properties": {
+              "environments": {
+                "minItems": 1
+              }
+            }
+          },
+          "else": {
+            "not": {
+              "required": [
+                "verified_at"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "reference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "guide",
+        "section",
+        "item",
+        "pages"
+      ],
+      "properties": {
+        "guide": {
+          "$ref": "#/$defs/canonicalNonBlankString"
+        },
+        "section": {
+          "$ref": "#/$defs/canonicalNonBlankString"
+        },
+        "item": {
+          "type": "string",
+          "pattern": "^U-[0-9]{2}$"
+        },
+        "pages": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 1
+          }
+        }
+      }
+    },
+    "jsonValue": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "number"
+        },
+        {
+          "type": "string"
+        },
+        {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/jsonValue"
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/jsonValue"
+          }
+        }
+      ]
+    },
+    "commandEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "executable",
+        "exit_code",
+        "duration_ms",
+        "timed_out",
+        "truncated"
+      ],
+      "properties": {
+        "executable": {
+          "type": "string"
+        },
+        "arguments": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "exit_code": {
+          "type": "integer"
+        },
+        "stdout": {
+          "type": "string"
+        },
+        "stderr": {
+          "type": "string"
+        },
+        "duration_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "timed_out": {
+          "type": "boolean"
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      }
+    },
+    "fileEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "truncated"
+      ],
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "line_start": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "line_end": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "content": {
+          "type": "string"
+        },
+        "mode": {
+          "type": "string"
+        },
+        "owner": {
+          "type": "string"
+        },
+        "group": {
+          "type": "string"
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "source",
+        "captured_at",
+        "redacted"
+      ],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "command",
+            "file",
+            "fact"
+          ]
+        },
+        "source": {
+          "type": "string"
+        },
+        "captured_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "redacted": {
+          "type": "boolean"
+        },
+        "command": {
+          "$ref": "#/$defs/commandEvidence"
+        },
+        "file": {
+          "$ref": "#/$defs/fileEvidence"
+        },
+        "fact": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/jsonValue"
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "command"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "command"
+            ],
+            "not": {
+              "anyOf": [
+                {"required": ["file"]},
+                {"required": ["fact"]}
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "file"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "file"
+            ],
+            "not": {
+              "anyOf": [
+                {"required": ["command"]},
+                {"required": ["fact"]}
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "fact"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "fact"
+            ],
+            "not": {
+              "anyOf": [
+                {"required": ["command"]},
+                {"required": ["file"]}
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "checkResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "rule_id",
+        "title",
+        "category",
+        "severity",
+        "status",
+        "summary",
+        "evaluator",
+        "verification",
+        "reference",
+        "started_at",
+        "completed_at",
+        "duration_ms"
+      ],
+      "properties": {
+        "rule_id": {
+          "type": "string",
+          "pattern": "^U-[0-9]{2}$"
+        },
+        "title": {
+          "$ref": "#/$defs/canonicalNonBlankString"
+        },
+        "category": {
+          "$ref": "#/$defs/category"
+        },
+        "severity": {
+          "$ref": "#/$defs/severity"
+        },
+        "status": {
+          "$ref": "#/$defs/status"
+        },
+        "unknown_reason": {
+          "$ref": "#/$defs/unknownReason"
+        },
+        "summary": {
+          "$ref": "#/$defs/canonicalNonBlankString"
+        },
+        "expected": {
+          "type": "string"
+        },
+        "observed": {
+          "type": "string"
+        },
+        "evaluator": {
+          "type": "string"
+        },
+        "verification": {
+          "$ref": "#/$defs/verification"
+        },
+        "binding_sources": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "reference": {
+          "$ref": "#/$defs/reference"
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/evidence"
+          }
+        },
+        "started_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "completed_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "duration_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "error_code": {
+          "$ref": "#/$defs/canonicalNonBlankString"
+        },
+        "error_message": {
+          "type": "string"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "UNKNOWN"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "required": [
+              "unknown_reason"
+            ]
+          },
+          "else": {
+            "not": {
+              "required": [
+                "unknown_reason"
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "ERROR"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "required": [
+              "error_code"
+            ]
+          },
+          "else": {
+            "not": {
+              "anyOf": [
+                {"required": ["error_code"]},
+                {"required": ["error_message"]}
+              ]
+            }
+          }
+        }
+      ]
+    }
+  }
+}

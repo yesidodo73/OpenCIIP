@@ -1,0 +1,16 @@
+schema_version: 1
+id: rocky-linux-9.8
+priority: 300
+selector:
+  id: rocky
+  version: "9.8"
+platform_verification:
+  state: pending
+  environments:
+    - Rocky Linux 9.8
+defaults:
+  verification:
+    state: pending
+    environments:
+      - Rocky Linux 9.8
+bindings: []

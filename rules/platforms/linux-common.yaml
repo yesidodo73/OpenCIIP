@@ -1,0 +1,140 @@
+schema_version: 1
+id: linux-common
+priority: 100
+selector:
+  os: linux
+bindings:
+  - rule_id: U-01
+    evaluator: unix.account.remote_root_login
+  - rule_id: U-02
+    evaluator: unix.account.password_policy
+  - rule_id: U-03
+    evaluator: unix.account.lockout_threshold
+  - rule_id: U-04
+    evaluator: unix.account.shadow_password
+  - rule_id: U-05
+    evaluator: unix.account.uid_zero_unique
+  - rule_id: U-06
+    evaluator: unix.account.su_restriction
+  - rule_id: U-07
+    evaluator: unix.account.unnecessary_accounts
+  - rule_id: U-08
+    evaluator: unix.account.admin_group_membership
+  - rule_id: U-09
+    evaluator: unix.account.unnecessary_groups
+  - rule_id: U-10
+    evaluator: unix.account.duplicate_uid
+  - rule_id: U-11
+    evaluator: unix.account.service_shell
+  - rule_id: U-12
+    evaluator: unix.account.session_timeout
+  - rule_id: U-13
+    evaluator: unix.account.password_hash
+  - rule_id: U-14
+    evaluator: unix.file.root_path
+  - rule_id: U-15
+    evaluator: unix.file.orphaned_owner
+  - rule_id: U-16
+    evaluator: unix.file.passwd_permissions
+  - rule_id: U-17
+    evaluator: unix.file.startup_permissions
+  - rule_id: U-18
+    evaluator: unix.file.shadow_permissions
+  - rule_id: U-19
+    evaluator: unix.file.hosts_permissions
+  - rule_id: U-20
+    evaluator: unix.file.inetd_permissions
+  - rule_id: U-21
+    evaluator: unix.file.syslog_permissions
+  - rule_id: U-22
+    evaluator: unix.file.services_permissions
+  - rule_id: U-23
+    evaluator: unix.file.special_bits
+  - rule_id: U-24
+    evaluator: unix.file.user_environment_permissions
+  - rule_id: U-25
+    evaluator: unix.file.world_writable
+  - rule_id: U-26
+    evaluator: unix.file.invalid_device_nodes
+  - rule_id: U-27
+    evaluator: unix.file.rhosts_trust
+  - rule_id: U-28
+    evaluator: unix.network.ingress_restriction
+  - rule_id: U-29
+    evaluator: unix.file.hosts_lpd_permissions
+  - rule_id: U-30
+    evaluator: unix.file.umask
+  - rule_id: U-31
+    evaluator: unix.file.home_permissions
+  - rule_id: U-32
+    evaluator: unix.file.home_exists
+  - rule_id: U-33
+    evaluator: unix.file.suspicious_hidden
+  - rule_id: U-34
+    evaluator: unix.service.finger_disabled
+  - rule_id: U-35
+    evaluator: unix.service.anonymous_share
+  - rule_id: U-36
+    evaluator: unix.service.r_commands_disabled
+  - rule_id: U-37
+    evaluator: unix.service.scheduler_permissions
+  - rule_id: U-38
+    evaluator: unix.service.dos_prone_disabled
+  - rule_id: U-39
+    evaluator: unix.service.nfs_disabled
+  - rule_id: U-40
+    evaluator: unix.service.nfs_access_control
+  - rule_id: U-41
+    evaluator: unix.service.autofs_disabled
+  - rule_id: U-42
+    evaluator: unix.service.rpc_disabled
+  - rule_id: U-43
+    evaluator: unix.service.nis_disabled
+  - rule_id: U-44
+    evaluator: unix.service.legacy_datagram_disabled
+  - rule_id: U-45
+    evaluator: unix.service.mail_patch_level
+  - rule_id: U-46
+    evaluator: unix.service.mail_queue_restriction
+  - rule_id: U-47
+    evaluator: unix.service.mail_relay
+  - rule_id: U-48
+    evaluator: unix.service.mail_user_enumeration
+  - rule_id: U-49
+    evaluator: unix.service.dns_patch_level
+  - rule_id: U-50
+    evaluator: unix.service.dns_zone_transfer
+  - rule_id: U-51
+    evaluator: unix.service.dns_dynamic_update
+  - rule_id: U-52
+    evaluator: unix.service.telnet_disabled
+  - rule_id: U-53
+    evaluator: unix.service.ftp_banner
+  - rule_id: U-54
+    evaluator: unix.service.plaintext_ftp_disabled
+  - rule_id: U-55
+    evaluator: unix.service.ftp_account_shell
+  - rule_id: U-56
+    evaluator: unix.service.ftp_access_control
+  - rule_id: U-57
+    evaluator: unix.service.ftp_root_login
+  - rule_id: U-58
+    evaluator: unix.service.snmp_disabled
+  - rule_id: U-59
+    evaluator: unix.service.snmp_version
+  - rule_id: U-60
+    evaluator: unix.service.snmp_credential_complexity
+  - rule_id: U-61
+    evaluator: unix.service.snmp_access_control
+  - rule_id: U-62
+    evaluator: unix.service.login_warning
+  - rule_id: U-63
+    evaluator: unix.service.sudoers_permissions
+  - rule_id: U-64
+    evaluator: unix.patch.policy_and_currency
+  - rule_id: U-65
+    evaluator: unix.log.time_sync
+  - rule_id: U-66
+    evaluator: unix.log.policy
+  - rule_id: U-67
+    evaluator: unix.log.file_permissions

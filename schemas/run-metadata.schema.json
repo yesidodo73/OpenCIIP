@@ -1,0 +1,278 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/yesidodo73/OpenCIIP/main/schemas/run-metadata.schema.json",
+  "title": "OpenCIIP Run Metadata",
+  "description": "OpenCIIP 점검 실행의 metadata.json 형식입니다.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "run_id",
+    "tool_version",
+    "tool_commit",
+    "guide_year",
+    "rule_set_version",
+    "started_at",
+    "completed_at",
+    "duration_ms",
+    "platform",
+    "selection",
+    "counts",
+    "evidence_mode",
+    "redaction",
+    "complete",
+    "exit_code"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 1
+    },
+    "run_id": {
+      "type": "string"
+    },
+    "tool_version": {
+      "type": "string"
+    },
+    "tool_commit": {
+      "type": "string"
+    },
+    "guide_year": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "rule_set_version": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "started_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "completed_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "duration_ms": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "platform": {
+      "$ref": "#/$defs/platformInfo"
+    },
+    "selection": {
+      "$ref": "#/$defs/selection"
+    },
+    "counts": {
+      "$ref": "#/$defs/counts"
+    },
+    "evidence_mode": {
+      "type": "string",
+      "enum": [
+        "problems",
+        "all",
+        "none"
+      ]
+    },
+    "redaction": {
+      "type": "boolean"
+    },
+    "complete": {
+      "type": "boolean"
+    },
+    "exit_code": {
+      "type": "integer",
+      "enum": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ]
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "target_identity": {
+      "$ref": "#/$defs/hostIdentity"
+    }
+  },
+  "$defs": {
+    "hostIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "machine_id_hash",
+        "system_root",
+        "root_device",
+        "root_inode",
+        "boot_id"
+      ],
+      "properties": {
+        "machine_id_hash": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "system_root": {
+          "type": "string",
+          "pattern": "^\\S(?:[^\\r\\n]*\\S)?$",
+          "not": {
+            "pattern": "\\u0000"
+          }
+        },
+        "root_device": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "root_inode": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "boot_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        }
+      }
+    },
+    "platformInfo": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "hostname",
+        "os",
+        "id",
+        "name",
+        "version_id",
+        "family",
+        "architecture",
+        "kernel_release",
+        "init_system",
+        "package_manager",
+        "privilege",
+        "support"
+      ],
+      "properties": {
+        "hostname": {
+          "type": "string"
+        },
+        "os": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "version_id": {
+          "type": "string"
+        },
+        "family": {
+          "type": "string"
+        },
+        "architecture": {
+          "type": "string"
+        },
+        "kernel_release": {
+          "type": "string"
+        },
+        "init_system": {
+          "type": "string"
+        },
+        "package_manager": {
+          "type": "string"
+        },
+        "privilege": {
+          "type": "string"
+        },
+        "support": {
+          "type": "string",
+          "enum": [
+            "unsupported",
+            "targeted",
+            "verified"
+          ]
+        },
+        "verification_warning": {
+          "type": "string"
+        }
+      }
+    },
+    "selection": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "profiles": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "rule_ids": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^U-[0-9]{2}$"
+          }
+        },
+        "categories": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "account",
+              "file_directory",
+              "service",
+              "patch",
+              "logging"
+            ]
+          }
+        },
+        "severities": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "high",
+              "medium",
+              "low"
+            ]
+          }
+        }
+      }
+    },
+    "counts": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "PASS": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "FAIL": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "UNKNOWN": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "NOT_APPLICABLE": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "ERROR": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "SKIPPED": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    }
+  }
+}
