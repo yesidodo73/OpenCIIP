@@ -35,23 +35,15 @@ func evaluateUnnecessaryAccounts(ctx context.Context, rule model.ResolvedRule, e
 		return checkError("account_inventory_failed", err)
 	}
 	evidence := []model.Evidence{accountEvidence}
-	if environment.Commands.Available("passwd") {
-		spec := executor.Spec{Name: "passwd", Arguments: []string{"-S", "-a"}, Timeout: 20 * time.Second, MaxOutput: 2 << 20}
-		result, runErr := environment.Commands.Run(ctx, spec)
-		if runErr != nil {
-			return checkError("account_status_collection_failed", runErr)
-		}
-		if result.ExitCode != 0 || result.Truncated {
-			return checkError("account_status_collection_failed", fmt.Errorf("passwd exit=%d truncated=%t", result.ExitCode, result.Truncated))
-		}
-		recordCount := 0
-		for _, line := range strings.Split(strings.ReplaceAll(string(result.Stdout), "\r\n", "\n"), "\n") {
-			if strings.TrimSpace(line) != "" {
-				recordCount++
-			}
-		}
-		evidence = append(evidence, support.CommandSummaryEvidence("account-status-summary", spec, result, map[string]any{
-			"record_count": recordCount, "account_details_redacted": true,
+	shadow, shadowEvidence, shadowErr := support.ReadShadowSummary(ctx, environment.Files)
+	shadowAvailable := shadowErr == nil
+	if shadowAvailable {
+		evidence = append(evidence, shadowEvidence)
+	} else {
+		evidence = append(evidence, support.FactEvidence("account-status-summary", map[string]any{
+			"available":                false,
+			"reason":                   "shadow_summary_unavailable",
+			"account_details_redacted": true,
 		}))
 	}
 	approved, hasApproved, parameterErr := support.StringSliceParameter(rule.Parameters, "approved_accounts")
@@ -59,12 +51,16 @@ func evaluateUnnecessaryAccounts(ctx context.Context, rule model.ResolvedRule, e
 		return checkError("invalid_rule_parameter", parameterErr)
 	}
 	if !hasApproved {
+		observed := fmt.Sprintf("NSS에서 %d개 계정을 수집했으나 로컬 계정 상태를 확인할 수 없고 approved_accounts 정책이 없습니다.", len(accounts))
+		if shadowAvailable {
+			observed = fmt.Sprintf("NSS 계정 %d개와 로컬 shadow 상태 %d개를 수집했으나 approved_accounts 정책이 없습니다.", len(accounts), len(shadow))
+		}
 		return evaluator.Outcome{
 			Status:        model.StatusUnknown,
 			UnknownReason: model.UnknownManualVerification,
 			Summary:       "계정의 업무상 필요성을 자동으로 판단할 수 없습니다.",
 			Expected:      "유효 계정을 승인된 계정 대장 및 계정 상태·사용 근거와 대조해야 합니다.",
-			Observed:      fmt.Sprintf("NSS에서 %d개 계정을 수집했으나 approved_accounts 정책이 없습니다.", len(accounts)),
+			Observed:      observed,
 			Evidence:      evidence,
 		}
 	}
@@ -72,13 +68,22 @@ func evaluateUnnecessaryAccounts(ctx context.Context, rule model.ResolvedRule, e
 	if listErr != nil {
 		return checkError("invalid_rule_parameter", listErr)
 	}
+	accountSet := make(map[string]bool, len(accounts))
 	unapproved := make([]string, 0)
 	for _, account := range accounts {
+		accountSet[account.Name] = true
 		if !approvedSet[account.Name] {
 			unapproved = append(unapproved, account.Name)
 		}
 	}
+	missingApproved := make([]string, 0)
+	for name := range approvedSet {
+		if !accountSet[name] {
+			missingApproved = append(missingApproved, name)
+		}
+	}
 	sort.Strings(unapproved)
+	sort.Strings(missingApproved)
 	if len(unapproved) > 0 {
 		return evaluator.Outcome{
 			Status:   model.StatusFail,
@@ -88,11 +93,48 @@ func evaluateUnnecessaryAccounts(ctx context.Context, rule model.ResolvedRule, e
 			Evidence: evidence,
 		}
 	}
+	if len(missingApproved) > 0 {
+		return evaluator.Outcome{
+			Status:        model.StatusUnknown,
+			UnknownReason: model.UnknownInsufficientEvidence,
+			Summary:       "승인 계정 대장의 일부 계정을 현재 NSS에서 확인할 수 없습니다.",
+			Expected:      "NSS 계정 집합과 approved_accounts가 양방향으로 정확히 일치해야 합니다.",
+			Observed:      "NSS에 없는 승인 계정: " + strings.Join(missingApproved, ", "),
+			Evidence:      evidence,
+		}
+	}
+	if !shadowAvailable {
+		return evaluator.Outcome{
+			Status:        model.StatusUnknown,
+			UnknownReason: model.UnknownInsufficientEvidence,
+			Summary:       "승인 계정 대장과 NSS 목록은 일치하지만 로컬 계정 상태를 확인하지 못했습니다.",
+			Expected:      "모든 NSS 계정이 승인 목록에 있고 로컬 계정 상태와 사용 근거를 확인할 수 있어야 합니다.",
+			Observed:      fmt.Sprintf("승인 계정 %d개와 NSS 계정 %d개가 일치하며 shadow 상태 증적은 없습니다.", len(approvedSet), len(accounts)),
+			Evidence:      evidence,
+		}
+	}
+	missingShadowStatus := make([]string, 0)
+	for _, account := range accounts {
+		if _, exists := shadow[account.Name]; !exists {
+			missingShadowStatus = append(missingShadowStatus, account.Name)
+		}
+	}
+	sort.Strings(missingShadowStatus)
+	if len(missingShadowStatus) > 0 {
+		return evaluator.Outcome{
+			Status:        model.StatusUnknown,
+			UnknownReason: model.UnknownInsufficientEvidence,
+			Summary:       "일부 NSS 계정의 비밀번호 상태 출처 증적을 확인할 수 없습니다.",
+			Expected:      "NSS 계정 집합과 승인 목록이 일치하고 각 계정의 shadow 상태 출처 증적이 있어야 합니다.",
+			Observed:      "shadow 상태가 없는 NSS 계정: " + strings.Join(missingShadowStatus, ", "),
+			Evidence:      evidence,
+		}
+	}
 	return evaluator.Outcome{
 		Status:   model.StatusPass,
-		Summary:  "모든 유효 계정이 승인된 계정 대장에 포함되어 있습니다.",
-		Expected: "모든 NSS 계정이 완전한 approved_accounts 정책에 포함되어야 합니다.",
-		Observed: fmt.Sprintf("승인 계정 %d개와 NSS 계정 %d개를 대조했습니다.", len(approvedSet), len(accounts)),
+		Summary:  "NSS 계정 집합과 승인 계정 대장이 일치하며 모든 계정의 상태 출처 증적이 있습니다.",
+		Expected: "NSS 계정 집합과 approved_accounts가 일치하고 각 계정의 shadow 상태 출처 증적이 있어야 합니다.",
+		Observed: fmt.Sprintf("승인 계정 %d개, NSS 계정 %d개, shadow 상태 %d개를 대조했습니다.", len(approvedSet), len(accounts), len(accounts)),
 		Evidence: evidence,
 	}
 }
