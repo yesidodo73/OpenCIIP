@@ -359,10 +359,14 @@ func evaluatePasswordHash(ctx context.Context, rule model.ResolvedRule, environm
 }
 
 func inspectPAMUnixHashMethods(stack string, rules []support.PAMRule, fallbackMethod string, safeMethods []string) ([]string, []string, []string) {
-	matches := make([]support.PAMRule, 0, 1)
-	for _, rule := range rules {
+	type indexedRule struct {
+		index int
+		rule  support.PAMRule
+	}
+	matches := make([]indexedRule, 0, 1)
+	for index, rule := range rules {
 		if rule.Type == "password" && filepath.Base(rule.Module) == "pam_unix.so" {
-			matches = append(matches, rule)
+			matches = append(matches, indexedRule{index: index, rule: rule})
 		}
 	}
 	if len(matches) == 0 {
@@ -375,7 +379,9 @@ func inspectPAMUnixHashMethods(stack string, rules []support.PAMRule, fallbackMe
 	if len(matches) > 1 {
 		unknown = append(unknown, stack+"의 password pam_unix.so 적용 경로가 여러 개임")
 	}
-	for _, rule := range matches {
+	for _, match := range matches {
+		rule := match.rule
+		unknown = append(unknown, assessPAMUnixHashReachability(stack, rules, match.index)...)
 		control := strings.ToLower(strings.TrimSpace(rule.Control))
 		if control != "required" && control != "requisite" && control != "sufficient" {
 			unknown = append(unknown, fmt.Sprintf("%s %s:%d pam_unix PAM 제어 흐름을 확정할 수 없음", stack, rule.Path, rule.Line))
@@ -401,6 +407,50 @@ func inspectPAMUnixHashMethods(stack string, rules []support.PAMRule, fallbackMe
 		}
 	}
 	return effective, unsafe, unknown
+}
+
+func assessPAMUnixHashReachability(stack string, rules []support.PAMRule, pamUnixIndex int) []string {
+	unknowns := make([]string, 0)
+	for index, rule := range rules {
+		if index >= pamUnixIndex || rule.Type != "password" {
+			continue
+		}
+		module := strings.ToLower(filepath.Base(rule.Module))
+		control := strings.ToLower(strings.TrimSpace(rule.Control))
+		description := fmt.Sprintf("%s %s:%d %s control=%s", stack, rule.Path, rule.Line, module, rule.Control)
+		if strings.HasPrefix(control, "[") {
+			unknowns = append(unknowns, description+"이 pam_unix.so를 건너뛸 수 있음")
+			continue
+		}
+		if control == "sufficient" && module != "pam_deny.so" {
+			unknowns = append(unknowns, description+"이 pam_unix.so보다 먼저 성공할 수 있음")
+			continue
+		}
+		if control != "required" && control != "requisite" && control != "optional" {
+			unknowns = append(unknowns, description+"의 PAM 제어 흐름을 확정할 수 없음")
+			continue
+		}
+		role := passwordPAMModuleRole(module)
+		if role == passwordRoleWriter {
+			unknowns = append(unknowns, description+"이 pam_unix.so보다 먼저 비밀번호를 변경할 수 있음")
+		} else if role == passwordRoleUnknown {
+			unknowns = append(unknowns, description+"의 비밀번호 변경 여부를 확정할 수 없음")
+		}
+	}
+	for index := pamUnixIndex + 1; index < len(rules); index++ {
+		rule := rules[index]
+		if rule.Type != "password" || filepath.Base(rule.Module) == "pam_unix.so" {
+			continue
+		}
+		module := strings.ToLower(filepath.Base(rule.Module))
+		role := passwordPAMModuleRole(module)
+		if role == passwordRoleWriter && !knownPostUnixWriterUsesAuthtok(module, rule.Args) {
+			unknowns = append(unknowns, fmt.Sprintf("%s %s:%d %s가 pam_unix.so 뒤에서 비밀번호를 다시 변경할 수 있는 대체 경로가 있음", stack, rule.Path, rule.Line, module))
+		} else if role == passwordRoleUnknown {
+			unknowns = append(unknowns, fmt.Sprintf("%s %s:%d %s의 pam_unix.so 후속 비밀번호 변경 여부를 확정할 수 없음", stack, rule.Path, rule.Line, module))
+		}
+	}
+	return unknowns
 }
 
 func pamUnixHashMethod(arguments []string, fallbackMethod string) (string, bool, error) {

@@ -269,6 +269,7 @@ func assessPasswordPolicyPAMFlow(stack string, rules []support.PAMRule) ([]strin
 	unknowns := make([]string, 0)
 	qualitySeen := false
 	historySeen := false
+	pamUnixCount := 0
 	for _, rule := range rules {
 		if rule.Type != "password" {
 			continue
@@ -279,16 +280,56 @@ func assessPasswordPolicyPAMFlow(stack string, rules []support.PAMRule) ([]strin
 			qualitySeen = true
 			continue
 		case "pam_pwhistory.so":
+			if !qualitySeen {
+				unknowns = append(unknowns, fmt.Sprintf("%s %s:%d pam_pwhistory.so가 pam_pwquality.so보다 먼저 실행됨", stack, rule.Path, rule.Line))
+			}
+			if !hasPAMArgument(rule.Args, "use_authtok") {
+				unknowns = append(unknowns, fmt.Sprintf("%s %s:%d pam_pwhistory.so가 이전 정책 모듈의 비밀번호 토큰을 강제하지 않음", stack, rule.Path, rule.Line))
+			}
 			historySeen = true
 			continue
 		}
-		if qualitySeen && historySeen {
+		if module == "pam_unix.so" {
+			pamUnixCount++
+			if !qualitySeen || !historySeen {
+				violations = append(violations, fmt.Sprintf("%s %s:%d pam_unix.so가 pwquality/pwhistory보다 먼저 실행됨", stack, rule.Path, rule.Line))
+			} else {
+				control := strings.ToLower(strings.TrimSpace(rule.Control))
+				if control != "required" && control != "requisite" && control != "sufficient" {
+					unknowns = append(unknowns, fmt.Sprintf("%s %s:%d pam_unix.so 제어 흐름을 확정할 수 없음", stack, rule.Path, rule.Line))
+				}
+				if !hasPAMArgument(rule.Args, "use_authtok") {
+					unknowns = append(unknowns, fmt.Sprintf("%s %s:%d pam_unix.so가 검증된 비밀번호 토큰을 강제하지 않음", stack, rule.Path, rule.Line))
+				}
+			}
+			continue
+		}
+		if pamUnixCount > 0 {
+			control := strings.ToLower(strings.TrimSpace(rule.Control))
+			description := fmt.Sprintf("%s %s:%d %s control=%s", stack, rule.Path, rule.Line, module, rule.Control)
+			switch passwordPAMModuleRole(module) {
+			case passwordRoleWriter:
+				if !knownPostUnixWriterUsesAuthtok(module, rule.Args) {
+					unknowns = append(unknowns, description+"이 pam_unix.so 뒤에서 검증되지 않은 새 비밀번호 토큰을 받을 수 있음")
+				}
+				if strings.HasPrefix(control, "[") || (control != "required" && control != "requisite" && control != "sufficient" && control != "optional") {
+					unknowns = append(unknowns, description+"의 후속 비밀번호 변경 흐름을 확정할 수 없음")
+				}
+			case passwordRoleUnknown:
+				unknowns = append(unknowns, description+"의 후속 비밀번호 변경 여부를 확정할 수 없음")
+			}
 			continue
 		}
 		control := strings.ToLower(strings.TrimSpace(rule.Control))
 		description := fmt.Sprintf("%s %s:%d %s control=%s", stack, rule.Path, rule.Line, module, rule.Control)
+		role := passwordPAMModuleRole(module)
+		if role == passwordRoleWriter {
+			unknowns = append(unknowns, description+"이 검증된 pam_unix.so보다 먼저 비밀번호를 변경할 수 있음")
+		} else if role == passwordRoleUnknown {
+			unknowns = append(unknowns, description+"의 비밀번호 변경 여부를 확정할 수 없음")
+		}
 		if strings.HasPrefix(control, "[") {
-			unknowns = append(unknowns, description+"이 뒤의 비밀번호 정책 모듈을 건너뛸 수 있음")
+			unknowns = append(unknowns, description+"이 뒤의 비밀번호 정책 또는 pam_unix.so를 건너뛸 수 있음")
 			continue
 		}
 		if control != "sufficient" {
@@ -300,7 +341,7 @@ func assessPasswordPolicyPAMFlow(stack string, rules []support.PAMRule) ([]strin
 		switch module {
 		case "pam_permit.so":
 			if rule.Service == "" || rule.Service == stack {
-				violations = append(violations, description+"이 뒤의 비밀번호 정책 모듈을 우회함")
+				violations = append(violations, description+"이 뒤의 비밀번호 정책 또는 pam_unix.so를 우회함")
 			} else {
 				unknowns = append(unknowns, description+"의 include/substack 반환 범위를 확정할 수 없음")
 			}
@@ -309,10 +350,56 @@ func assessPasswordPolicyPAMFlow(stack string, rules []support.PAMRule) ([]strin
 		case "pam_deny.so":
 			// pam_deny cannot produce the successful result required by sufficient.
 		default:
-			unknowns = append(unknowns, description+"이 뒤의 비밀번호 정책 모듈을 우회할 수 있음")
+			unknowns = append(unknowns, description+"이 뒤의 비밀번호 정책 또는 pam_unix.so를 우회할 수 있음")
 		}
 	}
+	if pamUnixCount == 0 {
+		unknowns = append(unknowns, stack+"에 로컬 비밀번호를 갱신하는 pam_unix.so가 없음")
+	} else if pamUnixCount > 1 {
+		unknowns = append(unknowns, stack+"의 password pam_unix.so 적용 경로가 여러 개임")
+	}
 	return violations, unknowns
+}
+
+type passwordModuleRole uint8
+
+const (
+	passwordRoleControl passwordModuleRole = iota
+	passwordRolePolicy
+	passwordRoleWriter
+	passwordRoleUnknown
+)
+
+func passwordPAMModuleRole(module string) passwordModuleRole {
+	switch strings.ToLower(filepath.Base(module)) {
+	case "pam_pwquality.so", "pam_pwhistory.so", "pam_passwdqc.so", "pam_cracklib.so":
+		return passwordRolePolicy
+	case "pam_unix.so", "pam_sss.so", "pam_ldap.so", "pam_winbind.so", "pam_krb5.so", "pam_exec.so":
+		return passwordRoleWriter
+	case "pam_deny.so", "pam_permit.so", "pam_warn.so", "pam_debug.so", "pam_echo.so",
+		"pam_localuser.so", "pam_usertype.so", "pam_succeed_if.so":
+		return passwordRoleControl
+	default:
+		return passwordRoleUnknown
+	}
+}
+
+func hasPAMArgument(arguments []string, wanted string) bool {
+	for _, argument := range arguments {
+		if strings.EqualFold(strings.TrimSpace(argument), wanted) {
+			return true
+		}
+	}
+	return false
+}
+
+func knownPostUnixWriterUsesAuthtok(module string, arguments []string) bool {
+	switch strings.ToLower(filepath.Base(module)) {
+	case "pam_sss.so", "pam_ldap.so", "pam_winbind.so", "pam_krb5.so":
+		return hasPAMArgument(arguments, "use_authtok")
+	default:
+		return false
+	}
 }
 
 func readPWQualitySettings(ctx context.Context, environment evaluator.Environment) (map[string]configSetting, []model.Evidence, error) {

@@ -151,6 +151,77 @@ func TestEvaluatePasswordHashReturnsUnknownForConflictingPAMUnixOverrides(t *tes
 	}
 }
 
+func TestEvaluatePasswordHashRequiresReachablePAMUnix(t *testing.T) {
+	t.Parallel()
+
+	stockStack := "password requisite pam_pwquality.so\n" +
+		"password requisite pam_pwhistory.so use_authtok\n" +
+		"password sufficient pam_unix.so sha512 shadow use_authtok\n" +
+		"password [success=1 default=ignore] pam_localuser.so\n" +
+		"password sufficient pam_sss.so use_authtok\n" +
+		"password required pam_deny.so\n"
+	tests := []struct {
+		name       string
+		stack      string
+		wantStatus model.Status
+		wantText   string
+	}{
+		{
+			name:       "Rocky hardened password stack passes",
+			stack:      stockStack,
+			wantStatus: model.StatusPass,
+			wantText:   "pam_unix=SHA512",
+		},
+		{
+			name: "preceding sufficient permit is unknown",
+			stack: "password sufficient pam_permit.so\n" +
+				"password sufficient pam_unix.so sha512 shadow use_authtok\n",
+			wantStatus: model.StatusUnknown,
+			wantText:   "pam_unix.so보다 먼저 성공",
+		},
+		{
+			name: "preceding custom writer is unknown",
+			stack: "password required pam_exec.so expose_authtok /usr/local/sbin/password-writer\n" +
+				"password sufficient pam_unix.so sha512 shadow use_authtok\n",
+			wantStatus: model.StatusUnknown,
+			wantText:   "비밀번호를 변경",
+		},
+		{
+			name: "writer after non-terminal pam_unix is unknown",
+			stack: "password required pam_unix.so sha512 shadow use_authtok\n" +
+				"password required pam_exec.so expose_authtok /usr/local/sbin/password-writer\n",
+			wantStatus: model.StatusUnknown,
+			wantText:   "pam_unix.so 뒤에서 비밀번호를 다시 변경",
+		},
+		{
+			name: "custom writer after sufficient pam_unix is unknown",
+			stack: "password sufficient pam_unix.so sha512 shadow use_authtok\n" +
+				"password sufficient pam_exec.so expose_authtok /usr/local/sbin/password-writer\n",
+			wantStatus: model.StatusUnknown,
+			wantText:   "대체 경로",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			environment := evaluator.Environment{Files: newAccountFixtureReader(map[string]string{
+				"/etc/login.defs":          "ENCRYPT_METHOD SHA512\n",
+				"/etc/shadow":              "root:$6$salt$hash:20000:0:99999:7:::\n",
+				"/etc/pam.d/system-auth":   test.stack,
+				"/etc/pam.d/password-auth": test.stack,
+			})}
+			outcome := evaluatePasswordHash(context.Background(), passwordHashRule(), environment)
+			if outcome.Status != test.wantStatus {
+				t.Fatalf("status = %q, want %q; outcome = %#v", outcome.Status, test.wantStatus, outcome)
+			}
+			if !strings.Contains(outcome.Observed, test.wantText) {
+				t.Fatalf("observed = %q, want substring %q", outcome.Observed, test.wantText)
+			}
+		})
+	}
+}
+
 func TestAssessPasswordPolicyPAMFlowDoesNotIgnorePrecedingBypass(t *testing.T) {
 	t.Parallel()
 
@@ -165,7 +236,8 @@ func TestAssessPasswordPolicyPAMFlowDoesNotIgnorePrecedingBypass(t *testing.T) {
 			rules: []support.PAMRule{
 				{Path: "/etc/pam.d/system-auth", Line: 1, Type: "password", Control: "sufficient", Module: "pam_permit.so"},
 				{Path: "/etc/pam.d/system-auth", Line: 2, Type: "password", Control: "requisite", Module: "pam_pwquality.so"},
-				{Path: "/etc/pam.d/system-auth", Line: 3, Type: "password", Control: "requisite", Module: "pam_pwhistory.so"},
+				{Path: "/etc/pam.d/system-auth", Line: 3, Type: "password", Control: "requisite", Module: "pam_pwhistory.so", Args: []string{"use_authtok"}},
+				{Path: "/etc/pam.d/system-auth", Line: 4, Type: "password", Control: "sufficient", Module: "pam_unix.so", Args: []string{"use_authtok"}},
 			},
 			wantViolation: "pam_permit.so",
 		},
@@ -174,7 +246,8 @@ func TestAssessPasswordPolicyPAMFlowDoesNotIgnorePrecedingBypass(t *testing.T) {
 			rules: []support.PAMRule{
 				{Path: "/etc/pam.d/system-auth", Line: 1, Type: "password", Control: "sufficient", Module: "pam_custom.so"},
 				{Path: "/etc/pam.d/system-auth", Line: 2, Type: "password", Control: "requisite", Module: "pam_pwquality.so"},
-				{Path: "/etc/pam.d/system-auth", Line: 3, Type: "password", Control: "requisite", Module: "pam_pwhistory.so"},
+				{Path: "/etc/pam.d/system-auth", Line: 3, Type: "password", Control: "requisite", Module: "pam_pwhistory.so", Args: []string{"use_authtok"}},
+				{Path: "/etc/pam.d/system-auth", Line: 4, Type: "password", Control: "sufficient", Module: "pam_unix.so", Args: []string{"use_authtok"}},
 			},
 			wantUnknown: "pam_custom.so",
 		},
@@ -183,7 +256,8 @@ func TestAssessPasswordPolicyPAMFlowDoesNotIgnorePrecedingBypass(t *testing.T) {
 			rules: []support.PAMRule{
 				{Service: "nested-password", Path: "/etc/pam.d/nested-password", Line: 1, Type: "password", Control: "sufficient", Module: "pam_permit.so"},
 				{Service: "system-auth", Path: "/etc/pam.d/system-auth", Line: 2, Type: "password", Control: "requisite", Module: "pam_pwquality.so"},
-				{Service: "system-auth", Path: "/etc/pam.d/system-auth", Line: 3, Type: "password", Control: "requisite", Module: "pam_pwhistory.so"},
+				{Service: "system-auth", Path: "/etc/pam.d/system-auth", Line: 3, Type: "password", Control: "requisite", Module: "pam_pwhistory.so", Args: []string{"use_authtok"}},
+				{Service: "system-auth", Path: "/etc/pam.d/system-auth", Line: 4, Type: "password", Control: "sufficient", Module: "pam_unix.so", Args: []string{"use_authtok"}},
 			},
 			wantUnknown: "include/substack",
 		},
@@ -192,7 +266,8 @@ func TestAssessPasswordPolicyPAMFlowDoesNotIgnorePrecedingBypass(t *testing.T) {
 			rules: []support.PAMRule{
 				{Path: "/etc/pam.d/system-auth", Line: 1, Type: "password", Control: "requisite", Module: "pam_pwquality.so"},
 				{Path: "/etc/pam.d/system-auth", Line: 2, Type: "password", Control: "[success=1 default=ignore]", Module: "pam_succeed_if.so"},
-				{Path: "/etc/pam.d/system-auth", Line: 3, Type: "password", Control: "requisite", Module: "pam_pwhistory.so"},
+				{Path: "/etc/pam.d/system-auth", Line: 3, Type: "password", Control: "requisite", Module: "pam_pwhistory.so", Args: []string{"use_authtok"}},
+				{Path: "/etc/pam.d/system-auth", Line: 4, Type: "password", Control: "sufficient", Module: "pam_unix.so", Args: []string{"use_authtok"}},
 			},
 			wantUnknown: "pam_succeed_if.so",
 		},
@@ -200,9 +275,77 @@ func TestAssessPasswordPolicyPAMFlowDoesNotIgnorePrecedingBypass(t *testing.T) {
 			name: "standard modules before sufficient pam_unix are not bypassed",
 			rules: []support.PAMRule{
 				{Path: "/etc/pam.d/system-auth", Line: 1, Type: "password", Control: "requisite", Module: "pam_pwquality.so"},
-				{Path: "/etc/pam.d/system-auth", Line: 2, Type: "password", Control: "requisite", Module: "pam_pwhistory.so"},
-				{Path: "/etc/pam.d/system-auth", Line: 3, Type: "password", Control: "sufficient", Module: "pam_unix.so"},
+				{Path: "/etc/pam.d/system-auth", Line: 2, Type: "password", Control: "requisite", Module: "pam_pwhistory.so", Args: []string{"use_authtok"}},
+				{Path: "/etc/pam.d/system-auth", Line: 3, Type: "password", Control: "sufficient", Module: "pam_unix.so", Args: []string{"use_authtok"}},
 			},
+		},
+		{
+			name: "required pam_unix before policy modules is a violation",
+			rules: []support.PAMRule{
+				{Path: "/etc/pam.d/system-auth", Line: 1, Type: "password", Control: "required", Module: "pam_unix.so", Args: []string{"use_authtok"}},
+				{Path: "/etc/pam.d/system-auth", Line: 2, Type: "password", Control: "requisite", Module: "pam_pwquality.so"},
+				{Path: "/etc/pam.d/system-auth", Line: 3, Type: "password", Control: "requisite", Module: "pam_pwhistory.so", Args: []string{"use_authtok"}},
+			},
+			wantViolation: "pam_unix.so가 pwquality/pwhistory보다 먼저",
+		},
+		{
+			name: "Rocky hardened full password stack remains valid",
+			rules: []support.PAMRule{
+				{Path: "/etc/pam.d/system-auth", Line: 1, Type: "password", Control: "requisite", Module: "pam_pwquality.so"},
+				{Path: "/etc/pam.d/system-auth", Line: 2, Type: "password", Control: "requisite", Module: "pam_pwhistory.so", Args: []string{"use_authtok"}},
+				{Path: "/etc/pam.d/system-auth", Line: 3, Type: "password", Control: "sufficient", Module: "pam_unix.so", Args: []string{"sha512", "shadow", "use_authtok"}},
+				{Path: "/etc/pam.d/system-auth", Line: 4, Type: "password", Control: "[success=1 default=ignore]", Module: "pam_localuser.so"},
+				{Path: "/etc/pam.d/system-auth", Line: 5, Type: "password", Control: "sufficient", Module: "pam_sss.so", Args: []string{"use_authtok"}},
+				{Path: "/etc/pam.d/system-auth", Line: 6, Type: "password", Control: "required", Module: "pam_deny.so"},
+			},
+		},
+		{
+			name: "pwhistory without token handoff is unknown",
+			rules: []support.PAMRule{
+				{Path: "/etc/pam.d/system-auth", Line: 1, Type: "password", Control: "requisite", Module: "pam_pwquality.so"},
+				{Path: "/etc/pam.d/system-auth", Line: 2, Type: "password", Control: "requisite", Module: "pam_pwhistory.so"},
+				{Path: "/etc/pam.d/system-auth", Line: 3, Type: "password", Control: "sufficient", Module: "pam_unix.so", Args: []string{"use_authtok"}},
+			},
+			wantUnknown: "이전 정책 모듈의 비밀번호 토큰",
+		},
+		{
+			name: "pwhistory before pwquality is unknown",
+			rules: []support.PAMRule{
+				{Path: "/etc/pam.d/system-auth", Line: 1, Type: "password", Control: "requisite", Module: "pam_pwhistory.so", Args: []string{"use_authtok"}},
+				{Path: "/etc/pam.d/system-auth", Line: 2, Type: "password", Control: "requisite", Module: "pam_pwquality.so"},
+				{Path: "/etc/pam.d/system-auth", Line: 3, Type: "password", Control: "sufficient", Module: "pam_unix.so", Args: []string{"use_authtok"}},
+			},
+			wantUnknown: "pam_pwhistory.so가 pam_pwquality.so보다 먼저",
+		},
+		{
+			name: "writer between policies and pam_unix is unknown",
+			rules: []support.PAMRule{
+				{Path: "/etc/pam.d/system-auth", Line: 1, Type: "password", Control: "requisite", Module: "pam_pwquality.so"},
+				{Path: "/etc/pam.d/system-auth", Line: 2, Type: "password", Control: "requisite", Module: "pam_pwhistory.so", Args: []string{"use_authtok"}},
+				{Path: "/etc/pam.d/system-auth", Line: 3, Type: "password", Control: "required", Module: "pam_exec.so", Args: []string{"expose_authtok", "/usr/local/sbin/password-writer"}},
+				{Path: "/etc/pam.d/system-auth", Line: 4, Type: "password", Control: "sufficient", Module: "pam_unix.so", Args: []string{"use_authtok"}},
+			},
+			wantUnknown: "검증된 pam_unix.so보다 먼저 비밀번호를 변경",
+		},
+		{
+			name: "writer after pam_unix without token handoff is unknown",
+			rules: []support.PAMRule{
+				{Path: "/etc/pam.d/system-auth", Line: 1, Type: "password", Control: "requisite", Module: "pam_pwquality.so"},
+				{Path: "/etc/pam.d/system-auth", Line: 2, Type: "password", Control: "requisite", Module: "pam_pwhistory.so", Args: []string{"use_authtok"}},
+				{Path: "/etc/pam.d/system-auth", Line: 3, Type: "password", Control: "sufficient", Module: "pam_unix.so", Args: []string{"use_authtok"}},
+				{Path: "/etc/pam.d/system-auth", Line: 4, Type: "password", Control: "sufficient", Module: "pam_sss.so"},
+			},
+			wantUnknown: "검증되지 않은 새 비밀번호 토큰",
+		},
+		{
+			name: "unknown module after pam_unix is unknown",
+			rules: []support.PAMRule{
+				{Path: "/etc/pam.d/system-auth", Line: 1, Type: "password", Control: "requisite", Module: "pam_pwquality.so"},
+				{Path: "/etc/pam.d/system-auth", Line: 2, Type: "password", Control: "requisite", Module: "pam_pwhistory.so", Args: []string{"use_authtok"}},
+				{Path: "/etc/pam.d/system-auth", Line: 3, Type: "password", Control: "sufficient", Module: "pam_unix.so", Args: []string{"use_authtok"}},
+				{Path: "/etc/pam.d/system-auth", Line: 4, Type: "password", Control: "required", Module: "pam_custom_password.so"},
+			},
+			wantUnknown: "후속 비밀번호 변경 여부",
 		},
 	}
 	for _, test := range tests {
