@@ -29,12 +29,12 @@ func evaluateRemoteRootLogin(ctx context.Context, _ model.ResolvedRule, environm
 		}
 	}
 
-	sshActive, sshInstalled, sshEvidence, sshErr := inspectRemoteService(ctx, environment,
+	sshActive, sshInstalled, sshUnits, sshEvidence, sshErr := inspectRemoteService(ctx, environment,
 		[]string{"sshd.service", "sshd.socket"}, []string{"sshd"}, 22)
 	if sshErr != nil {
 		return checkError("ssh_target_inspection_failed", sshErr)
 	}
-	telnetActive, telnetInstalled, telnetEvidence, telnetErr := inspectRemoteService(ctx, environment,
+	telnetActive, telnetInstalled, _, telnetEvidence, telnetErr := inspectRemoteService(ctx, environment,
 		[]string{"telnet.socket", "telnet.service", "telnet@.service", "xinetd.service"},
 		[]string{"in.telnetd", "telnetd", "xinetd"}, 23)
 	if telnetErr != nil {
@@ -58,7 +58,7 @@ func evaluateRemoteRootLogin(ctx context.Context, _ model.ResolvedRule, environm
 	}
 
 	if sshActive {
-		sshOutcome := evaluateSSHRootPolicy(ctx, environment)
+		sshOutcome := evaluateSSHRootPolicy(ctx, environment, sshUnits)
 		evidence = append(evidence, sshOutcome.Evidence...)
 		if sshOutcome.Status == model.StatusFail || sshOutcome.Status == model.StatusError {
 			sshOutcome.Evidence = evidence
@@ -99,10 +99,10 @@ func inspectRemoteService(
 	units []string,
 	processNames []string,
 	port int,
-) (bool, []string, []model.Evidence, error) {
+) (bool, []string, []support.UnitState, []model.Evidence, error) {
 	states, unitEvidence, err := support.InspectUnits(ctx, environment, units)
 	if err != nil {
-		return false, nil, nil, err
+		return false, nil, nil, nil, err
 	}
 	active := false
 	installed := make([]string, 0)
@@ -114,54 +114,92 @@ func inspectRemoteService(
 	}
 	processes, processEvidence, err := support.InspectProcesses(ctx, environment, processNames)
 	if err != nil {
-		return false, nil, nil, err
+		return false, nil, nil, nil, err
 	}
 	listeners, listenerEvidence, err := support.InspectTCPListeningPorts(ctx, environment, []int{port})
 	if err != nil {
-		return false, nil, nil, err
+		return false, nil, nil, nil, err
 	}
 	active = active || len(processes) > 0 || len(listeners[port]) > 0
 	evidence := append(unitEvidence, processEvidence, listenerEvidence)
-	return active, installed, evidence, nil
+	return active, installed, states, evidence, nil
 }
 
-func evaluateSSHRootPolicy(ctx context.Context, environment evaluator.Environment) evaluator.Outcome {
-	ambiguous, unsafeMatch, configEvidence, err := inspectSSHDMatchOverrides(ctx, environment)
+func evaluateSSHRootPolicy(ctx context.Context, environment evaluator.Environment, unitStates []support.UnitState) evaluator.Outcome {
+	launchUnits, launchUnitEvidence, launchUnitUnknowns, err := resolveSSHLaunchUnits(ctx, environment, unitStates)
 	if err != nil {
-		return checkError("sshd_config_inspection_failed", err)
+		return checkError("sshd_launch_unit_inspection_failed", err)
 	}
-	evidence := append([]model.Evidence(nil), configEvidence...)
+	evidence := append([]model.Evidence(nil), launchUnitEvidence...)
+	launchProfiles := make([]sshLaunchProfile, 0, len(launchUnits))
+	launchUnknowns := append([]string(nil), launchUnitUnknowns...)
+	defaultConfigurationUsed := false
+	for _, unitName := range launchUnits {
+		profile, profileEvidence, unknownReason, profileErr := inspectSSHDLaunchProfile(ctx, environment, unitName)
+		evidence = append(evidence, profileEvidence...)
+		if profileErr != nil {
+			return checkError("sshd_launch_inspection_failed", profileErr)
+		}
+		if unknownReason != "" {
+			launchUnknowns = append(launchUnknowns, unitName+": "+unknownReason)
+			continue
+		}
+		launchProfiles = append(launchProfiles, profile)
+		defaultConfigurationUsed = defaultConfigurationUsed || !profile.CustomConfiguration
+		if profile.CustomConfiguration {
+			launchUnknowns = append(launchUnknowns, unitName+": 사용자 지정 SSH 설정의 모든 Match/Include 경로를 열거할 수 없음")
+		}
+	}
+
+	ambiguous := false
+	unsafeMatch := false
+	if defaultConfigurationUsed {
+		var configEvidence []model.Evidence
+		ambiguous, unsafeMatch, configEvidence, err = inspectSSHDMatchOverrides(ctx, environment)
+		if err != nil {
+			return checkError("sshd_config_inspection_failed", err)
+		}
+		evidence = append(evidence, configEvidence...)
+	}
 	addresses := []string{"127.0.0.1", "192.0.2.1", "::1", "2001:db8::1"}
 	host := strings.TrimSpace(environment.Platform.Hostname)
 	if host == "" || strings.ContainsAny(host, ",=\x00\r\n") {
 		host = "localhost"
 	}
 	unsafe := make([]string, 0)
-	for _, address := range addresses {
-		spec := executor.Spec{
-			Name:      "sshd",
-			Arguments: []string{"-T", "-C", "user=root,host=" + host + ",addr=" + address},
-			Timeout:   15 * time.Second,
-			MaxOutput: 2 << 20,
-		}
-		result, runErr := environment.Commands.Run(ctx, spec)
-		if runErr != nil {
-			return checkError("sshd_effective_config_failed", runErr)
-		}
-		evidence = append(evidence, support.CommandEvidence(spec, result))
-		if result.ExitCode != 0 || result.Truncated {
-			return checkError("sshd_effective_config_failed", fmt.Errorf("address %s exit=%d truncated=%t", address, result.ExitCode, result.Truncated))
-		}
-		settings, parseErr := parseSSHDTestOutput(string(result.Stdout))
-		if parseErr != nil {
-			return checkError("sshd_effective_config_parse_failed", parseErr)
-		}
-		value, exists := settings["permitrootlogin"]
-		if !exists {
-			return checkError("sshd_permit_root_login_missing", fmt.Errorf("sshd -T omitted permitrootlogin"))
-		}
-		if !strings.EqualFold(value, "no") {
-			unsafe = append(unsafe, address+"="+value)
+	for _, profile := range launchProfiles {
+		for _, address := range addresses {
+			arguments := append([]string(nil), profile.ConfigurationArguments...)
+			arguments = append(arguments, "-T", "-C", "user=root,host="+host+",addr="+address)
+			spec := executor.Spec{
+				Name:      "sshd",
+				Arguments: arguments,
+				Timeout:   15 * time.Second,
+				MaxOutput: 2 << 20,
+			}
+			result, runErr := environment.Commands.Run(ctx, spec)
+			if runErr != nil {
+				return checkError("sshd_effective_config_failed", runErr)
+			}
+			resultEvidence := support.CommandSummaryEvidence("sshd-effective-root-policy", spec, result, map[string]any{
+				"unit": profile.Unit, "address": address,
+			})
+			evidence = append(evidence, resultEvidence)
+			if result.ExitCode != 0 || result.Truncated {
+				return checkError("sshd_effective_config_failed", fmt.Errorf("unit %s address %s exit=%d truncated=%t", profile.Unit, address, result.ExitCode, result.Truncated))
+			}
+			settings, parseErr := parseSSHDTestOutput(string(result.Stdout))
+			if parseErr != nil {
+				return checkError("sshd_effective_config_parse_failed", parseErr)
+			}
+			value, exists := settings["permitrootlogin"]
+			if !exists {
+				return checkError("sshd_permit_root_login_missing", fmt.Errorf("sshd -T omitted permitrootlogin"))
+			}
+			resultEvidence.Fact["permit_root_login"] = value
+			if !strings.EqualFold(value, "no") {
+				unsafe = append(unsafe, profile.Unit+" "+address+"="+value)
+			}
 		}
 	}
 	if len(unsafe) > 0 {
@@ -173,10 +211,15 @@ func evaluateSSHRootPolicy(ctx context.Context, environment evaluator.Environmen
 			Evidence: evidence,
 		}
 	}
-	if unsafeMatch || ambiguous {
+	if unsafeMatch || ambiguous || len(launchUnknowns) > 0 || len(launchProfiles) == 0 {
 		observed := "Match 블록 또는 Include 구성을 완전히 열거할 수 없습니다."
 		if unsafeMatch {
 			observed = "Match 블록에 PermitRootLogin=no가 아닌 재정의가 있습니다."
+		} else if len(launchUnknowns) > 0 {
+			sort.Strings(launchUnknowns)
+			observed = strings.Join(uniqueSorted(launchUnknowns), "; ")
+		} else if len(launchProfiles) == 0 {
+			observed = "활성 SSH 경로의 실제 sshd 실행 구성을 확인할 수 없습니다."
 		}
 		return evaluator.Outcome{
 			Status:        model.StatusUnknown,
