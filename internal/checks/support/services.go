@@ -16,22 +16,24 @@ import (
 )
 
 type UnitState struct {
-	Name          string
-	LoadState     string
-	ActiveState   string
-	SubState      string
-	UnitFileState string
-	FragmentPath  string
-	DropInPaths   string
+	Name           string
+	InspectionName string
+	LoadState      string
+	ActiveState    string
+	SubState       string
+	UnitFileState  string
+	FragmentPath   string
+	DropInPaths    string
 }
 
 func InspectUnits(ctx context.Context, environment evaluator.Environment, units []string) ([]UnitState, []model.Evidence, error) {
 	states := make([]UnitState, 0, len(units))
-	evidence := make([]model.Evidence, 0, len(units))
+	evidence := make([]model.Evidence, 0, len(units)*2)
 	for _, unit := range units {
 		if !validUnitName(unit) {
 			return nil, nil, fmt.Errorf("invalid systemd unit name %q", unit)
 		}
+		showUnit, templatePattern := systemdUnitQuery(unit)
 		spec := executor.Spec{
 			Name: "systemctl",
 			Arguments: []string{
@@ -39,7 +41,7 @@ func InspectUnits(ctx context.Context, environment evaluator.Environment, units 
 				"--no-pager",
 				"--property=Id,LoadState,ActiveState,SubState,UnitFileState,FragmentPath,DropInPaths",
 				"--",
-				unit,
+				showUnit,
 			},
 			Timeout: 10 * time.Second,
 		}
@@ -55,13 +57,14 @@ func InspectUnits(ctx context.Context, environment evaluator.Environment, units 
 			return nil, nil, fmt.Errorf("parse systemd unit %s: %w", unit, parseErr)
 		}
 		state := UnitState{
-			Name:          firstNonEmptyString(properties["Id"], unit),
-			LoadState:     properties["LoadState"],
-			ActiveState:   properties["ActiveState"],
-			SubState:      properties["SubState"],
-			UnitFileState: properties["UnitFileState"],
-			FragmentPath:  properties["FragmentPath"],
-			DropInPaths:   properties["DropInPaths"],
+			Name:           firstNonEmptyString(properties["Id"], showUnit),
+			InspectionName: showUnit,
+			LoadState:      properties["LoadState"],
+			ActiveState:    properties["ActiveState"],
+			SubState:       properties["SubState"],
+			UnitFileState:  properties["UnitFileState"],
+			FragmentPath:   properties["FragmentPath"],
+			DropInPaths:    properties["DropInPaths"],
 		}
 		if state.LoadState == "" && result.ExitCode != 0 && strings.Contains(strings.ToLower(string(result.Stderr)), "could not be found") {
 			state.LoadState = "not-found"
@@ -72,10 +75,123 @@ func InspectUnits(ctx context.Context, environment evaluator.Environment, units 
 		if state.LoadState == "" {
 			return nil, nil, fmt.Errorf("inspect systemd unit %s: LoadState is missing", unit)
 		}
+		if templatePattern != "" {
+			state.Name = unit
+			unitFileState, installed, unitFileEvidence, listErr := inspectTemplateUnitFiles(ctx, environment, unit, templatePattern)
+			if listErr != nil {
+				return nil, nil, listErr
+			}
+			evidence = append(evidence, unitFileEvidence)
+			if installed {
+				if state.LoadState == "not-found" {
+					return nil, nil, fmt.Errorf("inspect systemd template %s: unit file exists but probe instance is not loadable", unit)
+				}
+				state.UnitFileState = unitFileState
+			}
+		}
 		states = append(states, state)
 		evidence = append(evidence, CommandEvidence(spec, result))
 	}
 	return states, evidence, nil
+}
+
+func systemdUnitQuery(unit string) (showUnit, templatePattern string) {
+	marker := strings.Index(unit, "@.")
+	if marker < 0 {
+		return unit, ""
+	}
+	prefix := unit[:marker+1]
+	suffix := unit[marker+1:]
+	return prefix + "openciip-probe" + suffix, prefix + "*" + suffix
+}
+
+func inspectTemplateUnitFiles(
+	ctx context.Context,
+	environment evaluator.Environment,
+	templateName string,
+	pattern string,
+) (string, bool, model.Evidence, error) {
+	spec := executor.Spec{
+		Name:      "systemctl",
+		Arguments: []string{"list-unit-files", "--no-pager", "--no-legend", "--", pattern},
+		Timeout:   10 * time.Second,
+		MaxOutput: 1 << 20,
+	}
+	result, err := environment.Commands.Run(ctx, spec)
+	if err != nil {
+		return "", false, model.Evidence{}, fmt.Errorf("inspect systemd template %s unit files: %w", templateName, err)
+	}
+	evidence := CommandEvidence(spec, result)
+	if result.Truncated {
+		return "", false, evidence, fmt.Errorf("inspect systemd template %s unit files: exit=%d truncated=%t", templateName, result.ExitCode, result.Truncated)
+	}
+	if result.ExitCode == 1 && len(strings.TrimSpace(string(result.Stdout))) == 0 && len(strings.TrimSpace(string(result.Stderr))) == 0 {
+		return "", false, evidence, nil
+	}
+	if result.ExitCode != 0 {
+		return "", false, evidence, fmt.Errorf("inspect systemd template %s unit files: exit=%d", templateName, result.ExitCode)
+	}
+	state, installed, parseErr := parseTemplateUnitFileState(string(result.Stdout), templateName)
+	if parseErr != nil {
+		return "", false, evidence, fmt.Errorf("parse systemd template %s unit files: %w", templateName, parseErr)
+	}
+	return state, installed, evidence, nil
+}
+
+func parseTemplateUnitFileState(output, templateName string) (string, bool, error) {
+	marker := strings.Index(templateName, "@.")
+	if marker < 0 {
+		return "", false, fmt.Errorf("unit %q is not a template", templateName)
+	}
+	prefix := templateName[:marker+1]
+	suffix := templateName[marker+1:]
+	selected := ""
+	templateState := ""
+	seen := make(map[string]struct{})
+	for lineNumber, raw := range strings.Split(strings.ReplaceAll(output, "\r\n", "\n"), "\n") {
+		line := strings.TrimSpace(raw)
+		if line == "" {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 2 || len(fields) > 3 || !validUnitName(fields[0]) ||
+			!strings.HasPrefix(fields[0], prefix) || !strings.HasSuffix(fields[0], suffix) {
+			return "", false, fmt.Errorf("line %d is not a matching unit-file record", lineNumber+1)
+		}
+		if _, duplicate := seen[fields[0]]; duplicate {
+			return "", false, fmt.Errorf("line %d repeats unit file %s", lineNumber+1, fields[0])
+		}
+		seen[fields[0]] = struct{}{}
+		state := fields[1]
+		if !canonicalUnitFileState(state) {
+			return "", false, fmt.Errorf("line %d has an invalid unit-file state", lineNumber+1)
+		}
+		if fields[0] == templateName {
+			templateState = state
+		}
+		if selected == "" || UnitEnabled(UnitState{UnitFileState: state}) {
+			selected = state
+		}
+	}
+	if len(seen) == 0 {
+		return "", false, nil
+	}
+	if !UnitEnabled(UnitState{UnitFileState: selected}) && templateState != "" {
+		selected = templateState
+	}
+	return selected, true, nil
+}
+
+func canonicalUnitFileState(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, character := range value {
+		if (character < 'a' || character > 'z') && character != '-' {
+			return false
+		}
+	}
+	return true
 }
 
 func InspectListeningPorts(ctx context.Context, environment evaluator.Environment, ports []int) (map[int][]string, model.Evidence, error) {

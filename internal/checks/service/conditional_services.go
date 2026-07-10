@@ -36,6 +36,12 @@ func evaluateDoSProneDisabled(ctx context.Context, rule model.ResolvedRule, envi
 		},
 		ports:     []int{7, 9, 13, 19},
 		processes: []string{"in.echod", "in.discardd", "in.daytimed", "in.chargend"},
+		xinetdServices: []string{
+			"echo", "echo-stream", "echo-dgram",
+			"discard", "discard-stream", "discard-dgram",
+			"daytime", "daytime-stream", "daytime-dgram",
+			"chargen", "chargen-stream", "chargen-dgram",
+		},
 	})(ctx, rule, environment)
 	if legacy.Status == model.StatusFail || legacy.Status == model.StatusError || legacy.Status == model.StatusUnknown {
 		return legacy
@@ -79,11 +85,12 @@ func evaluateNFSDisabled(ctx context.Context, rule model.ResolvedRule, environme
 	}
 	units, unitEvidence, err := support.InspectUnits(ctx, environment, []string{
 		"nfs-server.service", "nfs-mountd.service", "nfs-idmapd.service", "nfsdcld.service",
+		"nfs-ganesha.service",
 	})
 	if err != nil {
 		return serviceError("nfs_unit_inspection_failed", "NFS", err)
 	}
-	processes, processEvidence, err := support.InspectProcesses(ctx, environment, []string{"nfsd", "rpc.nfsd", "rpc.mountd"})
+	processes, processEvidence, err := support.InspectProcesses(ctx, environment, []string{"nfsd", "rpc.nfsd", "rpc.mountd", "ganesha.nfsd"})
 	if err != nil {
 		return serviceError("nfs_process_inspection_failed", "NFS", err)
 	}
@@ -95,6 +102,14 @@ func evaluateNFSDisabled(ctx context.Context, rule model.ResolvedRule, environme
 		if support.UnitActive(unit) || support.UnitEnabled(unit) {
 			activeSignals = append(activeSignals, unit.Name)
 		}
+	}
+	listeners, listenerEvidence, err := support.InspectListeningPorts(ctx, environment, []int{2049})
+	if err != nil {
+		return serviceError("nfs_listener_inspection_failed", "NFS", err)
+	}
+	evidence = append(evidence, listenerEvidence)
+	if len(listeners[2049]) > 0 {
+		activeSignals = append(activeSignals, "port 2049 listening")
 	}
 	if threads, threadEvidence, exists, readErr := readNFSDThreads(ctx, environment); readErr != nil {
 		return serviceError("nfsd_state_failed", "NFS", readErr)

@@ -21,10 +21,11 @@ const (
 )
 
 type disabledPolicy struct {
-	label     string
-	units     []string
-	ports     []int
-	processes []string
+	label          string
+	units          []string
+	ports          []int
+	processes      []string
+	xinetdServices []string
 }
 
 func Implementations() map[string]evaluator.Func {
@@ -53,16 +54,18 @@ func Implementations() map[string]evaluator.Func {
 		EvaluatorLoginWarning:             evaluateLoginWarning,
 		EvaluatorSudoersPermissions:       evaluateSudoersPermissions,
 		EvaluatorFingerDisabled: disabledEvaluator(disabledPolicy{
-			label:     "Finger",
-			units:     []string{"finger.service", "finger.socket", "finger@.service"},
-			ports:     []int{79},
-			processes: []string{"fingerd", "in.fingerd"},
+			label:          "Finger",
+			units:          []string{"finger.service", "finger.socket", "finger@.service"},
+			ports:          []int{79},
+			processes:      []string{"fingerd", "in.fingerd"},
+			xinetdServices: []string{"finger"},
 		}),
 		EvaluatorRCommandsDisabled: disabledEvaluator(disabledPolicy{
-			label:     "r 계열",
-			units:     []string{"rexec.service", "rexec.socket", "rexec@.service", "rlogin.service", "rlogin.socket", "rlogin@.service", "rsh.service", "rsh.socket", "rsh@.service"},
-			ports:     []int{512, 513, 514},
-			processes: []string{"in.rexecd", "in.rlogind", "in.rshd", "rexecd", "rlogind", "rshd"},
+			label:          "r 계열",
+			units:          []string{"rexec.service", "rexec.socket", "rexec@.service", "rlogin.service", "rlogin.socket", "rlogin@.service", "rsh.service", "rsh.socket", "rsh@.service"},
+			ports:          []int{512, 513, 514},
+			processes:      []string{"in.rexecd", "in.rlogind", "in.rshd", "rexecd", "rlogind", "rshd"},
+			xinetdServices: []string{"exec", "rexec", "login", "rlogin", "shell", "rsh"},
 		}),
 		EvaluatorNISDisabled: disabledEvaluator(disabledPolicy{
 			label:     "NIS",
@@ -70,16 +73,18 @@ func Implementations() map[string]evaluator.Func {
 			processes: []string{"ypserv", "ypbind", "ypxfrd", "rpc.yppasswdd", "rpc.ypupdated"},
 		}),
 		EvaluatorLegacyDatagramDisabled: disabledEvaluator(disabledPolicy{
-			label:     "TFTP 및 Talk",
-			units:     []string{"tftp.service", "tftp.socket", "tftp@.service", "talk.service", "talk.socket", "talk@.service", "ntalk.service", "ntalk.socket", "ntalk@.service"},
-			ports:     []int{69, 517, 518},
-			processes: []string{"in.tftpd", "tftpd", "in.talkd", "in.ntalkd", "talkd", "ntalkd"},
+			label:          "TFTP 및 Talk",
+			units:          []string{"tftp.service", "tftp.socket", "tftp@.service", "talk.service", "talk.socket", "talk@.service", "ntalk.service", "ntalk.socket", "ntalk@.service"},
+			ports:          []int{69, 517, 518},
+			processes:      []string{"in.tftpd", "tftpd", "in.talkd", "in.ntalkd", "talkd", "ntalkd"},
+			xinetdServices: []string{"tftp", "talk", "ntalk"},
 		}),
 		EvaluatorTelnetDisabled: disabledEvaluator(disabledPolicy{
-			label:     "Telnet",
-			units:     []string{"telnet.service", "telnet.socket", "telnet@.service"},
-			ports:     []int{23},
-			processes: []string{"in.telnetd", "telnetd"},
+			label:          "Telnet",
+			units:          []string{"telnet.service", "telnet.socket", "telnet@.service"},
+			ports:          []int{23},
+			processes:      []string{"in.telnetd", "telnetd"},
+			xinetdServices: []string{"telnet"},
 		}),
 		EvaluatorSNMPDisabled: disabledEvaluator(disabledPolicy{
 			label:     "SNMP",
@@ -126,6 +131,20 @@ func disabledEvaluator(policy disabledPolicy) evaluator.Func {
 				violations = append(violations, process+" process running")
 			}
 		}
+		xinetdComplete := true
+		xinetdConfigured := 0
+		if len(policy.xinetdServices) > 0 {
+			xinetd, xinetdErr := inspectXinetdServices(ctx, environment, policy.xinetdServices)
+			if xinetdErr != nil {
+				return serviceError("xinetd_configuration_inspection_failed", policy.label, xinetdErr)
+			}
+			evidence = append(evidence, xinetd.Evidence)
+			xinetdConfigured = xinetd.Configured
+			xinetdComplete = xinetd.Complete
+			if xinetd.Enabled > 0 {
+				violations = append(violations, fmt.Sprintf("xinetd target service enabled (%d)", xinetd.Enabled))
+			}
+		}
 		installed := false
 		for _, unit := range units {
 			if support.UnitInstalled(unit) {
@@ -153,6 +172,17 @@ func disabledEvaluator(policy disabledPolicy) evaluator.Func {
 				Evidence: evidence,
 			}
 		}
+		if !xinetdComplete {
+			return evaluator.Outcome{
+				Status:        model.StatusUnknown,
+				UnknownReason: model.UnknownUnsupportedConfiguration,
+				Summary:       fmt.Sprintf("%s 서비스의 xinetd 실효 비활성 상태를 확정할 수 없습니다.", policy.label),
+				Expected:      "xinetd include 그래프와 서비스별 disable 제어를 결정적으로 확인할 수 있어야 합니다.",
+				Observed:      fmt.Sprintf("xinetd target block=%d, configuration_complete=false", xinetdConfigured),
+				Evidence:      evidence,
+			}
+		}
+		installed = installed || xinetdConfigured > 0
 		if !installed {
 			return evaluator.Outcome{
 				Status:   model.StatusNotApplicable,
