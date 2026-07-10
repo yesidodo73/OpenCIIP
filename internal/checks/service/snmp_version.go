@@ -8,10 +8,12 @@ import (
 	"path"
 	"sort"
 	"strings"
+	"time"
 	"unicode"
 
 	"github.com/yesidodo73/OpenCIIP/internal/checks/support"
 	"github.com/yesidodo73/OpenCIIP/internal/evaluator"
+	"github.com/yesidodo73/OpenCIIP/internal/executor"
 	"github.com/yesidodo73/OpenCIIP/internal/model"
 	"github.com/yesidodo73/OpenCIIP/internal/system"
 )
@@ -81,12 +83,24 @@ func evaluateNetSNMPVersion(ctx context.Context, environment evaluator.Environme
 	}
 
 	graph := newSNMPAccessGraph()
-	if err := inspectSNMPConfig(ctx, environment.Files, configurationPath, make(map[string]struct{}), graph); err != nil {
+	discoveryEvidence, discoveryComplete, err := inspectNetSNMPEffectiveConfig(ctx, environment, graph)
+	evidence = append(evidence, discoveryEvidence)
+	if err != nil {
 		return snmpVersionError("snmp_config_parse_failed", err)
+	}
+	if !discoveryComplete {
+		return evaluator.Outcome{
+			Status:        model.StatusUnknown,
+			UnknownReason: model.UnknownUnsupportedConfiguration,
+			Summary:       "Net-SNMP의 전체 기본 설정 검색 경로를 결정적으로 확인할 수 없습니다.",
+			Expected:      "snmpd.conf, snmpd.local.conf와 persistent 설정의 실효 검색 경로를 모두 확인해야 합니다.",
+			Observed:      "snmpd read_config discovery incomplete",
+			Evidence:      evidence,
+		}
 	}
 	v1v2Paths, v3Paths := graph.accessPathCounts()
 	sort.Strings(graph.files)
-	evidence = append(evidence, support.FactEvidence(configurationPath, map[string]any{
+	evidence = append(evidence, support.FactEvidence(configurationPath+" 및 실효 기본 검색 경로", map[string]any{
 		"files_inspected":   graph.files,
 		"fully_interpreted": graph.complete,
 		"v1_v2c_paths":      v1v2Paths,
@@ -138,7 +152,10 @@ func snmpUsesCustomConfiguration(content string) (bool, error) {
 			return false, fmt.Errorf("line %d has invalid quoting", lineNumber+1)
 		}
 		for _, token := range tokens {
-			if token == "SNMPCONFPATH" || token == "-C" || token == "-c" || token == "-I" ||
+			if token == "SNMPCONFPATH" || strings.HasPrefix(token, "SNMPCONFPATH=") ||
+				token == "SNMP_PERSISTENT_FILE" || strings.HasPrefix(token, "SNMP_PERSISTENT_FILE=") ||
+				token == "SNMP_PERSISTENT_DIR" || strings.HasPrefix(token, "SNMP_PERSISTENT_DIR=") ||
+				token == "-C" || token == "-c" || token == "-I" || token == "-n" ||
 				(strings.HasPrefix(token, "-c") && len(token) > 2) || (strings.HasPrefix(token, "-I") && len(token) > 2) {
 				return true, nil
 			}
@@ -153,8 +170,6 @@ type snmpAccessGraph struct {
 	directV1V2        int
 	directV3          int
 	communityNames    map[string]struct{}
-	v1V2Groups        map[string]string
-	v3Groups          map[string]string
 	accessGroups      map[string]struct{}
 	weakCommunities   int
 	strongCommunities int
@@ -196,8 +211,6 @@ func newSNMPAccessGraph() *snmpAccessGraph {
 	return &snmpAccessGraph{
 		complete:        true,
 		communityNames:  make(map[string]struct{}),
-		v1V2Groups:      make(map[string]string),
-		v3Groups:        make(map[string]string),
 		accessGroups:    make(map[string]struct{}),
 		securitySources: make(map[string][]string),
 		groupMembers:    make(map[string][]snmpGroupMember),
@@ -205,20 +218,92 @@ func newSNMPAccessGraph() *snmpAccessGraph {
 	}
 }
 
+func inspectNetSNMPEffectiveConfig(ctx context.Context, environment evaluator.Environment, graph *snmpAccessGraph) (model.Evidence, bool, error) {
+	if !environment.Commands.Available("snmpd") {
+		return support.FactEvidence("snmpd configuration discovery", map[string]any{"available": false}), false, nil
+	}
+	spec := executor.Spec{Name: "snmpd", Arguments: []string{"-Dread_config", "-H"}, Timeout: 30 * time.Second, MaxOutput: 8 << 20}
+	result, err := environment.Commands.Run(ctx, spec)
+	if err != nil {
+		return model.Evidence{}, false, err
+	}
+	evidence := privateCommandSummary(spec, result)
+	if result.ExitCode != 0 || result.Truncated {
+		return evidence, false, fmt.Errorf("snmpd configuration discovery exit=%d truncated=%t", result.ExitCode, result.Truncated)
+	}
+	combined := append(append([]byte(nil), result.Stdout...), result.Stderr...)
+	directories, complete := parseNetSNMPConfigSearchDirectories(string(combined))
+	if !complete {
+		return evidence, false, nil
+	}
+	// The command runner deliberately fixes HOME=/, while the system service can
+	// start as root with a different HOME. Inspect both common root-home and
+	// persistent locations in addition to the compiled search path.
+	directories = uniqueStrings(append(directories, "/root/.snmp", "/var/lib/net-snmp", "/var/net-snmp"))
+	candidates := netSNMPConfigCandidates(directories)
+	visited := make(map[string]struct{})
+	for _, candidate := range candidates {
+		exists, statErr := environment.Files.Exists(candidate)
+		if statErr != nil {
+			return evidence, false, statErr
+		}
+		if !exists {
+			continue
+		}
+		if err := inspectSNMPConfig(ctx, environment.Files, candidate, visited, graph); err != nil {
+			return evidence, false, err
+		}
+	}
+	return evidence, true, nil
+}
+
+func parseNetSNMPConfigSearchDirectories(content string) ([]string, bool) {
+	directories := make([]string, 0)
+	found := false
+	for _, raw := range strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n") {
+		line := strings.TrimSpace(raw)
+		marker := "config path used:"
+		index := strings.Index(strings.ToLower(line), marker)
+		if index < 0 {
+			continue
+		}
+		found = true
+		for _, directory := range strings.Split(strings.TrimSpace(line[index+len(marker):]), ":") {
+			directory = strings.TrimSpace(directory)
+			if !path.IsAbs(directory) || path.Clean(directory) != directory || strings.ContainsAny(directory, "\x00\r\n") {
+				return nil, false
+			}
+			directories = append(directories, directory)
+		}
+	}
+	directories = uniqueStrings(directories)
+	return directories, found && len(directories) > 0 && len(directories) <= 64
+}
+
+func netSNMPConfigCandidates(directories []string) []string {
+	candidates := make([]string, 0, len(directories)*2)
+	for _, directory := range directories {
+		candidates = append(candidates, path.Join(directory, "snmpd.conf"), path.Join(directory, "snmpd.local.conf"))
+	}
+	return uniqueStrings(candidates)
+}
+
 func (g *snmpAccessGraph) accessPathCounts() (int, int) {
 	v1v2 := g.directV1V2
 	v3 := g.directV3
-	for group, securityName := range g.v1V2Groups {
+	for group, members := range g.groupMembers {
 		if _, hasAccess := g.accessGroups[group]; !hasAccess {
 			continue
 		}
-		if _, hasCommunitySource := g.communityNames[securityName]; hasCommunitySource {
-			v1v2++
-		}
-	}
-	for group := range g.v3Groups {
-		if _, hasAccess := g.accessGroups[group]; hasAccess {
-			v3++
+		for _, member := range members {
+			switch member.Model {
+			case "v1", "v2c":
+				if _, hasCommunitySource := g.communityNames[member.Security]; hasCommunitySource {
+					v1v2++
+				}
+			case "usm":
+				v3++
+			}
 		}
 	}
 	return v1v2, v3
@@ -325,9 +410,7 @@ func inspectSNMPConfig(
 			}
 			switch strings.ToLower(fields[2]) {
 			case "v1", "v2c":
-				graph.v1V2Groups[fields[1]] = fields[3]
 			case "usm":
-				graph.v3Groups[fields[1]] = fields[3]
 			default:
 				graph.complete = false
 			}

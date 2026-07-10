@@ -150,6 +150,9 @@ func evaluateSNMPAccessControl(ctx context.Context, rule model.ResolvedRule, env
 		} else if !viewPolicy[principal.View] {
 			outsidePolicy++
 		}
+		if !snmpViewPolicySelfDescribing(principal.View) {
+			unknownPolicy++
+		}
 		if principal.Write {
 			writeCount++
 			if !writersSet {
@@ -172,6 +175,9 @@ func evaluateSNMPAccessControl(ctx context.Context, rule model.ResolvedRule, env
 			unknownPolicy++
 		} else if !viewPolicy[principal.View] {
 			outsidePolicy++
+		}
+		if !snmpViewPolicySelfDescribing(principal.View) {
+			unknownPolicy++
 		}
 		if principal.Write {
 			writeCount++
@@ -198,6 +204,11 @@ func evaluateSNMPAccessControl(ctx context.Context, rule model.ResolvedRule, env
 		return evaluator.Outcome{Status: model.StatusUnknown, UnknownReason: model.UnknownManualVerification, Summary: "SNMP VACM 경로를 승인 source/user/view 정책과 완전히 대조할 수 없습니다.", Expected: "approved_snmp_sources/users/views와 쓰기 principal 정책이 필요합니다.", Observed: fmt.Sprintf("확정 불가 mapping/policy 조건 %d건", unknownPolicy), Evidence: evidence}
 	}
 	return evaluator.Outcome{Status: model.StatusPass, Summary: "SNMP 접근 경로가 승인 source/user와 view로 제한되어 있습니다.", Expected: "모든 접근 principal과 view가 승인 정책의 부분집합이어야 합니다.", Observed: fmt.Sprintf("community 경로 %d개, v3 경로 %d개", len(communityPrincipals), len(userPrincipals)), Evidence: evidence}
+}
+
+func snmpViewPolicySelfDescribing(view string) bool {
+	view = strings.TrimSpace(view)
+	return view == "full" || strings.HasPrefix(view, "oid:")
 }
 
 func collectNetSNMPAccess(ctx context.Context, environment evaluator.Environment) (*snmpAccessGraph, []model.Evidence, *evaluator.Outcome) {
@@ -227,15 +238,21 @@ func collectNetSNMPAccess(ctx context.Context, environment evaluator.Environment
 		}
 	}
 	graph := newSNMPAccessGraph()
-	if err := inspectSNMPConfig(ctx, environment.Files, "/etc/snmp/snmpd.conf", make(map[string]struct{}), graph); err != nil {
+	discoveryEvidence, discoveryComplete, err := inspectNetSNMPEffectiveConfig(ctx, environment, graph)
+	evidence = append(evidence, discoveryEvidence)
+	if err != nil {
 		outcome := snmpPolicyError("snmp_config_parse_failed", err, evidence)
+		return nil, nil, &outcome
+	}
+	if !discoveryComplete {
+		outcome := evaluator.Outcome{Status: model.StatusUnknown, UnknownReason: model.UnknownUnsupportedConfiguration, Summary: "Net-SNMP의 전체 기본 설정 검색 경로를 결정적으로 확인할 수 없습니다.", Expected: "snmpd.conf, snmpd.local.conf와 persistent 설정의 모든 접근 경로를 확인해야 합니다.", Observed: "snmpd read_config discovery incomplete", Evidence: evidence}
 		return nil, nil, &outcome
 	}
 	if !graph.complete {
 		outcome := evaluator.Outcome{Status: model.StatusUnknown, UnknownReason: model.UnknownUnsupportedConfiguration, Summary: "Net-SNMP include 또는 동적 VACM 구성을 완전히 해석할 수 없습니다.", Expected: "모든 접근 설정 파일과 VACM 경로를 확인할 수 있어야 합니다.", Observed: "지원하지 않는 include 또는 access 모듈", Evidence: evidence}
 		return nil, nil, &outcome
 	}
-	evidence = append(evidence, support.FactEvidence("/etc/snmp/snmpd.conf", map[string]any{
+	evidence = append(evidence, support.FactEvidence("Net-SNMP 실효 기본 설정", map[string]any{
 		"files_inspected_count": len(graph.files), "community_access_count": len(graph.communityAccess),
 		"user_access_count": len(graph.userAccess), "vacm_access_count": len(graph.accessRules), "values_redacted": true,
 	}))

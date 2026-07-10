@@ -26,7 +26,7 @@ type effectiveNFSExport struct {
 
 func evaluateNFSAccessControl(ctx context.Context, rule model.ResolvedRule, environment evaluator.Environment) evaluator.Outcome {
 	if !environment.Commands.Available("exportfs") {
-		return evaluator.Outcome{Status: model.StatusNotApplicable, Summary: "NFS export 관리 도구가 없어 적용 가능한 NFS 서버 구성을 확인하지 못했습니다.", Expected: "활성 NFS export에만 접근 통제 기준을 적용합니다.", Observed: "exportfs 없음"}
+		return evaluator.Outcome{Status: model.StatusUnknown, UnknownReason: model.UnknownUnsupportedConfiguration, Summary: "NFS export 관리 도구가 없어 활성 export 유무를 확정할 수 없습니다.", Expected: "활성 NFS export와 접근 통제 설정을 결정적으로 확인할 수 있어야 합니다.", Observed: "exportfs 없음"}
 	}
 	spec := executor.Spec{Name: "exportfs", Arguments: []string{"-v"}, Timeout: 20 * time.Second, MaxOutput: 4 << 20}
 	result, err := environment.Commands.Run(ctx, spec)

@@ -283,7 +283,7 @@ func sambaBoolean(value string) (bool, bool) {
 func inspectAnonymousNFS(ctx context.Context, rule model.ResolvedRule, environment evaluator.Environment) warningFinding {
 	finding := warningFinding{Endpoint: "nfs"}
 	if !environment.Commands.Available("exportfs") {
-		finding.State, finding.Reason = "not_applicable", "exportfs 없음"
+		finding.State, finding.Reason = "unknown", "exportfs가 없어 NFS export 부재를 확정할 수 없음"
 		return finding
 	}
 	spec := executor.Spec{Name: "exportfs", Arguments: []string{"-v"}, Timeout: 20 * time.Second, MaxOutput: 4 << 20}
@@ -351,6 +351,9 @@ func inspectAnonymousNFS(ctx context.Context, rule model.ResolvedRule, environme
 				outsidePolicy++
 			}
 		}
+		if !nfsSquashPolicyExplicitlyKnown(export.Options) {
+			unknown++
+		}
 	}
 	finding.Evidence = append(finding.Evidence, support.FactEvidence("nfs-anonymous-summary", map[string]any{
 		"export_count": len(exports), "unrestricted_or_sec_none_count": unsafe, "outside_policy_count": outsidePolicy,
@@ -366,6 +369,23 @@ func inspectAnonymousNFS(ctx context.Context, rule model.ResolvedRule, environme
 	}
 	finding.State, finding.Reason = "pass", "모든 NFS export가 승인 client와 security flavor로 제한됨"
 	return finding
+}
+
+func nfsSquashPolicyExplicitlyKnown(options map[string]string) bool {
+	if _, disabled := options["no_root_squash"]; disabled {
+		return false
+	}
+	if _, all := options["all_squash"]; all {
+		return false
+	}
+	if _, customUID := options["anonuid"]; customUID {
+		return false
+	}
+	if _, customGID := options["anongid"]; customGID {
+		return false
+	}
+	_, explicitRootSquash := options["root_squash"]
+	return explicitRootSquash
 }
 
 func anonymousFindingReasons(findings []warningFinding, state string) string {
