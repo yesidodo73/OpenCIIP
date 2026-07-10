@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -87,22 +88,123 @@ func evaluateLockoutThreshold(ctx context.Context, rule model.ResolvedRule, envi
 		return checkError("faillock_config_failed", err)
 	}
 	evidence = append(evidence, denyEvidence)
-	if deny < 1 || deny > 10 {
+	pamStacks, pamEvidence, err := readPolicyPAMStacks(ctx, environment, "system-auth", "password-auth")
+	if err != nil {
+		return checkError("pam_faillock_stack_failed", err)
+	}
+	evidence = append(evidence, pamEvidence...)
+
+	violations := make([]string, 0)
+	unknowns := make([]string, 0)
+	effective := make([]string, 0)
+	for _, stack := range []string{"system-auth", "password-auth"} {
+		stackEffective, stackViolations, stackUnknowns := inspectFaillockDenyOverrides(stack, pamStacks[stack], deny, source)
+		effective = append(effective, stackEffective...)
+		violations = append(violations, stackViolations...)
+		unknowns = append(unknowns, stackUnknowns...)
+	}
+	if len(violations) > 0 {
+		sort.Strings(violations)
 		return evaluator.Outcome{
 			Status:   model.StatusFail,
 			Summary:  "계정 잠금 임계값이 가이드 기준을 충족하지 않습니다.",
 			Expected: "실패 횟수 deny가 1회 이상 10회 이하여야 합니다.",
-			Observed: fmt.Sprintf("deny=%d (%s)", deny, source),
+			Observed: strings.Join(uniqueSorted(violations), "; "),
 			Evidence: evidence,
 		}
 	}
+	if len(unknowns) > 0 {
+		sort.Strings(unknowns)
+		return evaluator.Outcome{
+			Status:        model.StatusUnknown,
+			UnknownReason: model.UnknownUnsupportedConfiguration,
+			Summary:       "PAM 계정 잠금 임계값의 실효 설정을 확정할 수 없습니다.",
+			Expected:      "유효 PAM 스택의 모든 pam_faillock.so deny 설정을 해석할 수 있어야 합니다.",
+			Observed:      strings.Join(uniqueSorted(unknowns), "; "),
+			Evidence:      evidence,
+		}
+	}
+	sort.Strings(effective)
 	return evaluator.Outcome{
 		Status:   model.StatusPass,
 		Summary:  "계정 잠금 임계값이 가이드 기준을 충족합니다.",
 		Expected: "실패 횟수 deny가 1회 이상 10회 이하여야 합니다.",
-		Observed: fmt.Sprintf("deny=%d (%s)", deny, source),
+		Observed: strings.Join(uniqueSorted(effective), "; "),
 		Evidence: evidence,
 	}
+}
+
+func readPolicyPAMStacks(ctx context.Context, environment evaluator.Environment, names ...string) (map[string][]support.PAMRule, []model.Evidence, error) {
+	stacks := make(map[string][]support.PAMRule, len(names))
+	evidence := make([]model.Evidence, 0, len(names))
+	for _, name := range names {
+		rules, stackEvidence, err := support.ReadPAMService(ctx, environment.Files, name)
+		if err != nil {
+			return nil, nil, fmt.Errorf("read PAM stack %s: %w", name, err)
+		}
+		stacks[name] = rules
+		evidence = append(evidence, stackEvidence...)
+	}
+	return stacks, evidence, nil
+}
+
+func inspectFaillockDenyOverrides(stack string, rules []support.PAMRule, configuredDeny int, configuredSource string) ([]string, []string, []string) {
+	effective := make([]string, 0)
+	violations := make([]string, 0)
+	unknowns := make([]string, 0)
+	authModuleFound := false
+	for _, rule := range rules {
+		if filepath.Base(rule.Module) != "pam_faillock.so" || (rule.Type != "auth" && rule.Type != "account") {
+			continue
+		}
+		if rule.Type == "auth" {
+			authModuleFound = true
+		}
+		deny := configuredDeny
+		source := configuredSource
+		overrideFound := false
+		ambiguous := false
+		for _, argument := range rule.Args {
+			key, value, hasValue := strings.Cut(argument, "=")
+			switch strings.ToLower(strings.TrimSpace(key)) {
+			case "conf":
+				unknowns = append(unknowns, fmt.Sprintf("%s %s:%d pam_faillock conf 대체 경로", stack, rule.Path, rule.Line))
+				ambiguous = true
+			case "deny":
+				if !hasValue || strings.TrimSpace(value) == "" {
+					unknowns = append(unknowns, fmt.Sprintf("%s %s:%d pam_faillock deny 값 없음", stack, rule.Path, rule.Line))
+					ambiguous = true
+					continue
+				}
+				parsed, err := strconv.Atoi(strings.TrimSpace(value))
+				if err != nil {
+					unknowns = append(unknowns, fmt.Sprintf("%s %s:%d pam_faillock deny 해석 불가", stack, rule.Path, rule.Line))
+					ambiguous = true
+					continue
+				}
+				if overrideFound && parsed != deny {
+					unknowns = append(unknowns, fmt.Sprintf("%s %s:%d pam_faillock deny 중복 충돌", stack, rule.Path, rule.Line))
+					ambiguous = true
+					continue
+				}
+				deny = parsed
+				source = fmt.Sprintf("%s:%d PAM 재정의", rule.Path, rule.Line)
+				overrideFound = true
+			}
+		}
+		if ambiguous {
+			continue
+		}
+		description := fmt.Sprintf("%s deny=%d (%s)", stack, deny, source)
+		effective = append(effective, description)
+		if deny < 1 || deny > 10 {
+			violations = append(violations, description)
+		}
+	}
+	if !authModuleFound {
+		unknowns = append(unknowns, stack+"에 auth pam_faillock.so가 없음")
+	}
+	return effective, violations, unknowns
 }
 
 func readFaillockDeny(ctx context.Context, environment evaluator.Environment, defaultValue int, hasDefault bool) (int, string, model.Evidence, error) {
@@ -175,22 +277,18 @@ func evaluatePasswordHash(ctx context.Context, rule model.ResolvedRule, environm
 	if err != nil {
 		return checkError("shadow_read_failed", err)
 	}
+	pamStacks, pamEvidence, err := readPolicyPAMStacks(ctx, environment, "system-auth", "password-auth")
+	if err != nil {
+		return checkError("pam_password_hash_stack_failed", err)
+	}
 	evidence := []model.Evidence{loginEvidence, shadowEvidence}
+	evidence = append(evidence, pamEvidence...)
 	activeAlgorithms := make(map[string][]string)
 	for name, entry := range shadow {
 		if entry.State != "active" {
 			continue
 		}
 		activeAlgorithms[entry.Algorithm] = append(activeAlgorithms[entry.Algorithm], name)
-	}
-	if len(activeAlgorithms) == 0 {
-		return evaluator.Outcome{
-			Status:   model.StatusNotApplicable,
-			Summary:  "활성 상태의 로컬 비밀번호 해시가 없습니다.",
-			Expected: "활성 로컬 비밀번호 해시는 SHA-2 이상의 알고리즘을 사용해야 합니다.",
-			Observed: fmt.Sprintf("ENCRYPT_METHOD=%s line=%d", method, line),
-			Evidence: evidence,
-		}
 	}
 	unsafe := make([]string, 0)
 	unknown := make([]string, 0)
@@ -211,6 +309,13 @@ func evaluatePasswordHash(ctx context.Context, rule model.ResolvedRule, environm
 		unsafe = append(unsafe, "ENCRYPT_METHOD="+method)
 	} else if !methodSafe {
 		unknown = append(unknown, "ENCRYPT_METHOD="+method)
+	}
+	effectiveMethods := []string{fmt.Sprintf("ENCRYPT_METHOD=%s line=%d", method, line)}
+	for _, stack := range []string{"system-auth", "password-auth"} {
+		stackMethods, stackUnsafe, stackUnknown := inspectPAMUnixHashMethods(stack, pamStacks[stack], method, safeMethods)
+		effectiveMethods = append(effectiveMethods, stackMethods...)
+		unsafe = append(unsafe, stackUnsafe...)
+		unknown = append(unknown, stackUnknown...)
 	}
 	sort.Strings(unsafe)
 	sort.Strings(unknown)
@@ -233,13 +338,101 @@ func evaluatePasswordHash(ctx context.Context, rule model.ResolvedRule, environm
 			Evidence:      evidence,
 		}
 	}
+	if len(activeAlgorithms) == 0 {
+		sort.Strings(effectiveMethods)
+		return evaluator.Outcome{
+			Status:   model.StatusNotApplicable,
+			Summary:  "신규 비밀번호 해시 정책은 안전하지만 활성 상태의 로컬 비밀번호 해시가 없습니다.",
+			Expected: "신규 정책과 기존 활성 해시가 SHA-2 이상의 알고리즘을 사용해야 합니다.",
+			Observed: strings.Join(uniqueSorted(effectiveMethods), "; "),
+			Evidence: evidence,
+		}
+	}
+	sort.Strings(effectiveMethods)
 	return evaluator.Outcome{
 		Status:   model.StatusPass,
 		Summary:  "비밀번호 암호화 알고리즘이 가이드 기준을 충족합니다.",
 		Expected: "신규 정책과 기존 활성 해시가 SHA-2 이상의 알고리즘을 사용해야 합니다.",
-		Observed: "ENCRYPT_METHOD=" + method + ", 활성 해시 알고리즘이 모두 허용 목록에 포함됩니다.",
+		Observed: strings.Join(uniqueSorted(effectiveMethods), "; ") + "; 활성 해시 알고리즘이 모두 허용 목록에 포함됩니다.",
 		Evidence: evidence,
 	}
+}
+
+func inspectPAMUnixHashMethods(stack string, rules []support.PAMRule, fallbackMethod string, safeMethods []string) ([]string, []string, []string) {
+	matches := make([]support.PAMRule, 0, 1)
+	for _, rule := range rules {
+		if rule.Type == "password" && filepath.Base(rule.Module) == "pam_unix.so" {
+			matches = append(matches, rule)
+		}
+	}
+	if len(matches) == 0 {
+		return nil, nil, []string{stack + "에 password pam_unix.so가 없음"}
+	}
+
+	effective := make([]string, 0, len(matches))
+	unsafe := make([]string, 0)
+	unknown := make([]string, 0)
+	if len(matches) > 1 {
+		unknown = append(unknown, stack+"의 password pam_unix.so 적용 경로가 여러 개임")
+	}
+	for _, rule := range matches {
+		control := strings.ToLower(strings.TrimSpace(rule.Control))
+		if control != "required" && control != "requisite" && control != "sufficient" {
+			unknown = append(unknown, fmt.Sprintf("%s %s:%d pam_unix PAM 제어 흐름을 확정할 수 없음", stack, rule.Path, rule.Line))
+		}
+		method, overridden, err := pamUnixHashMethod(rule.Args, fallbackMethod)
+		if err != nil {
+			unknown = append(unknown, fmt.Sprintf("%s %s:%d pam_unix 해시 대체 설정을 해석할 수 없음", stack, rule.Path, rule.Line))
+			continue
+		}
+		source := "login.defs"
+		if overridden {
+			source = fmt.Sprintf("%s:%d PAM 재정의", rule.Path, rule.Line)
+		}
+		description := fmt.Sprintf("%s pam_unix=%s (%s)", stack, method, source)
+		effective = append(effective, description)
+		if containsFold(safeMethods, method) {
+			continue
+		}
+		if isKnownWeakMethod(method) {
+			unsafe = append(unsafe, description)
+		} else {
+			unknown = append(unknown, description)
+		}
+	}
+	return effective, unsafe, unknown
+}
+
+func pamUnixHashMethod(arguments []string, fallbackMethod string) (string, bool, error) {
+	knownMethods := map[string]string{
+		"des":           "DES",
+		"md5":           "MD5",
+		"bigcrypt":      "BIGCRYPT",
+		"sha256":        "SHA256",
+		"sha512":        "SHA512",
+		"blowfish":      "BLOWFISH",
+		"yescrypt":      "YESCRYPT",
+		"gost_yescrypt": "GOST_YESCRYPT",
+	}
+	selected := ""
+	for _, argument := range arguments {
+		normalized := strings.ToLower(strings.TrimSpace(argument))
+		if method, exists := knownMethods[normalized]; exists {
+			if selected != "" && selected != method {
+				return "", false, fmt.Errorf("multiple password hash methods")
+			}
+			selected = method
+			continue
+		}
+		key, _, hasValue := strings.Cut(normalized, "=")
+		if hasValue && (key == "crypt_style" || key == "hash" || key == "algorithm") {
+			return "", false, fmt.Errorf("unsupported password hash selector")
+		}
+	}
+	if selected == "" {
+		return strings.ToUpper(strings.TrimSpace(fallbackMethod)), false, nil
+	}
+	return selected, true, nil
 }
 
 func readLoginDefsMethod(ctx context.Context, environment evaluator.Environment) (string, int, model.Evidence, error) {
@@ -308,7 +501,7 @@ func isKnownWeakHash(algorithm string) bool {
 
 func isKnownWeakMethod(method string) bool {
 	switch strings.ToUpper(method) {
-	case "DES", "MD5", "BLOWFISH":
+	case "DES", "MD5", "BIGCRYPT", "BLOWFISH":
 		return true
 	default:
 		return false

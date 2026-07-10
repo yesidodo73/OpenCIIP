@@ -115,6 +115,10 @@ func evaluatePasswordPolicy(ctx context.Context, rule model.ResolvedRule, enviro
 		violations = append(violations, "authselect with-pwhistory 기능이 활성화되지 않음")
 	}
 	for stack, rules := range pamRules {
+		flowViolations, flowUnknowns := assessPasswordPolicyPAMFlow(stack, rules)
+		violations = append(violations, flowViolations...)
+		unknowns = append(unknowns, flowUnknowns...)
+
 		qualityRule, state := singlePasswordModule(rules, "pam_pwquality.so")
 		switch state {
 		case moduleMissing:
@@ -258,6 +262,57 @@ func evaluatePasswordPolicy(ctx context.Context, rule model.ResolvedRule, enviro
 		Observed: "pwquality, pwhistory, login.defs와 기존 로컬 계정의 사용 기간이 기준을 충족합니다.",
 		Evidence: evidence,
 	}
+}
+
+func assessPasswordPolicyPAMFlow(stack string, rules []support.PAMRule) ([]string, []string) {
+	violations := make([]string, 0)
+	unknowns := make([]string, 0)
+	qualitySeen := false
+	historySeen := false
+	for _, rule := range rules {
+		if rule.Type != "password" {
+			continue
+		}
+		module := strings.ToLower(filepath.Base(rule.Module))
+		switch module {
+		case "pam_pwquality.so":
+			qualitySeen = true
+			continue
+		case "pam_pwhistory.so":
+			historySeen = true
+			continue
+		}
+		if qualitySeen && historySeen {
+			continue
+		}
+		control := strings.ToLower(strings.TrimSpace(rule.Control))
+		description := fmt.Sprintf("%s %s:%d %s control=%s", stack, rule.Path, rule.Line, module, rule.Control)
+		if strings.HasPrefix(control, "[") {
+			unknowns = append(unknowns, description+"이 뒤의 비밀번호 정책 모듈을 건너뛸 수 있음")
+			continue
+		}
+		if control != "sufficient" {
+			if control != "required" && control != "requisite" && control != "optional" {
+				unknowns = append(unknowns, description+"의 PAM 제어 흐름을 확정할 수 없음")
+			}
+			continue
+		}
+		switch module {
+		case "pam_permit.so":
+			if rule.Service == "" || rule.Service == stack {
+				violations = append(violations, description+"이 뒤의 비밀번호 정책 모듈을 우회함")
+			} else {
+				unknowns = append(unknowns, description+"의 include/substack 반환 범위를 확정할 수 없음")
+			}
+		case "pam_rootok.so":
+			violations = append(violations, description+"이 root 비밀번호 정책을 우회함")
+		case "pam_deny.so":
+			// pam_deny cannot produce the successful result required by sufficient.
+		default:
+			unknowns = append(unknowns, description+"이 뒤의 비밀번호 정책 모듈을 우회할 수 있음")
+		}
+	}
+	return violations, unknowns
 }
 
 func readPWQualitySettings(ctx context.Context, environment evaluator.Environment) (map[string]configSetting, []model.Evidence, error) {
