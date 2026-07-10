@@ -11,7 +11,7 @@ recipes:
       environments:
         - Rocky Linux 9.8
     risk: CAUTION
-    expected_impact: "/etc/hosts의 내용, inode, GID, 확장 속성, ACL, SELinux context와 이미 더 엄격한 권한을 보존하고, 필요한 경우에만 소유자를 root로 바꾸고 0644에서 허용하지 않는 권한 비트를 제거합니다."
+    expected_impact: "/etc/hosts의 내용, inode, GID, SELinux context와 이미 더 엄격한 권한을 보존하고, 필요한 경우에만 소유자를 root로 바꾸고 0644에서 허용하지 않는 권한 비트를 제거합니다. POSIX ACL 또는 SELinux 이외 확장 속성이 있으면 계획에서 제외합니다."
     operations:
       - type: preserve_content_file_metadata
         path: /etc/hosts
@@ -29,7 +29,7 @@ recipes:
       environments:
         - Rocky Linux 9.8
     risk: CAUTION
-    expected_impact: "/etc/services의 내용, inode, GID, 확장 속성, ACL, SELinux context와 root/bin/sys 중 현재 허용 소유자 및 이미 더 엄격한 권한을 보존하고, 필요한 경우에만 소유자를 root로 바꾸고 0644에서 허용하지 않는 권한 비트를 제거합니다."
+    expected_impact: "/etc/services의 내용, inode, GID, SELinux context와 root/bin/sys 중 현재 허용 소유자 및 이미 더 엄격한 권한을 보존하고, 필요한 경우에만 소유자를 root로 바꾸고 0644에서 허용하지 않는 권한 비트를 제거합니다. POSIX ACL 또는 SELinux 이외 확장 속성이 있으면 계획에서 제외합니다."
     operations:
       - type: preserve_content_file_metadata
         path: /etc/services
@@ -47,7 +47,7 @@ recipes:
       environments:
         - Rocky Linux 9.8
     risk: CAUTION
-    expected_impact: "/etc/hosts.lpd의 내용, inode, GID, 확장 속성, ACL, SELinux context와 이미 더 엄격한 권한을 보존하고, 필요한 경우에만 소유자를 root로 바꾸고 0600에서 허용하지 않는 권한 비트를 제거합니다."
+    expected_impact: "/etc/hosts.lpd의 내용, inode, GID, SELinux context와 이미 더 엄격한 권한을 보존하고, 필요한 경우에만 소유자를 root로 바꾸고 0600에서 허용하지 않는 권한 비트를 제거합니다. POSIX ACL 또는 SELinux 이외 확장 속성이 있으면 계획에서 제외합니다."
     operations:
       - type: preserve_content_file_metadata
         path: /etc/hosts.lpd
