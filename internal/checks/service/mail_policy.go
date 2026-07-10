@@ -129,13 +129,8 @@ func evaluateMailRelay(ctx context.Context, rule model.ResolvedRule, environment
 	}
 	relayTokens := restrictionTokens(settings["smtpd_relay_restrictions"])
 	recipientTokens := restrictionTokens(settings["smtpd_recipient_restrictions"])
-	unsafe := make([]string, 0)
-	if permitBeforeRelayReject(relayTokens) || (len(relayTokens) == 0 && permitBeforeRelayReject(recipientTokens)) {
-		unsafe = append(unsafe, "unauth destination 거부 전에 무조건 permit")
-	}
-	if !containsRelayReject(relayTokens) && !containsRelayReject(recipientTokens) {
-		unsafe = append(unsafe, "reject/defer_unauth_destination 없음")
-	}
+	restrictionAssessment := assessPostfixRelayRestrictions(relayTokens, recipientTokens)
+	unsafe := append([]string(nil), restrictionAssessment.unsafe...)
 	networks := listParameterValues(settings["mynetworks"])
 	for _, network := range networks {
 		normalized := strings.ToLower(network)
@@ -150,6 +145,10 @@ func evaluateMailRelay(ctx context.Context, rule model.ResolvedRule, environment
 		}
 	}
 	unsafe = uniqueStrings(unsafe)
+	evidence = append(evidence, support.FactEvidence("Postfix relay restriction 파생 정보", map[string]any{
+		"relay_restriction_count": len(relayTokens), "recipient_restriction_count": len(recipientTokens),
+		"unsafe_count": len(unsafe), "indeterminate_count": len(restrictionAssessment.indeterminate), "content_redacted": true,
+	}))
 	if len(unsafe) > 0 {
 		return evaluator.Outcome{Status: model.StatusFail, Summary: "Postfix relay 제한에 명백한 open relay 구성이 있습니다.", Expected: "인증 또는 승인 네트워크·도메인만 relay하고 나머지는 unauth destination으로 거부해야 합니다.", Observed: strings.Join(unsafe, "; "), Evidence: evidence}
 	}
@@ -186,6 +185,9 @@ func evaluateMailRelay(ctx context.Context, rule model.ResolvedRule, environment
 	if len(outside) > 0 {
 		return evaluator.Outcome{Status: model.StatusFail, Summary: "Postfix relay 범위가 승인 정책보다 넓습니다.", Expected: "실효 relay client와 domain이 승인 목록의 부분집합이어야 합니다.", Observed: strings.Join(uniqueStrings(outside), "; "), Evidence: evidence}
 	}
+	if len(restrictionAssessment.indeterminate) > 0 {
+		return evaluator.Outcome{Status: model.StatusUnknown, UnknownReason: model.UnknownUnsupportedConfiguration, Summary: "Postfix unauth destination 거부 전에 실행되는 restriction의 허용 동작을 결정적으로 해석할 수 없습니다.", Expected: "승인 범위 외 relay가 access map이나 사용자 정의 restriction보다 먼저 또는 그 결과와 관계없이 거부됨을 증명해야 합니다.", Observed: strings.Join(restrictionAssessment.indeterminate, "; "), Evidence: evidence}
+	}
 	return evaluator.Outcome{Status: model.StatusPass, Summary: "Postfix relay가 인증 또는 승인된 client·domain으로 제한되어 있습니다.", Expected: "승인 범위 외 relay가 unauth destination으로 거부되어야 합니다.", Observed: fmt.Sprintf("승인 client %d개와 domain %d개를 대조했습니다.", len(networks), len(domains)), Evidence: evidence}
 }
 
@@ -216,25 +218,56 @@ func restrictionTokens(value string) []string {
 	})
 }
 
-func containsRelayReject(tokens []string) bool {
-	for _, token := range tokens {
-		if token == "reject_unauth_destination" || token == "defer_unauth_destination" {
-			return true
-		}
-	}
-	return false
+type postfixRelayRestrictionAssessment struct {
+	unsafe        []string
+	indeterminate []string
 }
 
-func permitBeforeRelayReject(tokens []string) bool {
-	for _, token := range tokens {
-		switch token {
-		case "reject_unauth_destination", "defer_unauth_destination":
-			return false
-		case "permit":
-			return true
+func assessPostfixRelayRestrictions(relayTokens, recipientTokens []string) postfixRelayRestrictionAssessment {
+	assessment := postfixRelayRestrictionAssessment{}
+	if relayGuard := postfixRelayGuardIndex(relayTokens); relayGuard >= 0 {
+		assessment.addPrefix(relayTokens[:relayGuard])
+		return assessment.normalized()
+	}
+	assessment.addPrefix(relayTokens)
+	if recipientGuard := postfixRelayGuardIndex(recipientTokens); recipientGuard >= 0 {
+		assessment.addPrefix(recipientTokens[:recipientGuard])
+		return assessment.normalized()
+	}
+	assessment.unsafe = append(assessment.unsafe, "reject/defer_unauth_destination 없음")
+	return assessment.normalized()
+}
+
+func postfixRelayGuardIndex(tokens []string) int {
+	for index, token := range tokens {
+		if token == "reject_unauth_destination" || token == "defer_unauth_destination" {
+			return index
 		}
 	}
-	return false
+	return -1
+}
+
+func (assessment *postfixRelayRestrictionAssessment) addPrefix(tokens []string) {
+	for _, token := range tokens {
+		switch {
+		case token == "permit":
+			assessment.unsafe = append(assessment.unsafe, "unauth destination 거부 전에 무조건 permit")
+		case token == "permit_mynetworks", token == "permit_sasl_authenticated", token == "permit_auth_destination":
+			// These permits are bounded by values evaluated separately below.
+		case token == "reject", token == "defer", token == "dunno", token == "defer_if_permit", token == "defer_if_reject":
+			// These tokens cannot grant relay permission by themselves.
+		case strings.HasPrefix(token, "reject_"), strings.HasPrefix(token, "defer_"):
+			// Reject and defer restrictions cannot grant relay permission by themselves.
+		default:
+			assessment.indeterminate = append(assessment.indeterminate, "unauth destination 거부 전 사용자 정의·lookup restriction 동작 미확정")
+		}
+	}
+}
+
+func (assessment postfixRelayRestrictionAssessment) normalized() postfixRelayRestrictionAssessment {
+	assessment.unsafe = uniqueStrings(assessment.unsafe)
+	assessment.indeterminate = uniqueStrings(assessment.indeterminate)
+	return assessment
 }
 
 func listParameterValues(value string) []string {

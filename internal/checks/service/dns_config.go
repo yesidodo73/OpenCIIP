@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"fmt"
+	"path"
 	"strings"
 	"time"
 	"unicode"
@@ -59,7 +60,7 @@ func evaluateDNSZoneTransfer(ctx context.Context, rule model.ResolvedRule, envir
 			unknown++
 			continue
 		}
-		selectors, complete := bindACLSelectors(directive)
+		selectors, complete := bindACLSelectors(root, directive)
 		if !complete {
 			unknown++
 			continue
@@ -119,7 +120,7 @@ func evaluateDNSDynamicUpdate(ctx context.Context, rule model.ResolvedRule, envi
 			if state != "ok" {
 				continue // BIND's documented default is none.
 			}
-			selectors, complete := bindACLSelectors(forwarding)
+			selectors, complete := bindACLSelectors(root, forwarding)
 			if !complete {
 				unknown++
 			} else if containsString(selectors, "any") {
@@ -158,7 +159,7 @@ func evaluateDNSDynamicUpdate(ctx context.Context, rule model.ResolvedRule, envi
 		if updateState != "ok" {
 			continue // allow-update defaults to deny all clients.
 		}
-		selectors, complete := bindACLSelectors(update)
+		selectors, complete := bindACLSelectors(root, update)
 		if !complete {
 			unknown++
 			continue
@@ -209,13 +210,24 @@ func inspectBINDConfig(ctx context.Context, environment evaluator.Environment) (
 	if terminal != nil {
 		return nil, nil, nil, terminal
 	}
-	spec := executor.Spec{Name: "named-checkconf", Arguments: []string{"-p", "-x"}, Timeout: 30 * time.Second, MaxOutput: 8 << 20}
+	configPath, startupEvidence, startupComplete, startupErr := inspectNamedStartupConfig(ctx, environment)
+	if startupErr != nil {
+		outcome := dnsConfigError("named_startup_config_failed", startupErr, target.evidence)
+		return nil, nil, nil, &outcome
+	}
+	evidence := append([]model.Evidence(nil), target.evidence...)
+	evidence = append(evidence, startupEvidence...)
+	if !startupComplete {
+		outcome := evaluator.Outcome{Status: model.StatusUnknown, UnknownReason: model.UnknownUnsupportedConfiguration, Summary: "named의 실효 시작 설정 경로를 결정적으로 해석할 수 없습니다.", Expected: "활성 unit의 ExecStart·EnvironmentFile과 -c 경로를 확인할 수 있어야 합니다.", Observed: "custom or ambiguous named startup", Evidence: evidence}
+		return nil, nil, nil, &outcome
+	}
+	spec := executor.Spec{Name: "named-checkconf", Arguments: []string{"-p", "-x", configPath}, Timeout: 30 * time.Second, MaxOutput: 8 << 20}
 	result, err := environment.Commands.Run(ctx, spec)
 	if err != nil {
 		outcome := dnsConfigError("named_checkconf_failed", err, target.evidence)
 		return nil, nil, nil, &outcome
 	}
-	evidence := append(target.evidence, privateCommandSummary(spec, result))
+	evidence = append(evidence, privateCommandSummary(spec, result))
 	if result.ExitCode != 0 || result.Truncated {
 		outcome := dnsConfigError("named_checkconf_failed", fmt.Errorf("exit=%d truncated=%t", result.ExitCode, result.Truncated), evidence)
 		return nil, nil, nil, &outcome
@@ -239,6 +251,10 @@ func inspectBINDConfig(ctx context.Context, environment evaluator.Environment) (
 		outcome := evaluator.Outcome{Status: model.StatusUnknown, UnknownReason: model.UnknownUnsupportedConfiguration, Summary: "BIND zone 계층을 결정적으로 해석할 수 없습니다.", Expected: "options, view와 zone별 실효 설정을 확인할 수 있어야 합니다.", Observed: "중복 또는 지원하지 않는 zone type", Evidence: evidence}
 		return nil, nil, nil, &outcome
 	}
+	if containsBINDDynamicZoneBackend(root) {
+		outcome := evaluator.Outcome{Status: model.StatusUnknown, UnknownReason: model.UnknownUnsupportedConfiguration, Summary: "BIND가 정적 zone 블록 외의 동적 authoritative backend를 사용합니다.", Expected: "DLZ·dyndb를 포함한 모든 authoritative zone의 transfer/update 정책을 해석할 수 있어야 합니다.", Observed: "dlz 또는 dyndb backend 발견", Evidence: evidence}
+		return nil, nil, nil, &outcome
+	}
 	if len(zones) == 0 {
 		outcome := evaluator.Outcome{Status: model.StatusNotApplicable, Summary: "적용 가능한 authoritative DNS zone이 없습니다.", Expected: "authoritative zone에만 transfer/update 기준을 적용합니다.", Observed: "primary/secondary/mirror zone 없음", Evidence: evidence}
 		return nil, nil, nil, &outcome
@@ -249,6 +265,189 @@ func inspectBINDConfig(ctx context.Context, environment evaluator.Environment) (
 		"authoritative_zone_count": len(zones), "configuration_redacted": true,
 	}))
 	return root, zones, evidence, nil
+}
+
+func inspectNamedStartupConfig(ctx context.Context, environment evaluator.Environment) (string, []model.Evidence, bool, error) {
+	units, unitEvidence, err := support.InspectUnits(ctx, environment, []string{"named.service", "named-chroot.service"})
+	if err != nil {
+		return "", nil, false, err
+	}
+	active := make([]support.UnitState, 0, 1)
+	for _, unit := range units {
+		if support.UnitActive(unit) {
+			active = append(active, unit)
+		}
+	}
+	if len(active) != 1 || active[0].Name != "named.service" {
+		return "", unitEvidence, false, nil
+	}
+	spec := executor.Spec{
+		Name:      "systemctl",
+		Arguments: []string{"show", "--no-pager", "--property=ExecStart,Environment,EnvironmentFiles", "--", active[0].InspectionName},
+		Timeout:   15 * time.Second, MaxOutput: 2 << 20,
+	}
+	result, err := environment.Commands.Run(ctx, spec)
+	evidence := append(unitEvidence, privateCommandSummary(spec, result))
+	if err != nil {
+		return "", evidence, false, err
+	}
+	if result.ExitCode != 0 || result.Truncated {
+		return "", evidence, false, fmt.Errorf("systemctl named startup query exit=%d truncated=%t", result.ExitCode, result.Truncated)
+	}
+	properties, err := support.ParseKeyValueOutput(string(result.Stdout))
+	if err != nil {
+		return "", evidence, false, err
+	}
+	environmentFiles, ok := properties["EnvironmentFiles"]
+	if !ok {
+		return "", evidence, false, nil
+	}
+	environmentFiles = strings.TrimSpace(environmentFiles)
+	usesSysconfig := environmentFiles != ""
+	if usesSysconfig && environmentFiles != "/etc/sysconfig/named" && environmentFiles != "/etc/sysconfig/named (ignore_errors=yes)" {
+		return "", evidence, false, nil
+	}
+	sysconfig := ""
+	if usesSysconfig {
+		exists, statErr := environment.Files.Exists("/etc/sysconfig/named")
+		if statErr != nil {
+			return "", evidence, false, statErr
+		}
+		if exists {
+			data, metadata, readErr := environment.Files.ReadFile(ctx, "/etc/sysconfig/named", 256<<10)
+			if readErr != nil {
+				return "", evidence, false, readErr
+			}
+			sysconfig = string(data)
+			evidence = append(evidence, support.FileMetadataEvidence(metadata))
+		}
+	}
+	configPath, complete, err := namedConfigPathFromSystemdProperties(properties, sysconfig)
+	if err != nil {
+		return "", evidence, false, err
+	}
+	evidence = append(evidence, support.FactEvidence("named startup configuration", map[string]any{"custom_config_path": configPath != "/etc/named.conf", "content_redacted": true}))
+	return configPath, evidence, complete, nil
+}
+
+func namedConfigPathFromSystemdProperties(properties map[string]string, sysconfig string) (string, bool, error) {
+	if strings.TrimSpace(properties["Environment"]) != "" {
+		return "", false, nil
+	}
+	execStart, ok := properties["ExecStart"]
+	if !ok || strings.Count(execStart, "argv[]=") != 1 {
+		return "", false, nil
+	}
+	pathMarker := "path=/usr/sbin/named ;"
+	if !strings.Contains(execStart, pathMarker) {
+		return "", false, nil
+	}
+	start := strings.Index(execStart, "argv[]=") + len("argv[]=")
+	remainder := execStart[start:]
+	end := strings.Index(remainder, " ;")
+	if end < 0 {
+		return "", false, nil
+	}
+	argv := strings.Fields(strings.TrimSpace(remainder[:end]))
+	if len(argv) == 0 || argv[0] != "/usr/sbin/named" {
+		return "", false, nil
+	}
+	variables, err := namedSysconfigVariables(sysconfig)
+	if err != nil {
+		return "", false, err
+	}
+	expanded := make([]string, 0, len(argv))
+	for _, token := range argv {
+		name := ""
+		if strings.HasPrefix(token, "${") && strings.HasSuffix(token, "}") {
+			name = strings.TrimSuffix(strings.TrimPrefix(token, "${"), "}")
+		} else if strings.HasPrefix(token, "$") {
+			name = strings.TrimPrefix(token, "$")
+		}
+		if name != "" {
+			if name != "OPTIONS" && name != "NAMEDCONF" && name != "NAMED_OPTIONS" {
+				return "", false, nil
+			}
+			expanded = append(expanded, variables[name]...)
+			continue
+		}
+		if strings.ContainsAny(token, "$`%\\\x00\r\n") {
+			return "", false, nil
+		}
+		expanded = append(expanded, token)
+	}
+	selected := "/etc/named.conf"
+	explicit := false
+	for index, token := range expanded[1:] {
+		actualIndex := index + 1
+		candidate := ""
+		switch {
+		case token == "-t" || strings.HasPrefix(token, "-t"):
+			return "", false, nil
+		case token == "-c":
+			if actualIndex+1 >= len(expanded) {
+				return "", false, nil
+			}
+			candidate = expanded[actualIndex+1]
+		case strings.HasPrefix(token, "-c") && len(token) > 2:
+			candidate = strings.TrimPrefix(token, "-c")
+		}
+		if candidate == "" {
+			continue
+		}
+		candidate = strings.TrimPrefix(candidate, "=")
+		if !path.IsAbs(candidate) || path.Clean(candidate) != candidate || strings.ContainsAny(candidate, "\\\x00\r\n\"'`$%") {
+			return "", false, nil
+		}
+		if explicit && selected != candidate {
+			return "", false, nil
+		}
+		selected = candidate
+		explicit = true
+	}
+	return selected, true, nil
+}
+
+func namedSysconfigVariables(content string) (map[string][]string, error) {
+	variables := make(map[string][]string)
+	for lineNumber, raw := range strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n") {
+		tokens, err := shellAssignmentTokens(raw)
+		if err != nil {
+			return nil, fmt.Errorf("sysconfig line %d: %w", lineNumber+1, err)
+		}
+		if len(tokens) == 0 {
+			continue
+		}
+		name := tokens[0]
+		if name != "OPTIONS" && name != "NAMEDCONF" && name != "NAMED_OPTIONS" {
+			continue
+		}
+		if _, duplicate := variables[name]; duplicate {
+			return nil, fmt.Errorf("sysconfig repeats %s", name)
+		}
+		values, err := shellAssignmentTokens(strings.Join(tokens[1:], " "))
+		if err != nil {
+			return nil, fmt.Errorf("sysconfig line %d value: %w", lineNumber+1, err)
+		}
+		variables[name] = values
+	}
+	return variables, nil
+}
+
+func containsBINDDynamicZoneBackend(root []bindNode) bool {
+	for _, node := range root {
+		switch strings.ToLower(node.Name) {
+		case "dlz", "dyndb":
+			return true
+		case "view":
+			for _, child := range node.Children {
+				if strings.EqualFold(child.Name, "dlz") || strings.EqualFold(child.Name, "dyndb") {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 func lexBINDConfig(content string) ([]string, error) {
@@ -436,7 +635,28 @@ func directBINDDirective(nodes []bindNode, name string) (bindNode, string) {
 	return found[0], "ok"
 }
 
-func bindACLSelectors(node bindNode) ([]string, bool) {
+func bindACLSelectors(root []bindNode, node bindNode) ([]string, bool) {
+	definitions := make(map[string]bindNode)
+	for _, candidate := range root {
+		if !strings.EqualFold(candidate.Name, "acl") {
+			continue
+		}
+		if len(candidate.Args) != 1 || len(candidate.Children) == 0 {
+			return nil, false
+		}
+		name := strings.ToLower(candidate.Args[0])
+		if name == "" {
+			return nil, false
+		}
+		if _, duplicate := definitions[name]; duplicate {
+			return nil, false
+		}
+		definitions[name] = candidate
+	}
+	return expandBINDACLSelectors(node, definitions, make(map[string]bool))
+}
+
+func expandBINDACLSelectors(node bindNode, definitions map[string]bindNode, resolving map[string]bool) ([]string, bool) {
 	if len(node.Children) == 0 {
 		return nil, false
 	}
@@ -458,7 +678,21 @@ func bindACLSelectors(node bindNode) ([]string, bool) {
 			if len(child.Args) != 0 {
 				return nil, false
 			}
-			selectors = append(selectors, child.Name)
+			definition, custom := definitions[name]
+			if !custom {
+				selectors = append(selectors, child.Name)
+				continue
+			}
+			if resolving[name] {
+				return nil, false
+			}
+			resolving[name] = true
+			expanded, complete := expandBINDACLSelectors(definition, definitions, resolving)
+			delete(resolving, name)
+			if !complete {
+				return nil, false
+			}
+			selectors = append(selectors, expanded...)
 		}
 	}
 	return uniqueStrings(selectors), true
