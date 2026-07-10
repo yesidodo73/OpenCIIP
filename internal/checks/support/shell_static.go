@@ -10,10 +10,12 @@ import (
 type StaticShellOperationKind string
 
 const (
-	StaticShellAssign StaticShellOperationKind = "assign"
-	StaticShellUnset  StaticShellOperationKind = "unset"
-	StaticShellUmask  StaticShellOperationKind = "umask"
-	StaticShellSource StaticShellOperationKind = "source"
+	StaticShellAssign   StaticShellOperationKind = "assign"
+	StaticShellUnset    StaticShellOperationKind = "unset"
+	StaticShellUmask    StaticShellOperationKind = "umask"
+	StaticShellSource   StaticShellOperationKind = "source"
+	StaticShellExport   StaticShellOperationKind = "export"
+	StaticShellReadOnly StaticShellOperationKind = "readonly"
 )
 
 type StaticShellOperation struct {
@@ -36,7 +38,7 @@ type StaticShellAnalysis struct {
 }
 
 // AnalyzeStaticShell recognizes only unconditional, side-effect-free shell
-// assignments and the umask/source/unset builtins. It never executes input.
+// assignments and the export/readonly/umask/source/unset builtins. It never executes input.
 // Anything whose effect depends on runtime shell state is reported as an
 // issue so callers cannot mistake a partial parse for an effective value.
 func AnalyzeStaticShell(source string, data []byte) StaticShellAnalysis {
@@ -190,7 +192,7 @@ func parseStaticShellCommand(source string, line int, command string, fields []s
 		if len(fields) == 1 {
 			return nil, true
 		}
-		operations := make([]StaticShellOperation, 0, len(fields)-1)
+		operations := make([]StaticShellOperation, 0, 2*(len(fields)-1))
 		for _, field := range fields[1:] {
 			name, value, assigned := splitStaticAssignment(field)
 			if assigned {
@@ -198,13 +200,25 @@ func parseStaticShellCommand(source string, line int, command string, fields []s
 					return nil, false
 				}
 				operations = append(operations, StaticShellOperation{Kind: StaticShellAssign, Name: name, Value: value, Source: source, Line: line})
-				continue
+				field = name
 			}
 			if !validShellIdentifier(field) {
 				return nil, false
 			}
+			operations = append(operations, StaticShellOperation{Kind: StaticShellExport, Name: field, Source: source, Line: line})
 		}
 		return operations, true
+	case "readonly":
+		return parseStaticAttributeCommand(source, line, fields[1:], false, true)
+	case "declare", "typeset":
+		if len(fields) < 2 || !strings.HasPrefix(fields[1], "-") {
+			return nil, false
+		}
+		flags := strings.TrimPrefix(fields[1], "-")
+		if flags == "" || strings.Trim(flags, "xr") != "" {
+			return nil, false
+		}
+		return parseStaticAttributeCommand(source, line, fields[2:], strings.Contains(flags, "x"), strings.Contains(flags, "r"))
 	case "unset":
 		if len(fields) < 2 {
 			return nil, false
@@ -230,7 +244,7 @@ func parseStaticShellCommand(source string, line int, command string, fields []s
 			return nil, false
 		}
 		return []StaticShellOperation{{Kind: StaticShellSource, Value: fields[1], Source: source, Line: line}}, true
-	case "readonly", "declare", "typeset", "local", "eval", "exec", "set", "shopt", "alias", "unalias", "return", "exit", "break", "continue", "trap":
+	case "local", "eval", "exec", "set", "shopt", "alias", "unalias", "return", "exit", "break", "continue", "trap":
 		return nil, false
 	}
 
@@ -242,6 +256,33 @@ func parseStaticShellCommand(source string, line int, command string, fields []s
 		return nil, false
 	}
 	return []StaticShellOperation{{Kind: StaticShellAssign, Name: name, Value: value, Source: source, Line: line}}, true
+}
+
+func parseStaticAttributeCommand(source string, line int, fields []string, exported, readOnly bool) ([]StaticShellOperation, bool) {
+	if len(fields) == 0 || !exported && !readOnly {
+		return nil, false
+	}
+	operations := make([]StaticShellOperation, 0, 3*len(fields))
+	for _, field := range fields {
+		name, value, assigned := splitStaticAssignment(field)
+		if assigned {
+			if !validShellIdentifier(name) {
+				return nil, false
+			}
+			operations = append(operations, StaticShellOperation{Kind: StaticShellAssign, Name: name, Value: value, Source: source, Line: line})
+			field = name
+		}
+		if !validShellIdentifier(field) {
+			return nil, false
+		}
+		if exported {
+			operations = append(operations, StaticShellOperation{Kind: StaticShellExport, Name: field, Source: source, Line: line})
+		}
+		if readOnly {
+			operations = append(operations, StaticShellOperation{Kind: StaticShellReadOnly, Name: field, Source: source, Line: line})
+		}
+	}
+	return operations, true
 }
 
 // ExpandStaticShellWord expands only simple $NAME, ${NAME}, quoting, escaping,

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -36,6 +37,48 @@ type startupFile struct {
 	Unknown  string
 	Metadata system.FileMetadata
 	Analysis support.StaticShellAnalysis
+	Actions  []startupAction
+}
+
+type startupAction struct {
+	Line              int
+	Sequence          int
+	Operation         support.StaticShellOperation
+	ProfileDLoop      bool
+	ConditionalTarget string
+	ConditionalSource string
+}
+
+type startupConditionalSource struct {
+	Line   int
+	Target string
+	Source string
+}
+
+type startupVariableOrigin struct {
+	Path string
+	Line int
+}
+
+// StartupVariableState is the final statically proven state of a shell
+// variable after one startup context has been evaluated.
+type StartupVariableState struct {
+	Value    string
+	Defined  bool
+	Exported bool
+	ReadOnly bool
+	Path     string
+	Line     int
+}
+
+// StartupContextAnalysis exposes the shared startup graph result used by
+// account and file checks without exposing file contents.
+type StartupContextAnalysis struct {
+	Account   string
+	Name      string
+	Paths     []string
+	Variables map[string]StartupVariableState
+	Unknowns  []string
 }
 
 type startupInspector struct {
@@ -50,12 +93,14 @@ type startupInspector struct {
 }
 
 type startupContext struct {
-	Account      support.PasswdEntry
-	Name         string
-	Paths        []string
-	InitialVars  map[string]string
-	InitialUmask *uint32
-	Unknowns     []string
+	Account         support.PasswdEntry
+	Name            string
+	Paths           []string
+	InitialVars     map[string]string
+	InitialExported map[string]bool
+	InitialOrigins  map[string]startupVariableOrigin
+	InitialUmask    *uint32
+	Unknowns        []string
 }
 
 type startupContextResult struct {
@@ -63,14 +108,21 @@ type startupContextResult struct {
 	Name      string
 	Paths     []string
 	Variables map[string]string
+	Exported  map[string]bool
+	ReadOnly  map[string]bool
+	Origins   map[string]startupVariableOrigin
 	Umask     *uint32
 	Unknowns  []string
 }
 
 type startupState struct {
 	variables     map[string]string
+	exported      map[string]bool
+	readOnly      map[string]bool
+	origins       map[string]startupVariableOrigin
 	umask         *uint32
 	unknowns      []string
+	appliedPaths  []string
 	activeSources map[string]bool
 	planPositions map[string]int
 	planApplied   map[string]bool
@@ -394,6 +446,60 @@ func newStartupInspector(ctx context.Context, environment evaluator.Environment)
 	}
 }
 
+// AnalyzeAccountStartup evaluates the same implicit and explicitly sourced
+// shell startup graph used by the root PATH and UMASK checks. The supported
+// return value is false for shells whose startup rules are not implemented.
+func AnalyzeAccountStartup(ctx context.Context, environment evaluator.Environment, account support.PasswdEntry) ([]StartupContextAnalysis, []model.Evidence, bool, error) {
+	shellKind, supported := supportedStartupShell(account.Shell)
+	if !supported {
+		return nil, nil, false, nil
+	}
+	if err := validateAbsoluteSystemPath(account.Home); err != nil {
+		unknown := "홈 경로를 정적으로 해석할 수 없음"
+		return []StartupContextAnalysis{{Account: account.Name, Name: "unsupported-home", Unknowns: []string{unknown}}},
+			[]model.Evidence{support.FactEvidence("startup-account", map[string]any{
+				"account": account.Name, "shell": account.Shell, "deterministic": false, "reason": unknown,
+			})}, true, nil
+	}
+	inspector := newStartupInspector(ctx, environment)
+	contexts, err := inspector.contexts(account, shellKind, nil, nil)
+	if err != nil {
+		return nil, nil, true, err
+	}
+	results, err := inspector.evaluateContexts(contexts)
+	if err != nil {
+		return nil, nil, true, err
+	}
+	analyses := make([]StartupContextAnalysis, 0, len(results))
+	for _, result := range results {
+		variables := make(map[string]StartupVariableState, len(result.Variables)+len(result.Exported)+len(result.ReadOnly))
+		names := make(map[string]struct{}, len(result.Variables)+len(result.Exported)+len(result.ReadOnly))
+		for name := range result.Variables {
+			names[name] = struct{}{}
+		}
+		for name := range result.Exported {
+			names[name] = struct{}{}
+		}
+		for name := range result.ReadOnly {
+			names[name] = struct{}{}
+		}
+		for name := range names {
+			value, defined := result.Variables[name]
+			state := StartupVariableState{Value: value, Defined: defined, Exported: result.Exported[name], ReadOnly: result.ReadOnly[name]}
+			if origin, exists := result.Origins[name]; exists {
+				state.Path = origin.Path
+				state.Line = origin.Line
+			}
+			variables[name] = state
+		}
+		analyses = append(analyses, StartupContextAnalysis{
+			Account: result.Account, Name: result.Name, Paths: append([]string(nil), result.Paths...),
+			Variables: variables, Unknowns: append([]string(nil), result.Unknowns...),
+		})
+	}
+	return analyses, append([]model.Evidence(nil), inspector.evidence...), true, nil
+}
+
 func (inspector *startupInspector) load(systemPath string) (startupFile, error) {
 	if cached, exists := inspector.files[systemPath]; exists {
 		return cached, nil
@@ -457,7 +563,36 @@ func (inspector *startupInspector) load(systemPath string) (startupFile, error) 
 		return loaded, nil
 	}
 	inspector.contentBytes += int64(len(data))
-	loaded.Analysis = support.AnalyzeStaticShell(systemPath, data)
+	staticData, profileLoops := extractRockyProfileDLoops(data)
+	staticData, conditionalSources := extractStaticConditionalSources(staticData)
+	loaded.Analysis = support.AnalyzeStaticShell(systemPath, staticData)
+	loaded.Actions = make([]startupAction, 0, len(loaded.Analysis.Operations)+len(profileLoops)+len(conditionalSources))
+	for sequence, operation := range loaded.Analysis.Operations {
+		loaded.Actions = append(loaded.Actions, startupAction{
+			Line:      operation.Line,
+			Sequence:  sequence,
+			Operation: operation,
+		})
+	}
+	for sequence, line := range profileLoops {
+		loaded.Actions = append(loaded.Actions, startupAction{
+			Line:         line,
+			Sequence:     len(loaded.Analysis.Operations) + sequence,
+			ProfileDLoop: true,
+		})
+	}
+	for sequence, source := range conditionalSources {
+		loaded.Actions = append(loaded.Actions, startupAction{
+			Line: source.Line, Sequence: len(loaded.Analysis.Operations) + len(profileLoops) + sequence,
+			ConditionalTarget: source.Target, ConditionalSource: source.Source,
+		})
+	}
+	sort.SliceStable(loaded.Actions, func(i, j int) bool {
+		if loaded.Actions[i].Line != loaded.Actions[j].Line {
+			return loaded.Actions[i].Line < loaded.Actions[j].Line
+		}
+		return loaded.Actions[i].Sequence < loaded.Actions[j].Sequence
+	})
 	issueLimit := minInt(len(loaded.Analysis.Issues), 128)
 	issueFacts := make([]map[string]any, 0, issueLimit)
 	for _, issue := range loaded.Analysis.Issues[:issueLimit] {
@@ -466,6 +601,12 @@ func (inspector *startupInspector) load(systemPath string) (startupFile, error) 
 	operationCounts := make(map[string]int)
 	for _, operation := range loaded.Analysis.Operations {
 		operationCounts[string(operation.Kind)]++
+	}
+	if len(profileLoops) > 0 {
+		operationCounts["rocky_profile_d_loop"] = len(profileLoops)
+	}
+	if len(conditionalSources) > 0 {
+		operationCounts["fixed_file_conditional_source"] = len(conditionalSources)
 	}
 	inspector.evidence = append(inspector.evidence, support.FactEvidence(systemPath, map[string]any{
 		"exists":           true,
@@ -477,6 +618,128 @@ func (inspector *startupInspector) load(systemPath string) (startupFile, error) 
 	}))
 	inspector.files[systemPath] = loaded
 	return loaded, nil
+}
+
+var rockyProfileDLoopPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`^for[ \t]+i[ \t]+in[ \t]+/etc/profile\.d/\*\.sh[ \t]+/etc/profile\.d/sh\.local[ \t]*;[ \t]*do$`),
+	regexp.MustCompile(`^if[ \t]+\[[ \t]+-r[ \t]+"\$i"[ \t]+\][ \t]*;[ \t]*then$`),
+	regexp.MustCompile(`^if[ \t]+\[[ \t]+"\$\{-#\*i\}"[ \t]+!=[ \t]+"\$-"[ \t]+\][ \t]*;[ \t]*then$`),
+	regexp.MustCompile(`^\.[ \t]+"\$i"$`),
+	regexp.MustCompile(`^else$`),
+	regexp.MustCompile(`^\.[ \t]+"\$i"[ \t]*>[ \t]*/dev/null$`),
+	regexp.MustCompile(`^fi$`),
+	regexp.MustCompile(`^fi$`),
+	regexp.MustCompile(`^done$`),
+}
+
+// extractRockyProfileDLoops recognizes only the verified Rocky Linux 9.8
+// profile.d loop. The two branches source the same readable file and differ
+// only in output redirection, so the resulting source order is deterministic.
+// Any structural or target difference is left untouched and is therefore
+// reported as an unsupported shell flow by AnalyzeStaticShell.
+func extractRockyProfileDLoops(data []byte) ([]byte, []int) {
+	if !utf8.Valid(data) || strings.IndexByte(string(data), 0) >= 0 {
+		return data, nil
+	}
+	normalized := strings.ReplaceAll(string(data), "\r\n", "\n")
+	if strings.ContainsRune(normalized, '\r') {
+		return data, nil
+	}
+	lines := strings.Split(normalized, "\n")
+	loopLines := make([]int, 0, 1)
+	for index := 0; index < len(lines); index++ {
+		if !rockyProfileDLoopPatterns[0].MatchString(strings.TrimSpace(lines[index])) {
+			continue
+		}
+		matched := make([]int, 0, len(rockyProfileDLoopPatterns))
+		cursor := index
+		for patternIndex, pattern := range rockyProfileDLoopPatterns {
+			for cursor < len(lines) {
+				trimmed := strings.TrimSpace(lines[cursor])
+				if trimmed != "" && !strings.HasPrefix(trimmed, "#") {
+					break
+				}
+				cursor++
+			}
+			if cursor >= len(lines) || !pattern.MatchString(strings.TrimSpace(lines[cursor])) {
+				matched = nil
+				break
+			}
+			matched = append(matched, cursor)
+			cursor++
+			if patternIndex == 0 {
+				index = matched[0]
+			}
+		}
+		if len(matched) != len(rockyProfileDLoopPatterns) {
+			continue
+		}
+		for _, lineIndex := range matched {
+			lines[lineIndex] = ""
+		}
+		loopLines = append(loopLines, matched[0]+1)
+		index = matched[len(matched)-1]
+	}
+	return []byte(strings.Join(lines, "\n")), loopLines
+}
+
+var (
+	fixedFileConditionalStart = regexp.MustCompile(`^if[ \t]+\[[ \t]+-f[ \t]+("[^"]*"|'[^']*'|[^ \t;]+)[ \t]+\][ \t]*;[ \t]*then$`)
+	fixedFileSourceLine       = regexp.MustCompile(`^(\.|source)[ \t]+("[^"]*"|'[^']*'|[^ \t;]+)[ \t]*$`)
+	fixedFileConditionalOne   = regexp.MustCompile(`^if[ \t]+\[[ \t]+-f[ \t]+("[^"]*"|'[^']*'|[^ \t;]+)[ \t]+\][ \t]*;[ \t]*then[ \t]+(\.|source)[ \t]+("[^"]*"|'[^']*'|[^ \t;]+)[ \t]*;[ \t]*fi$`)
+)
+
+// extractStaticConditionalSources recognizes only a fixed-file -f guard
+// whose source operand is textually identical to the tested operand. Missing
+// files are then a deterministic skipped edge; every other condition remains
+// visible to AnalyzeStaticShell and therefore makes the context UNKNOWN.
+func extractStaticConditionalSources(data []byte) ([]byte, []startupConditionalSource) {
+	if !utf8.Valid(data) || strings.IndexByte(string(data), 0) >= 0 {
+		return data, nil
+	}
+	lines := strings.Split(string(data), "\n")
+	sources := make([]startupConditionalSource, 0, 2)
+	for index := 0; index < len(lines); index++ {
+		trimmed := strings.TrimSpace(lines[index])
+		if matches := fixedFileConditionalOne.FindStringSubmatch(trimmed); len(matches) == 4 {
+			if matches[1] == matches[3] {
+				sources = append(sources, startupConditionalSource{Line: index + 1, Target: matches[1], Source: matches[3]})
+				lines[index] = ""
+			}
+			continue
+		}
+		matches := fixedFileConditionalStart.FindStringSubmatch(trimmed)
+		if len(matches) != 2 {
+			continue
+		}
+		matchedLines := []int{index}
+		cursor := index + 1
+		for cursor < len(lines) && (strings.TrimSpace(lines[cursor]) == "" || strings.HasPrefix(strings.TrimSpace(lines[cursor]), "#")) {
+			cursor++
+		}
+		if cursor >= len(lines) {
+			continue
+		}
+		sourceMatches := fixedFileSourceLine.FindStringSubmatch(strings.TrimSpace(lines[cursor]))
+		if len(sourceMatches) != 3 || sourceMatches[2] != matches[1] {
+			continue
+		}
+		matchedLines = append(matchedLines, cursor)
+		cursor++
+		for cursor < len(lines) && (strings.TrimSpace(lines[cursor]) == "" || strings.HasPrefix(strings.TrimSpace(lines[cursor]), "#")) {
+			cursor++
+		}
+		if cursor >= len(lines) || strings.TrimSpace(lines[cursor]) != "fi" {
+			continue
+		}
+		matchedLines = append(matchedLines, cursor)
+		for _, lineIndex := range matchedLines {
+			lines[lineIndex] = ""
+		}
+		sources = append(sources, startupConditionalSource{Line: index + 1, Target: matches[1], Source: sourceMatches[2]})
+		index = cursor
+	}
+	return []byte(strings.Join(lines, "\n")), sources
 }
 
 func (inspector *startupInspector) profilePaths() ([]string, []string, error) {
@@ -525,7 +788,7 @@ func (inspector *startupInspector) profilePaths() ([]string, []string, error) {
 	}
 	paths := make([]string, 0, len(entries))
 	for _, entry := range entries {
-		if !strings.HasSuffix(entry.Name(), ".sh") {
+		if strings.HasPrefix(entry.Name(), ".") || !strings.HasSuffix(entry.Name(), ".sh") {
 			continue
 		}
 		profilePath, pathErr := fixedChildPath("/etc/profile.d", entry.Name())
@@ -553,18 +816,8 @@ func (inspector *startupInspector) profilePaths() ([]string, []string, error) {
 }
 
 func (inspector *startupInspector) contexts(account support.PasswdEntry, shellKind startupShellKind, initialUmask *uint32, initialUnknowns []string) ([]startupContext, error) {
-	profiles, profileUnknowns, err := inspector.profilePaths()
-	if err != nil {
-		return nil, err
-	}
-	systemPaths := append([]string{"/etc/profile", "/etc/bashrc"}, profiles...)
-	for _, systemPath := range systemPaths {
-		if _, err := inspector.load(systemPath); err != nil {
-			return nil, err
-		}
-	}
-	unknowns := append(append([]string(nil), initialUnknowns...), profileUnknowns...)
-	loginPaths := append([]string{"/etc/profile"}, profiles...)
+	unknowns := append([]string(nil), initialUnknowns...)
+	loginPaths := []string{"/etc/profile"}
 	switch shellKind {
 	case startupShellBash:
 		loginFile, err := inspector.firstExisting(account.Home, []string{".bash_profile", ".bash_login", ".profile"})
@@ -578,8 +831,7 @@ func (inspector *startupInspector) contexts(account support.PasswdEntry, shellKi
 		if err != nil {
 			return nil, err
 		}
-		nonLoginPaths := append([]string{"/etc/bashrc"}, profiles...)
-		nonLoginPaths = append(nonLoginPaths, bashrc)
+		nonLoginPaths := []string{bashrc}
 		return []startupContext{
 			{Account: account, Name: "bash-login", Paths: loginPaths, InitialUmask: cloneUmask(initialUmask), Unknowns: append([]string(nil), unknowns...)},
 			{Account: account, Name: "bash-interactive", Paths: nonLoginPaths, InitialUmask: cloneUmask(initialUmask), Unknowns: append([]string(nil), unknowns...)},
@@ -631,8 +883,19 @@ func (inspector *startupInspector) evaluate(context startupContext) (startupCont
 	for name, value := range context.InitialVars {
 		variables[name] = value
 	}
+	exported := map[string]bool{
+		"HOME": true, "USER": true, "LOGNAME": true, "SHELL": true,
+	}
+	for name, value := range context.InitialExported {
+		if value {
+			exported[name] = true
+		}
+	}
 	state := startupState{
 		variables:     variables,
+		exported:      exported,
+		readOnly:      make(map[string]bool),
+		origins:       cloneStartupOrigins(context.InitialOrigins),
 		umask:         cloneUmask(context.InitialUmask),
 		unknowns:      append([]string(nil), context.Unknowns...),
 		activeSources: make(map[string]bool),
@@ -657,8 +920,11 @@ func (inspector *startupInspector) evaluate(context startupContext) (startupCont
 	return startupContextResult{
 		Account:   context.Account.Name,
 		Name:      context.Name,
-		Paths:     append([]string(nil), context.Paths...),
+		Paths:     append([]string(nil), state.appliedPaths...),
 		Variables: cloneStringMap(state.variables),
+		Exported:  cloneBoolMap(state.exported),
+		ReadOnly:  cloneBoolMap(state.readOnly),
+		Origins:   cloneStartupOrigins(state.origins),
 		Umask:     cloneUmask(state.umask),
 		Unknowns:  state.unknowns,
 	}, nil
@@ -669,7 +935,23 @@ func (inspector *startupInspector) evaluateContexts(contexts []startupContext) (
 	for index, context := range contexts {
 		if index > 0 && context.Name == "bash-interactive" && len(results) > 0 {
 			login := results[0]
-			context.InitialVars = cloneStringMap(login.Variables)
+			context.InitialVars = make(map[string]string)
+			context.InitialExported = make(map[string]bool)
+			context.InitialOrigins = make(map[string]startupVariableOrigin)
+			for name, exported := range login.Exported {
+				if !exported {
+					continue
+				}
+				value, exists := login.Variables[name]
+				if !exists {
+					continue
+				}
+				context.InitialVars[name] = value
+				context.InitialExported[name] = true
+				if origin, exists := login.Origins[name]; exists {
+					context.InitialOrigins[name] = origin
+				}
+			}
 			context.InitialUmask = cloneUmask(login.Umask)
 			if len(login.Unknowns) > 0 {
 				context.Unknowns = append(context.Unknowns, "bash-login에서 상속되는 초기 셸 상태를 확정할 수 없음")
@@ -702,6 +984,7 @@ func (inspector *startupInspector) applyFile(state *startupState, systemPath str
 		}
 		return nil
 	}
+	state.appliedPaths = append(state.appliedPaths, systemPath)
 	if loaded.Unknown != "" {
 		state.unknowns = append(state.unknowns, systemPath+": "+loaded.Unknown)
 		return nil
@@ -711,18 +994,47 @@ func (inspector *startupInspector) applyFile(state *startupState, systemPath str
 	for _, issue := range loaded.Analysis.Issues {
 		state.unknowns = append(state.unknowns, fmt.Sprintf("%s:%d %s", systemPath, issue.Line, issue.Reason))
 	}
-	for _, operation := range loaded.Analysis.Operations {
+	for _, action := range loaded.Actions {
+		if action.ProfileDLoop {
+			if err := inspector.applyRockyProfileDLoop(state, systemPath, action.Line); err != nil {
+				return err
+			}
+			continue
+		}
+		if action.ConditionalTarget != "" {
+			if err := inspector.applyFixedFileConditionalSource(state, systemPath, action); err != nil {
+				return err
+			}
+			continue
+		}
+		operation := action.Operation
 		switch operation.Kind {
 		case support.StaticShellAssign:
+			if state.readOnly[operation.Name] {
+				state.unknowns = append(state.unknowns, fmt.Sprintf("%s:%d readonly 변수 %s 재할당의 셸 제어 흐름", systemPath, operation.Line, operation.Name))
+				continue
+			}
 			value, expandErr := support.ExpandStaticShellWord(operation.Value, state.variables)
 			if expandErr != nil {
 				delete(state.variables, operation.Name)
+				delete(state.origins, operation.Name)
 				state.unknowns = append(state.unknowns, fmt.Sprintf("%s:%d %s 할당을 확정할 수 없음", systemPath, operation.Line, operation.Name))
 				continue
 			}
 			state.variables[operation.Name] = value
+			state.origins[operation.Name] = startupVariableOrigin{Path: systemPath, Line: operation.Line}
 		case support.StaticShellUnset:
+			if state.readOnly[operation.Name] {
+				state.unknowns = append(state.unknowns, fmt.Sprintf("%s:%d readonly 변수 %s 해제의 셸 제어 흐름", systemPath, operation.Line, operation.Name))
+				continue
+			}
 			delete(state.variables, operation.Name)
+			delete(state.exported, operation.Name)
+			delete(state.origins, operation.Name)
+		case support.StaticShellExport:
+			state.exported[operation.Name] = true
+		case support.StaticShellReadOnly:
+			state.readOnly[operation.Name] = true
 		case support.StaticShellUmask:
 			value, expandErr := support.ExpandStaticShellWord(operation.Value, state.variables)
 			if expandErr != nil {
@@ -751,10 +1063,7 @@ func (inspector *startupInspector) applyFile(state *startupState, systemPath str
 				state.unknowns = append(state.unknowns, fmt.Sprintf("%s:%d 순환 source 관계", systemPath, operation.Line))
 				continue
 			}
-			if position, exists := state.planPositions[sourcePath]; exists {
-				if position <= state.planCursor || state.planApplied[sourcePath] {
-					continue
-				}
+			if position, exists := state.planPositions[sourcePath]; exists && position > state.planCursor && !state.planApplied[sourcePath] {
 				if position != nextPlannedPosition(state) {
 					state.unknowns = append(state.unknowns, fmt.Sprintf("%s:%d source 우선순위가 고정 순서와 충돌함", systemPath, operation.Line))
 					continue
@@ -770,6 +1079,70 @@ func (inspector *startupInspector) applyFile(state *startupState, systemPath str
 			}
 		default:
 			state.unknowns = append(state.unknowns, fmt.Sprintf("%s:%d 지원하지 않는 정적 연산", systemPath, operation.Line))
+		}
+	}
+	return nil
+}
+
+func (inspector *startupInspector) applyFixedFileConditionalSource(state *startupState, sourcePath string, action startupAction) error {
+	if action.ConditionalTarget != action.ConditionalSource || !sourceUsesOnlyStaticHome(action.ConditionalSource) {
+		state.unknowns = append(state.unknowns, fmt.Sprintf("%s:%d 고정 파일 조건과 source 대상을 확정할 수 없음", sourcePath, action.Line))
+		return nil
+	}
+	target, targetErr := support.ExpandStaticShellWord(action.ConditionalTarget, state.variables)
+	sourced, sourceErr := support.ExpandStaticShellWord(action.ConditionalSource, state.variables)
+	if targetErr != nil || sourceErr != nil || target != sourced || strings.ContainsAny(sourced, " \t\r\n\v\f*?[") || validateAbsoluteSystemPath(sourced) != nil {
+		state.unknowns = append(state.unknowns, fmt.Sprintf("%s:%d 동적 또는 상대 고정 파일 source 경로", sourcePath, action.Line))
+		return nil
+	}
+	inspected, err := inspectPathWithoutSymlinks(inspector.environment.Files, sourced)
+	if err != nil {
+		return err
+	}
+	inspector.evidence = append(inspector.evidence, inspected.Evidence...)
+	if !inspected.Exists {
+		inspector.evidence = append(inspector.evidence, support.FactEvidence(sourced, map[string]any{
+			"exists": false, "condition": "-f", "source_skipped": true,
+		}))
+		return nil
+	}
+	if inspected.Metadata.FileType != "regular" && inspected.Unknown == "" {
+		inspector.evidence = append(inspector.evidence, support.FactEvidence(sourced, map[string]any{
+			"exists": true, "file_type": inspected.Metadata.FileType, "condition": "-f", "source_skipped": true,
+		}))
+		return nil
+	}
+	if inspected.Unknown != "" {
+		state.unknowns = append(state.unknowns, fmt.Sprintf("%s:%d 조건부 source 대상 %s: %s", sourcePath, action.Line, sourced, inspected.Unknown))
+		return nil
+	}
+	return inspector.applyFile(state, sourced, false)
+}
+
+func (inspector *startupInspector) applyRockyProfileDLoop(state *startupState, sourcePath string, line int) error {
+	paths, unknowns, err := inspector.profilePaths()
+	if err != nil {
+		return err
+	}
+	for _, reason := range unknowns {
+		state.unknowns = append(state.unknowns, fmt.Sprintf("%s:%d profile.d glob을 확정할 수 없음: %s", sourcePath, line, reason))
+	}
+	for _, profilePath := range paths {
+		if err := inspector.applyFile(state, profilePath, false); err != nil {
+			return err
+		}
+	}
+	localPath, err := fixedChildPath("/etc/profile.d", "sh.local")
+	if err != nil {
+		return err
+	}
+	local, err := inspector.load(localPath)
+	if err != nil {
+		return err
+	}
+	if local.Exists {
+		if err := inspector.applyFile(state, localPath, false); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -1117,6 +1490,22 @@ func cloneUmask(value *uint32) *uint32 {
 
 func cloneStringMap(values map[string]string) map[string]string {
 	copy := make(map[string]string, len(values))
+	for key, value := range values {
+		copy[key] = value
+	}
+	return copy
+}
+
+func cloneBoolMap(values map[string]bool) map[string]bool {
+	copy := make(map[string]bool, len(values))
+	for key, value := range values {
+		copy[key] = value
+	}
+	return copy
+}
+
+func cloneStartupOrigins(values map[string]startupVariableOrigin) map[string]startupVariableOrigin {
+	copy := make(map[string]startupVariableOrigin, len(values))
 	for key, value := range values {
 		copy[key] = value
 	}
