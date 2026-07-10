@@ -102,6 +102,9 @@ func evaluateLockoutThreshold(ctx context.Context, rule model.ResolvedRule, envi
 		effective = append(effective, stackEffective...)
 		violations = append(violations, stackViolations...)
 		unknowns = append(unknowns, stackUnknowns...)
+		topologyViolations, topologyUnknowns := assessFaillockPAMTopology(stack, pamStacks[stack])
+		violations = append(violations, topologyViolations...)
+		unknowns = append(unknowns, topologyUnknowns...)
 	}
 	if len(violations) > 0 {
 		sort.Strings(violations)
@@ -205,6 +208,353 @@ func inspectFaillockDenyOverrides(stack string, rules []support.PAMRule, configu
 		unknowns = append(unknowns, stack+"에 auth pam_faillock.so가 없음")
 	}
 	return effective, violations, unknowns
+}
+
+func assessFaillockPAMTopology(stack string, rules []support.PAMRule) ([]string, []string) {
+	violations := make([]string, 0)
+	unknowns := make([]string, 0)
+	preauthIndexes := make([]int, 0, 1)
+	authfailIndexes := make([]int, 0, 1)
+	authsuccIndexes := make([]int, 0, 1)
+	accountIndexes := make([]int, 0, 1)
+	for index, rule := range rules {
+		if filepath.Base(rule.Module) != "pam_faillock.so" {
+			continue
+		}
+		if rule.Type == "account" {
+			accountIndexes = append(accountIndexes, index)
+			control := strings.ToLower(strings.TrimSpace(rule.Control))
+			if control != "required" && control != "requisite" {
+				unknowns = append(unknowns, fmt.Sprintf("%s %s:%d account pam_faillock 제어=%s", stack, rule.Path, rule.Line, rule.Control))
+			}
+			continue
+		}
+		if rule.Type != "auth" {
+			continue
+		}
+		mode, modeKnown := faillockAuthMode(rule.Args)
+		if !modeKnown {
+			unknowns = append(unknowns, fmt.Sprintf("%s %s:%d pam_faillock auth 모드를 확정할 수 없음", stack, rule.Path, rule.Line))
+			continue
+		}
+		control := strings.ToLower(strings.TrimSpace(rule.Control))
+		switch mode {
+		case "preauth":
+			preauthIndexes = append(preauthIndexes, index)
+			if control == "optional" || control == "sufficient" {
+				violations = append(violations, fmt.Sprintf("%s %s:%d preauth 제어=%s로 잠금 실패를 강제하지 않음", stack, rule.Path, rule.Line, rule.Control))
+			} else if control != "required" && control != "requisite" {
+				unknowns = append(unknowns, fmt.Sprintf("%s %s:%d preauth 제어 흐름을 확정할 수 없음", stack, rule.Path, rule.Line))
+			}
+		case "authfail":
+			authfailIndexes = append(authfailIndexes, index)
+			if !safeFaillockAuthfailControl(control) {
+				unknowns = append(unknowns, fmt.Sprintf("%s %s:%d authfail 제어 흐름을 확정할 수 없음", stack, rule.Path, rule.Line))
+			}
+		case "authsucc":
+			authsuccIndexes = append(authsuccIndexes, index)
+			if control != "sufficient" {
+				unknowns = append(unknowns, fmt.Sprintf("%s %s:%d authsucc가 문서화된 sufficient 제어를 사용하지 않음", stack, rule.Path, rule.Line))
+			}
+		}
+	}
+
+	if len(authfailIndexes) == 0 {
+		violations = append(violations, stack+"에 실패 횟수를 기록하는 authfail pam_faillock.so가 없음")
+		return violations, unknowns
+	}
+	if len(authfailIndexes) != 1 || len(preauthIndexes) > 1 || len(authsuccIndexes) > 1 || len(accountIndexes) > 1 {
+		unknowns = append(unknowns, stack+"의 pam_faillock 모드별 적용 경로가 여러 개임")
+	}
+	authfailIndex := authfailIndexes[0]
+	for index, rule := range rules {
+		if rule.Type != "auth" {
+			continue
+		}
+		module := strings.ToLower(filepath.Base(rule.Module))
+		control := strings.ToLower(strings.TrimSpace(rule.Control))
+		if index < authfailIndex && module == "pam_permit.so" && control == "sufficient" {
+			unknowns = append(unknowns, fmt.Sprintf("%s %s:%d sufficient pam_permit.so의 루트 스택 도달성과 잠금 우회를 확정할 수 없음", stack, rule.Path, rule.Line))
+		} else if index < authfailIndex && module == "pam_permit.so" && strings.HasPrefix(control, "[") {
+			unknowns = append(unknowns, fmt.Sprintf("%s %s:%d pam_permit.so 복합 제어의 잠금 우회를 확정할 수 없음", stack, rule.Path, rule.Line))
+		}
+		if index >= authfailIndex {
+			continue
+		}
+		isPreauth := module == "pam_faillock.so" && containsFold(rule.Args, "preauth")
+		if control == "requisite" && !isPreauth {
+			unknowns = append(unknowns, fmt.Sprintf("%s %s:%d requisite %s가 authfail 기록 전에 인증을 종료할 수 있음", stack, rule.Path, rule.Line, module))
+		} else if strings.HasPrefix(control, "[") && pamBracketCanBypassTarget(control, rules, index, authfailIndex, "auth", stack, false) {
+			unknowns = append(unknowns, fmt.Sprintf("%s %s:%d 복합 제어가 인증 실패 시 authfail 기록 경로를 건너뛸 수 있음", stack, rule.Path, rule.Line))
+		}
+	}
+
+	if len(preauthIndexes) == 1 {
+		preauthIndex := preauthIndexes[0]
+		if preauthIndex >= authfailIndex {
+			violations = append(violations, stack+"의 preauth pam_faillock.so가 authfail보다 뒤에 있음")
+		}
+		for index, rule := range rules {
+			if index >= preauthIndex || rule.Type != "auth" {
+				continue
+			}
+			control := strings.ToLower(strings.TrimSpace(rule.Control))
+			module := strings.ToLower(filepath.Base(rule.Module))
+			if strings.HasPrefix(control, "[") {
+				unknowns = append(unknowns, fmt.Sprintf("%s %s:%d 복합 제어가 preauth를 건너뛸 수 있음", stack, rule.Path, rule.Line))
+			} else if control == "sufficient" && module != "pam_deny.so" {
+				unknowns = append(unknowns, fmt.Sprintf("%s %s:%d sufficient %s가 preauth를 건너뛸 수 있음", stack, rule.Path, rule.Line, module))
+			}
+		}
+	}
+
+	accountTopology := len(preauthIndexes) == 1 && len(accountIndexes) == 1
+	authSuccessTopology := len(authsuccIndexes) == 1 && authsuccIndexes[0] > authfailIndex
+	if accountTopology {
+		accountIndex := accountIndexes[0]
+		if !hasDirectSufficientAuthenticationBefore(rules, authfailIndex, stack) {
+			unknowns = append(unknowns, stack+"의 정상 인증 성공 경로가 authfail 전에 종료되는지 확정할 수 없음")
+		}
+		for index, rule := range rules {
+			if index >= accountIndex || rule.Type != "account" {
+				continue
+			}
+			module := strings.ToLower(filepath.Base(rule.Module))
+			control := strings.ToLower(strings.TrimSpace(rule.Control))
+			description := fmt.Sprintf("%s %s:%d %s control=%s", stack, rule.Path, rule.Line, module, rule.Control)
+			if module == "pam_permit.so" && control == "sufficient" {
+				violations = append(violations, description+"이 account pam_faillock.so를 우회함")
+			} else if control == "sufficient" && module != "pam_deny.so" {
+				unknowns = append(unknowns, description+"이 account pam_faillock.so보다 먼저 성공할 수 있음")
+			} else if strings.HasPrefix(control, "[") && pamBracketCanBypassTarget(control, rules, index, accountIndex, "account", stack, true) {
+				unknowns = append(unknowns, description+"이 account pam_faillock.so를 건너뛸 수 있음")
+			}
+		}
+	}
+	if authSuccessTopology {
+		authsuccIndex := authsuccIndexes[0]
+		authfailControl := strings.ToLower(strings.TrimSpace(rules[authfailIndex].Control))
+		if !terminatingFaillockAuthfailControl(authfailControl) {
+			unknowns = append(unknowns, fmt.Sprintf("%s %s:%d authfail 실패가 authsucc까지 진행되어 실패 횟수를 지울 수 있음", stack, rules[authfailIndex].Path, rules[authfailIndex].Line))
+		}
+		for index, rule := range rules {
+			if index >= authsuccIndex || rule.Type != "auth" || index == authfailIndex {
+				continue
+			}
+			module := strings.ToLower(filepath.Base(rule.Module))
+			control := strings.ToLower(strings.TrimSpace(rule.Control))
+			description := fmt.Sprintf("%s %s:%d %s control=%s", stack, rule.Path, rule.Line, module, rule.Control)
+			if control == "sufficient" && module != "pam_deny.so" {
+				unknowns = append(unknowns, description+"이 authsucc pam_faillock.so보다 먼저 성공할 수 있음")
+			} else if strings.HasPrefix(control, "[") && pamBracketCanBypassTarget(control, rules, index, authsuccIndex, "auth", stack, true) {
+				unknowns = append(unknowns, description+"이 authsucc pam_faillock.so를 건너뛸 수 있음")
+			}
+		}
+		authsuccControl := strings.ToLower(strings.TrimSpace(rules[authsuccIndex].Control))
+		if authsuccControl == "sufficient" && !hasRejectingPAMDenyAfter(rules, authsuccIndex, "auth") {
+			unknowns = append(unknowns, fmt.Sprintf("%s %s:%d authsucc 실패 뒤 인증을 확실히 거부하는 pam_deny.so가 없음", stack, rules[authsuccIndex].Path, rules[authsuccIndex].Line))
+		}
+		if !accountTopology && !hasVerifiedSuccessJumpOverFaillock(rules, authfailIndex, stack) {
+			unknowns = append(unknowns, stack+"의 성공 인증 경로가 authfail을 건너 authsucc에 도달하는지 확정할 수 없음")
+		}
+	}
+	if !accountTopology && !authSuccessTopology {
+		unknowns = append(unknowns, stack+"에 검증된 preauth+account 또는 authfail+authsucc 잠금 구조가 없음")
+	}
+	if len(authsuccIndexes) == 1 && authsuccIndexes[0] <= authfailIndex {
+		violations = append(violations, stack+"의 authsucc pam_faillock.so가 authfail보다 앞에 있음")
+	}
+	return violations, unknowns
+}
+
+func faillockAuthMode(arguments []string) (string, bool) {
+	mode := ""
+	for _, argument := range arguments {
+		normalized := strings.ToLower(strings.TrimSpace(argument))
+		if normalized != "preauth" && normalized != "authfail" && normalized != "authsucc" {
+			continue
+		}
+		if mode != "" && mode != normalized {
+			return "", false
+		}
+		mode = normalized
+	}
+	return mode, mode != ""
+}
+
+func safeFaillockAuthfailControl(control string) bool {
+	if control == "required" || control == "requisite" {
+		return true
+	}
+	if !strings.HasPrefix(control, "[") || !strings.HasSuffix(control, "]") {
+		return false
+	}
+	fields := strings.Fields(strings.Trim(control, "[]"))
+	return len(fields) == 1 && (fields[0] == "default=die" || fields[0] == "default=bad")
+}
+
+func terminatingFaillockAuthfailControl(control string) bool {
+	if control == "requisite" {
+		return true
+	}
+	if !strings.HasPrefix(control, "[") || !strings.HasSuffix(control, "]") {
+		return false
+	}
+	fields := strings.Fields(strings.Trim(control, "[]"))
+	return len(fields) == 1 && fields[0] == "default=die"
+}
+
+func hasRejectingPAMDenyAfter(rules []support.PAMRule, currentIndex int, ruleType string) bool {
+	for index := currentIndex + 1; index < len(rules); index++ {
+		rule := rules[index]
+		if rule.Type != ruleType {
+			continue
+		}
+		control := strings.ToLower(strings.TrimSpace(rule.Control))
+		return filepath.Base(rule.Module) == "pam_deny.so" && (control == "required" || control == "requisite")
+	}
+	return false
+}
+
+func hasVerifiedSuccessJumpOverFaillock(rules []support.PAMRule, authfailIndex int, rootService string) bool {
+	for index := 0; index < authfailIndex; index++ {
+		rule := rules[index]
+		if rule.Type != "auth" || !strings.HasPrefix(strings.TrimSpace(rule.Control), "[") {
+			continue
+		}
+		if rule.Service != "" && rule.Service != rootService {
+			continue
+		}
+		module := strings.ToLower(filepath.Base(rule.Module))
+		switch module {
+		case "pam_unix.so", "pam_sss.so", "pam_ldap.so", "pam_winbind.so", "pam_krb5.so", "pam_fprintd.so":
+		default:
+			continue
+		}
+		actions, valid := pamControlActions(rule.Control)
+		if !valid {
+			continue
+		}
+		action, exists := actions["success"]
+		if !exists {
+			action, exists = actions["default"]
+		}
+		if !exists {
+			continue
+		}
+		jump, err := strconv.Atoi(action)
+		if err != nil {
+			continue
+		}
+		distance, exact := pamTargetDistance(rules, index, authfailIndex, "auth", rootService)
+		if exact && jump == distance {
+			return true
+		}
+	}
+	return false
+}
+
+func hasDirectSufficientAuthenticationBefore(rules []support.PAMRule, targetIndex int, rootService string) bool {
+	for index := 0; index < targetIndex; index++ {
+		rule := rules[index]
+		if rule.Type != "auth" || strings.ToLower(strings.TrimSpace(rule.Control)) != "sufficient" {
+			continue
+		}
+		if rule.Service != "" && rule.Service != rootService {
+			continue
+		}
+		switch strings.ToLower(filepath.Base(rule.Module)) {
+		case "pam_unix.so", "pam_sss.so", "pam_ldap.so", "pam_winbind.so", "pam_krb5.so", "pam_fprintd.so":
+			return true
+		}
+	}
+	return false
+}
+
+func pamBracketCanBypassTarget(control string, rules []support.PAMRule, currentIndex, targetIndex int, ruleType, rootService string, successPath bool) bool {
+	distance, exact := pamTargetDistance(rules, currentIndex, targetIndex, ruleType, rootService)
+	if !exact {
+		return true
+	}
+	if distance == 0 {
+		return false
+	}
+	actions, valid := pamControlActions(control)
+	if !valid {
+		return true
+	}
+	if successPath {
+		action, exists := actions["success"]
+		if !exists {
+			action, exists = actions["default"]
+		}
+		return !exists || pamActionBypassesTarget(action, distance)
+	}
+	if _, exists := actions["default"]; !exists {
+		return true
+	}
+	for result, action := range actions {
+		if result == "success" {
+			continue
+		}
+		if pamActionBypassesTarget(action, distance) {
+			return true
+		}
+	}
+	return false
+}
+
+func pamControlActions(control string) (map[string]string, bool) {
+	fields := strings.Fields(strings.Trim(control, "[]"))
+	if len(fields) == 0 {
+		return nil, false
+	}
+	actions := make(map[string]string, len(fields))
+	for _, field := range fields {
+		result, action, found := strings.Cut(strings.ToLower(field), "=")
+		if !found || result == "" || action == "" {
+			return nil, false
+		}
+		if previous, exists := actions[result]; exists && previous != action {
+			return nil, false
+		}
+		actions[result] = action
+	}
+	return actions, true
+}
+
+func pamTargetDistance(rules []support.PAMRule, currentIndex, targetIndex int, ruleType, rootService string) (int, bool) {
+	if currentIndex < 0 || currentIndex >= len(rules) || targetIndex < currentIndex || targetIndex >= len(rules) {
+		return 0, false
+	}
+	if rules[currentIndex].Service != "" && rules[currentIndex].Service != rootService {
+		return 0, false
+	}
+	distance := 0
+	for index := currentIndex + 1; index <= targetIndex && index < len(rules); index++ {
+		if rules[index].Type != ruleType {
+			continue
+		}
+		if rules[index].Service != "" && rules[index].Service != rootService {
+			return 0, false
+		}
+		distance++
+	}
+	return distance, true
+}
+
+func pamActionBypassesTarget(action string, distance int) bool {
+	switch action {
+	case "bad", "ignore", "ok", "reset":
+		return false
+	case "die", "done":
+		return true
+	}
+	jump, err := strconv.Atoi(action)
+	if err != nil || jump < 0 {
+		return true
+	}
+	return jump >= distance
 }
 
 func readFaillockDeny(ctx context.Context, environment evaluator.Environment, defaultValue int, hasDefault bool) (int, string, model.Evidence, error) {

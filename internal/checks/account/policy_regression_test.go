@@ -41,8 +41,8 @@ func TestEvaluateLockoutThresholdReturnsUnknownForUnparseablePAMOverride(t *test
 	environment := evaluator.Environment{
 		Files: newAccountFixtureReader(map[string]string{
 			"/etc/security/faillock.conf": "deny = 3\n",
-			"/etc/pam.d/system-auth":      "auth required pam_faillock.so preauth deny=not-a-number\n",
-			"/etc/pam.d/password-auth":    "auth required pam_faillock.so preauth\n",
+			"/etc/pam.d/system-auth":      "auth required pam_faillock.so preauth deny=not-a-number\nauth sufficient pam_unix.so\nauth required pam_faillock.so authfail\naccount required pam_faillock.so\n",
+			"/etc/pam.d/password-auth":    "auth required pam_faillock.so preauth\nauth sufficient pam_unix.so\nauth required pam_faillock.so authfail\naccount required pam_faillock.so\n",
 		}),
 		Commands: validAuthselectFixture(),
 	}
@@ -55,6 +55,183 @@ func TestEvaluateLockoutThresholdReturnsUnknownForUnparseablePAMOverride(t *test
 	}
 	if !strings.Contains(outcome.Observed, "deny 해석 불가") {
 		t.Fatalf("observed = %q, want PAM deny parse failure", outcome.Observed)
+	}
+}
+
+func TestEvaluateLockoutThresholdRequiresCompleteRockyFaillockTopology(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		stack      string
+		wantStatus model.Status
+		wantText   string
+	}{
+		{
+			name: "Rocky hardened topology passes",
+			stack: "auth required pam_env.so\n" +
+				"auth required pam_faillock.so preauth silent\n" +
+				"auth sufficient pam_fprintd.so\n" +
+				"auth [default=1 ignore=ignore success=ok] pam_usertype.so isregular\n" +
+				"auth [default=1 ignore=ignore success=ok] pam_localuser.so\n" +
+				"auth sufficient pam_unix.so\n" +
+				"auth [default=1 ignore=ignore success=ok] pam_usertype.so isregular\n" +
+				"auth sufficient pam_sss.so forward_pass\n" +
+				"auth required pam_faillock.so authfail\n" +
+				"account required pam_faillock.so\n",
+			wantStatus: model.StatusPass,
+			wantText:   "deny=3",
+		},
+		{
+			name: "preauth without authfail fails",
+			stack: "auth required pam_faillock.so preauth silent\n" +
+				"auth sufficient pam_unix.so\n" +
+				"account required pam_faillock.so\n",
+			wantStatus: model.StatusFail,
+			wantText:   "authfail",
+		},
+		{
+			name: "sufficient pam_permit before recorder is unknown",
+			stack: "auth required pam_faillock.so preauth silent\n" +
+				"auth sufficient pam_permit.so\n" +
+				"auth required pam_faillock.so authfail\n" +
+				"account required pam_faillock.so\n",
+			wantStatus: model.StatusUnknown,
+			wantText:   "pam_permit",
+		},
+		{
+			name: "documented authsucc topology passes",
+			stack: "auth [success=1 default=bad] pam_unix.so\n" +
+				"auth [default=die] pam_faillock.so authfail\n" +
+				"auth sufficient pam_faillock.so authsucc\n" +
+				"auth required pam_deny.so\n",
+			wantStatus: model.StatusPass,
+			wantText:   "deny=3",
+		},
+		{
+			name: "sufficient authentication bypassing authsucc is unknown",
+			stack: "auth sufficient pam_unix.so\n" +
+				"auth requisite pam_faillock.so authfail\n" +
+				"auth sufficient pam_faillock.so authsucc\n" +
+				"auth required pam_deny.so\n",
+			wantStatus: model.StatusUnknown,
+			wantText:   "authsucc pam_faillock.so보다 먼저 성공",
+		},
+		{
+			name: "non terminating authfail before authsucc is unknown",
+			stack: "auth [success=1 default=bad] pam_unix.so\n" +
+				"auth required pam_faillock.so authfail\n" +
+				"auth sufficient pam_faillock.so authsucc\n" +
+				"auth required pam_deny.so\n",
+			wantStatus: model.StatusUnknown,
+			wantText:   "실패 횟수를 지울 수 있음",
+		},
+		{
+			name: "account topology without successful credential exit is unknown",
+			stack: "auth required pam_faillock.so preauth\n" +
+				"auth required pam_unix.so\n" +
+				"auth required pam_faillock.so authfail\n" +
+				"auth required pam_deny.so\n" +
+				"account required pam_faillock.so\n",
+			wantStatus: model.StatusUnknown,
+			wantText:   "정상 인증 성공 경로",
+		},
+		{
+			name: "account success jump landing on deny is unknown",
+			stack: "auth required pam_faillock.so preauth\n" +
+				"auth [success=1 default=bad] pam_unix.so\n" +
+				"auth [default=die] pam_faillock.so authfail\n" +
+				"auth required pam_deny.so\n" +
+				"account required pam_faillock.so\n",
+			wantStatus: model.StatusUnknown,
+			wantText:   "정상 인증 성공 경로",
+		},
+		{
+			name: "sufficient authsucc without immediate deny is unknown",
+			stack: "auth [success=1 default=bad] pam_unix.so\n" +
+				"auth [default=die] pam_faillock.so authfail\n" +
+				"auth sufficient pam_faillock.so authsucc\n" +
+				"auth optional pam_warn.so\n" +
+				"auth required pam_deny.so\n",
+			wantStatus: model.StatusUnknown,
+			wantText:   "확실히 거부하는 pam_deny.so가 없음",
+		},
+		{
+			name: "required authsucc is unknown",
+			stack: "auth [success=1 default=bad] pam_unix.so\n" +
+				"auth [default=die] pam_faillock.so authfail\n" +
+				"auth required pam_faillock.so authsucc\n" +
+				"auth required pam_deny.so\n",
+			wantStatus: model.StatusUnknown,
+			wantText:   "문서화된 sufficient 제어",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			environment := evaluator.Environment{
+				Files: newAccountFixtureReader(map[string]string{
+					"/etc/security/faillock.conf": "deny = 3\n",
+					"/etc/pam.d/system-auth":      test.stack,
+					"/etc/pam.d/password-auth":    test.stack,
+				}),
+				Commands: validAuthselectFixture(),
+			}
+			rule := model.ResolvedRule{RuleDefinition: model.RuleDefinition{Parameters: map[string]any{"default_deny": 3}}}
+			outcome := evaluateLockoutThreshold(context.Background(), rule, environment)
+			if outcome.Status != test.wantStatus {
+				t.Fatalf("status = %q, want %q; outcome = %#v", outcome.Status, test.wantStatus, outcome)
+			}
+			if !strings.Contains(outcome.Observed, test.wantText) {
+				t.Fatalf("observed = %q, want substring %q", outcome.Observed, test.wantText)
+			}
+		})
+	}
+}
+
+func TestAssessFaillockTopologyRejectsFlattenedForeignServiceControlFlow(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		rules    []support.PAMRule
+		wantText string
+	}{
+		{
+			name: "nested sufficient permit is not a root-stack bypass",
+			rules: []support.PAMRule{
+				{Service: "system-auth", Path: "/etc/pam.d/system-auth", Line: 1, Type: "auth", Control: "required", Module: "pam_faillock.so", Args: []string{"preauth"}},
+				{Service: "nested-auth", Path: "/etc/pam.d/nested-auth", Line: 1, Type: "auth", Control: "sufficient", Module: "pam_permit.so"},
+				{Service: "system-auth", Path: "/etc/pam.d/system-auth", Line: 3, Type: "auth", Control: "sufficient", Module: "pam_unix.so"},
+				{Service: "system-auth", Path: "/etc/pam.d/system-auth", Line: 4, Type: "auth", Control: "required", Module: "pam_faillock.so", Args: []string{"authfail"}},
+				{Service: "system-auth", Path: "/etc/pam.d/system-auth", Line: 5, Type: "account", Control: "required", Module: "pam_faillock.so"},
+			},
+			wantText: "pam_permit.so의 루트 스택 도달성",
+		},
+		{
+			name: "nested numeric jump cannot prove root authsucc reachability",
+			rules: []support.PAMRule{
+				{Service: "nested-auth", Path: "/etc/pam.d/nested-auth", Line: 1, Type: "auth", Control: "[success=1 default=bad]", Module: "pam_unix.so"},
+				{Service: "system-auth", Path: "/etc/pam.d/system-auth", Line: 2, Type: "auth", Control: "[default=die]", Module: "pam_faillock.so", Args: []string{"authfail"}},
+				{Service: "system-auth", Path: "/etc/pam.d/system-auth", Line: 3, Type: "auth", Control: "sufficient", Module: "pam_faillock.so", Args: []string{"authsucc"}},
+				{Service: "system-auth", Path: "/etc/pam.d/system-auth", Line: 4, Type: "auth", Control: "required", Module: "pam_deny.so"},
+			},
+			wantText: "성공 인증 경로",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			violations, unknowns := assessFaillockPAMTopology("system-auth", test.rules)
+			if len(violations) != 0 {
+				t.Fatalf("violations = %v, want none", violations)
+			}
+			if !strings.Contains(strings.Join(unknowns, "; "), test.wantText) {
+				t.Fatalf("unknowns = %v, want substring %q", unknowns, test.wantText)
+			}
+		})
 	}
 }
 
