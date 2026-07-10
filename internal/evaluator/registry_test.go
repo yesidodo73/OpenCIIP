@@ -141,14 +141,20 @@ func TestRegistryEvaluateMasksPanic(t *testing.T) {
 
 func TestRegistryEvaluateNormalizesInvalidStatus(t *testing.T) {
 	t.Parallel()
-	registry := NewRegistry()
-	if err := registry.Register("test.evaluator", func(context.Context, model.ResolvedRule, Environment) Outcome {
-		return Outcome{Status: model.Status("INVALID")}
-	}); err != nil {
-		t.Fatalf("Register() error = %v", err)
-	}
-	result := registry.Evaluate(context.Background(), testResolvedRule(model.VerificationVerified), Environment{})
-	if result.Status != model.StatusError || result.ErrorCode != "invalid_evaluator_status" {
-		t.Fatalf("result = %s/%s, want ERROR/invalid_evaluator_status", result.Status, result.ErrorCode)
+	for _, verification := range []model.VerificationState{model.VerificationVerified, model.VerificationPending} {
+		verification := verification
+		t.Run(string(verification), func(t *testing.T) {
+			t.Parallel()
+			registry := NewRegistry()
+			if err := registry.Register("test.evaluator", func(context.Context, model.ResolvedRule, Environment) Outcome {
+				return Outcome{Status: model.Status("INVALID")}
+			}); err != nil {
+				t.Fatalf("Register() error = %v", err)
+			}
+			result := registry.Evaluate(context.Background(), testResolvedRule(verification), Environment{})
+			if result.Status != model.StatusError || result.ErrorCode != "invalid_evaluator_status" {
+				t.Fatalf("result = %s/%s, want ERROR/invalid_evaluator_status", result.Status, result.ErrorCode)
+			}
+		})
 	}
 }

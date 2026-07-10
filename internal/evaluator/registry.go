@@ -137,6 +137,12 @@ func applyVerificationBoundary(result *model.CheckResult, verification model.Ver
 		result.Status == model.StatusUnknown || result.Status == model.StatusSkipped {
 		return
 	}
+	switch result.Status {
+	case model.StatusPass, model.StatusFail, model.StatusNotApplicable:
+		// Only valid provisional conclusions are eligible for the pending boundary.
+	default:
+		return
+	}
 	provisionalStatus := result.Status
 	provisionalSummary := result.Summary
 	provisionalObserved := result.Observed

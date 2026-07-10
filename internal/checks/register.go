@@ -1,7 +1,6 @@
 package checks
 
 import (
-	"context"
 	"fmt"
 	"sort"
 	"strings"
@@ -13,7 +12,6 @@ import (
 	patchcheck "github.com/yesidodo73/OpenCIIP/internal/checks/patch"
 	"github.com/yesidodo73/OpenCIIP/internal/checks/service"
 	"github.com/yesidodo73/OpenCIIP/internal/evaluator"
-	"github.com/yesidodo73/OpenCIIP/internal/model"
 )
 
 type implementationSource struct {
@@ -77,13 +75,18 @@ func RegisterAll(registry *evaluator.Registry, evaluatorIDs []string) error {
 	}
 
 	ids := make([]string, 0, len(catalog))
+	missing := make([]string, 0)
 	for id := range catalog {
 		ids = append(ids, id)
 		if _, implemented := implementations[id]; !implemented {
-			implementations[id] = pendingImplementation
+			missing = append(missing, id)
 		}
 	}
 	sort.Strings(ids)
+	sort.Strings(missing)
+	if len(missing) > 0 {
+		return fmt.Errorf("catalog evaluators have no implementation: %s", strings.Join(missing, ", "))
+	}
 
 	registeredIDs := registry.IDs()
 	registered := make(map[string]struct{}, len(registeredIDs))
@@ -102,22 +105,4 @@ func RegisterAll(registry *evaluator.Registry, evaluatorIDs []string) error {
 		}
 	}
 	return nil
-}
-
-func pendingImplementation(_ context.Context, rule model.ResolvedRule, _ evaluator.Environment) evaluator.Outcome {
-	reason := model.UnknownUnsupportedConfiguration
-	summary := "이 점검 항목의 자동 판정 구현이 아직 준비되지 않았습니다."
-	observed := "지원되는 자동 수집 및 판정 구현이 없습니다."
-	if rule.Criteria.ManualReviewRequired {
-		reason = model.UnknownManualVerification
-		summary = "정책과 운영 상황을 확인해야 하므로 평가자의 수동 판단이 필요합니다."
-		observed = "자동 판정에 필요한 조직 정책 또는 운영 근거가 제공되지 않았습니다."
-	}
-	return evaluator.Outcome{
-		Status:        model.StatusUnknown,
-		UnknownReason: reason,
-		Summary:       summary,
-		Expected:      rule.Criteria.Pass,
-		Observed:      observed,
-	}
 }
