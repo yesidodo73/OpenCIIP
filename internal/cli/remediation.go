@@ -59,6 +59,7 @@ func newRemediationPlanCommand(stdout io.Writer, resultCode *int, parent *remedi
 			if err != nil {
 				return remediationFailure("조치 계획을 준비하지 못했습니다", err)
 			}
+			defer service.Close()
 			planned, err := service.PlanFromReport(command.Context(), reportDirectory, workflow.PlanOptions{RuleIDs: checks, FailurePolicy: policy})
 			if err != nil {
 				return remediationFailure("조치 계획을 생성하지 못했습니다", err)
@@ -94,6 +95,7 @@ func newRemediationApproveCommand(stdout io.Writer, resultCode *int, parent *rem
 			if err != nil {
 				return remediationFailure("승인을 준비하지 못했습니다", err)
 			}
+			defer service.Close()
 			if err := service.Approve(command.Context(), arguments[0], digest, "cli-explicit", ""); err != nil {
 				return remediationFailure("조치 계획을 승인하지 못했습니다", err)
 			}
@@ -151,6 +153,7 @@ func newRemediationApplyCommand(stdout io.Writer, resultCode *int, parent *remed
 			if err != nil {
 				return remediationFailure("조치 적용을 준비하지 못했습니다", err)
 			}
+			defer service.Close()
 			if err := service.Apply(command.Context(), arguments[0]); err != nil {
 				if current, loadErr := service.Load(context.WithoutCancel(command.Context()), arguments[0]); loadErr == nil {
 					if _, outputErr := fmt.Fprintf(stdout, "적용 후 저널 상태: %s\n", current.State); outputErr != nil {

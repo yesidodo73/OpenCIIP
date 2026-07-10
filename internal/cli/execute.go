@@ -52,6 +52,7 @@ func newRootCommand(stdin io.Reader, stdout, stderr io.Writer, resultCode *int) 
 			if err != nil {
 				return &commandError{code: exitcode.Error, err: fmt.Errorf("점검을 준비하지 못했습니다: %w", err)}
 			}
+			defer application.Close()
 			writer, err := report.NewWriter("reports")
 			if err != nil {
 				return &commandError{code: exitcode.Error, err: fmt.Errorf("보고서 저장 경로를 준비하지 못했습니다: %w", err)}
@@ -116,6 +117,7 @@ func newScanCommand(stdout io.Writer, resultCode *int) *cobra.Command {
 			if err != nil {
 				return &commandError{code: exitcode.Error, err: fmt.Errorf("점검을 준비하지 못했습니다: %w", err)}
 			}
+			defer application.Close()
 			run, err := application.Scan(command.Context(), engine.Options{
 				Selection:    selection,
 				EvidenceMode: options.evidence,

@@ -34,7 +34,7 @@ var ruleIDPattern = regexp.MustCompile(`^U-[0-9]{2}$`)
 type Workflow struct {
 	stateRoot  string
 	systemRoot string
-	files      system.Reader
+	files      *system.OSReader
 	platform   model.PlatformInfo
 	host       *hostidentity.Collector
 	content    *contentstore.Store
@@ -100,6 +100,12 @@ func openExecutionWorkflow(ctx context.Context, stateRoot, systemRoot string, cr
 	if err != nil {
 		return nil, fmt.Errorf("시스템 파일 접근을 준비하지 못했습니다: %w", err)
 	}
+	succeeded := false
+	defer func() {
+		if !succeeded {
+			_ = files.Close()
+		}
+	}()
 	platformInfo, _, err := platform.NewDetector(files).Detect(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("플랫폼을 식별하지 못했습니다: %w", err)
@@ -142,10 +148,21 @@ func openExecutionWorkflow(ctx context.Context, stateRoot, systemRoot string, cr
 	if err != nil {
 		return nil, fmt.Errorf("현재 플랫폼의 검증 상태를 해석하지 못했습니다: %w", err)
 	}
-	return &Workflow{
+	workflow := &Workflow{
 		stateRoot: journalStore.Root(), systemRoot: systemRoot, files: files, platform: platformInfo,
 		host: host, content: content, store: journalStore, recipes: recipes, rules: ruleBundle, manager: manager, now: time.Now,
-	}, nil
+	}
+	succeeded = true
+	return workflow, nil
+}
+
+// Close releases the rooted system handle owned by an execution workflow.
+// Status, recovery, and cancellation workflows do not own one, so Close is a no-op for them.
+func (w *Workflow) Close() error {
+	if w == nil || w.files == nil {
+		return nil
+	}
+	return w.files.Close()
 }
 
 func OpenStatus(stateRoot string) (*Workflow, error) {
@@ -773,6 +790,7 @@ func (w *Workflow) scanCurrentRules(
 	if err != nil {
 		return nil, fmt.Errorf("현재 조치 후보 재점검을 준비하지 못했습니다: %w", err)
 	}
+	defer checker.Close()
 	fresh, err := checker.Scan(ctx, engine.Options{
 		Selection:    model.Selection{RuleIDs: candidateIDs},
 		EvidenceMode: "none",

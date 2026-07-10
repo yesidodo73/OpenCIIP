@@ -19,6 +19,7 @@ import (
 type Application struct {
 	engine   *engine.Engine
 	host     *hostidentity.Collector
+	files    *system.OSReader
 	warnings []string
 }
 
@@ -27,6 +28,12 @@ func New(ctx context.Context, systemRoot string) (*Application, error) {
 	if err != nil {
 		return nil, err
 	}
+	succeeded := false
+	defer func() {
+		if !succeeded {
+			_ = files.Close()
+		}
+	}()
 	detector := platform.NewDetector(files)
 	platformInfo, warnings, err := detector.Detect(ctx)
 	if err != nil {
@@ -60,11 +67,21 @@ func New(ctx context.Context, systemRoot string) (*Application, error) {
 	if err != nil {
 		return nil, fmt.Errorf("prepare host identity collector: %w", err)
 	}
-	return &Application{engine: checkEngine, host: host, warnings: warnings}, nil
+	succeeded = true
+	return &Application{engine: checkEngine, host: host, files: files, warnings: warnings}, nil
 }
 
 func NewDefault(ctx context.Context) (*Application, error) {
 	return New(ctx, string(os.PathSeparator))
+}
+
+func (a *Application) Close() error {
+	if a == nil || a.files == nil {
+		return nil
+	}
+	err := a.files.Close()
+	a.files = nil
+	return err
 }
 
 func (a *Application) Scan(ctx context.Context, options engine.Options) (model.ScanRun, error) {
@@ -105,7 +122,6 @@ func scanCommandAllowlist() []string {
 		"named",
 		"named-checkconf",
 		"nft",
-		"passwd",
 		"postconf",
 		"ps",
 		"pwck",
@@ -114,6 +130,7 @@ func scanCommandAllowlist() []string {
 		"rsyslogd",
 		"sendmail",
 		"sha256sum",
+		"snmpd",
 		"ss",
 		"sshd",
 		"systemd-analyze",

@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -192,7 +193,9 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	case remediationPlanMsg:
 		m.cancelAction = nil
 		if message.remediator != nil {
-			m.remediator = message.remediator
+			if err := m.replaceRemediator(message.remediator); err != nil {
+				message.err = errors.Join(message.err, fmt.Errorf("이전 조치 workflow를 닫지 못했습니다: %w", err))
+			}
 		}
 		if message.plan.Journal != nil {
 			m.plan = message.plan
@@ -296,7 +299,7 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		switch m.screen {
 		case screenReady:
 			if key == "enter" || key == "s" {
-				return m.startScan()
+				return m, m.startScan()
 			}
 		case screenResults:
 			switch key {
@@ -313,7 +316,7 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, nil
 			case "r":
-				return m.startScan()
+				return m, m.startScan()
 			case "m":
 				if m.canPlanRemediation() {
 					m.failurePolicy = model.FailureRollbackItem
@@ -437,7 +440,7 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case screenError:
 			if key == "r" {
-				return m.startScan()
+				return m, m.startScan()
 			}
 		}
 	}
@@ -578,7 +581,13 @@ func (m *Model) startRemediationPlan() (tea.Model, tea.Cmd) {
 			return remediationPlanMsg{err: err}
 		}
 		planned, err := remediator.PlanFromReport(actionContext, reportPath, workflow.PlanOptions{FailurePolicy: failurePolicy})
-		return remediationPlanMsg{remediator: remediator, plan: planned, err: err}
+		if err != nil {
+			if closeErr := closeRemediator(remediator); closeErr != nil {
+				err = errors.Join(err, fmt.Errorf("실패한 조치 workflow를 닫지 못했습니다: %w", closeErr))
+			}
+			return remediationPlanMsg{err: err}
+		}
+		return remediationPlanMsg{remediator: remediator, plan: planned}
 	}
 }
 
@@ -1018,9 +1027,16 @@ func Run(ctx context.Context, input io.Reader, output io.Writer, scanner Scanner
 	return RunWithRemediation(ctx, input, output, scanner, writer, nil)
 }
 
-func RunWithRemediation(ctx context.Context, input io.Reader, output io.Writer, scanner Scanner, writer ScanWriter, factory RemediatorFactory) (int, error) {
+func RunWithRemediation(ctx context.Context, input io.Reader, output io.Writer, scanner Scanner, writer ScanWriter, factory RemediatorFactory) (code int, runErr error) {
+	initial := NewModelWithRemediation(ctx, scanner, writer, factory)
+	defer func() {
+		if err := initial.closeRemediator(); err != nil {
+			code = exitcode.Error
+			runErr = errors.Join(runErr, fmt.Errorf("조치 workflow를 닫지 못했습니다: %w", err))
+		}
+	}()
 	program := tea.NewProgram(
-		NewModelWithRemediation(ctx, scanner, writer, factory),
+		initial,
 		tea.WithContext(ctx),
 		tea.WithInput(input),
 		tea.WithOutput(output),
@@ -1034,6 +1050,32 @@ func RunWithRemediation(ctx context.Context, input io.Reader, output io.Writer, 
 		return exitcode.Error, fmt.Errorf("TUI가 알 수 없는 최종 상태를 반환했습니다")
 	}
 	return model.exitCode, nil
+}
+
+func (m *Model) replaceRemediator(next Remediator) error {
+	if m == nil {
+		return closeRemediator(next)
+	}
+	previous := m.remediator
+	m.remediator = next
+	return closeRemediator(previous)
+}
+
+func (m *Model) closeRemediator() error {
+	if m == nil {
+		return nil
+	}
+	current := m.remediator
+	m.remediator = nil
+	return closeRemediator(current)
+}
+
+func closeRemediator(remediator Remediator) error {
+	closer, ok := remediator.(interface{ Close() error })
+	if !ok || closer == nil {
+		return nil
+	}
+	return closer.Close()
 }
 
 var (

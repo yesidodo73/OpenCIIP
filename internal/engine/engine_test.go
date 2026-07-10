@@ -35,7 +35,7 @@ func TestScanProducesDeterministicSelectionCountsAndEvidenceBoundary(t *testing.
 	if run.Metadata.Counts[model.StatusPass] != 1 || run.Metadata.Counts[model.StatusFail] != 1 {
 		t.Fatalf("counts = %#v", run.Metadata.Counts)
 	}
-	if run.Metadata.ExitCode != exitcode.Fail || !run.Metadata.Complete || run.Metadata.EvidenceMode != "problems" {
+	if run.Metadata.ExitCode != exitcode.Failed || !run.Metadata.Complete || run.Metadata.EvidenceMode != "problems" {
 		t.Fatalf("metadata = %#v", run.Metadata)
 	}
 }
@@ -158,6 +158,11 @@ func newFixtureEngine(t *testing.T) *Engine {
 	if err != nil {
 		t.Fatalf("NewOSReader() error = %v", err)
 	}
+	t.Cleanup(func() {
+		if err := files.Close(); err != nil {
+			t.Errorf("OSReader.Close() error = %v", err)
+		}
+	})
 	instance, err := New(bundle, registry, evaluator.Environment{
 		Files:    files,
 		Commands: inertCommandRunner{},

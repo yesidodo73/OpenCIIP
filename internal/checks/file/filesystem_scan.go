@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path"
 	"sort"
 	"strings"
 	"time"
@@ -238,10 +237,8 @@ func mountOptionPresent(options, expected string) bool {
 }
 
 func inspectMountNamespace(files system.Reader) (namespaceBoundary, error) {
-	const (
-		selfPath = "/proc/self/ns/mnt"
-		initPath = "/proc/1/ns/mnt"
-	)
+	selfPath := fmt.Sprintf("/proc/%d/ns/mnt", os.Getpid())
+	const initPath = "/proc/1/ns/mnt"
 	self, selfErr := files.Lstat(selfPath)
 	init, initErr := files.Lstat(initPath)
 	if selfErr != nil || initErr != nil {

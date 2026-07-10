@@ -14,9 +14,11 @@ import (
 const DefaultReadLimit int64 = 2 << 20
 
 var (
-	ErrPathOutsideRoot = errors.New("path is outside the configured system root")
-	ErrNotRegularFile  = errors.New("path is not a regular file")
-	ErrReadLimit       = errors.New("file exceeds the configured read limit")
+	ErrPathOutsideRoot         = errors.New("path is outside the configured system root")
+	ErrNotRegularFile          = errors.New("path is not a regular file")
+	ErrReadLimit               = errors.New("file exceeds the configured read limit")
+	ErrFileChanged             = errors.New("file changed while being read")
+	ErrRootedAccessUnsupported = errors.New("required rooted path resolution is not supported")
 )
 
 type FileMetadata struct {
@@ -42,7 +44,14 @@ type Reader interface {
 
 // OSReader exposes a rooted, read-only view of the target system.
 type OSReader struct {
-	root string
+	root rootedAccess
+}
+
+func (r *OSReader) Close() error {
+	if r == nil || r.root == nil {
+		return nil
+	}
+	return r.root.Close()
 }
 
 func NewOSReader(root string) (*OSReader, error) {
@@ -57,32 +66,39 @@ func NewOSReader(root string) (*OSReader, error) {
 	if err != nil {
 		return nil, fmt.Errorf("resolve system root symlinks: %w", err)
 	}
-	return &OSReader{root: filepath.Clean(resolved)}, nil
+	rootHandle, err := newRootedAccess(filepath.Clean(resolved))
+	if err != nil {
+		return nil, fmt.Errorf("open system root: %w", err)
+	}
+	return &OSReader{root: rootHandle}, nil
 }
 
 func (r *OSReader) ReadFile(ctx context.Context, path string, limit int64) ([]byte, FileMetadata, error) {
 	if limit <= 0 {
 		limit = DefaultReadLimit
 	}
-	resolved, err := r.resolve(path, true)
+	name, err := rootedName(path)
 	if err != nil {
 		return nil, FileMetadata{}, err
 	}
-	file, err := os.Open(resolved)
+	file, err := r.root.Open(name)
 	if err != nil {
 		return nil, FileMetadata{}, err
 	}
 	defer file.Close()
+	return readOpenedFile(ctx, path, limit, file, nil)
+}
 
-	info, err := file.Stat()
+func readOpenedFile(ctx context.Context, path string, limit int64, file *os.File, afterRead func() error) ([]byte, FileMetadata, error) {
+	before, err := file.Stat()
 	if err != nil {
 		return nil, FileMetadata{}, err
 	}
-	if !info.Mode().IsRegular() {
+	if !before.Mode().IsRegular() {
 		return nil, FileMetadata{}, fmt.Errorf("%w: %s", ErrNotRegularFile, path)
 	}
-	if info.Size() > limit {
-		return nil, FileMetadata{}, fmt.Errorf("%w: %s is %d bytes", ErrReadLimit, path, info.Size())
+	if before.Size() > limit {
+		return nil, FileMetadata{}, fmt.Errorf("%w: %s is %d bytes", ErrReadLimit, path, before.Size())
 	}
 
 	data, err := io.ReadAll(io.LimitReader(&contextReader{ctx: ctx, reader: file}, limit+1))
@@ -92,15 +108,27 @@ func (r *OSReader) ReadFile(ctx context.Context, path string, limit int64) ([]by
 	if int64(len(data)) > limit {
 		return nil, FileMetadata{}, fmt.Errorf("%w: %s changed while being read", ErrReadLimit, path)
 	}
-	return data, metadata(path, info, ""), nil
+	if afterRead != nil {
+		if err := afterRead(); err != nil {
+			return nil, FileMetadata{}, err
+		}
+	}
+	after, err := file.Stat()
+	if err != nil {
+		return nil, FileMetadata{}, err
+	}
+	if !sameFileSnapshot(before, after) {
+		return nil, FileMetadata{}, fmt.Errorf("%w: %s", ErrFileChanged, path)
+	}
+	return data, metadata(path, after, ""), nil
 }
 
 func (r *OSReader) Stat(path string) (FileMetadata, error) {
-	resolved, err := r.resolve(path, true)
+	name, err := rootedName(path)
 	if err != nil {
 		return FileMetadata{}, err
 	}
-	info, err := os.Stat(resolved)
+	info, err := r.root.Stat(name)
 	if err != nil {
 		return FileMetadata{}, err
 	}
@@ -108,30 +136,28 @@ func (r *OSReader) Stat(path string) (FileMetadata, error) {
 }
 
 func (r *OSReader) Lstat(path string) (FileMetadata, error) {
-	resolved, err := r.resolve(path, false)
+	name, err := rootedName(path)
 	if err != nil {
 		return FileMetadata{}, err
 	}
-	info, err := os.Lstat(resolved)
+	info, linkTarget, err := r.root.Lstat(name)
 	if err != nil {
 		return FileMetadata{}, err
-	}
-	linkTarget := ""
-	if info.Mode()&os.ModeSymlink != 0 {
-		linkTarget, err = os.Readlink(resolved)
-		if err != nil {
-			return FileMetadata{}, err
-		}
 	}
 	return metadata(path, info, linkTarget), nil
 }
 
 func (r *OSReader) ReadDir(path string) ([]os.DirEntry, error) {
-	resolved, err := r.resolve(path, true)
+	name, err := rootedName(path)
 	if err != nil {
 		return nil, err
 	}
-	return os.ReadDir(resolved)
+	directory, err := r.root.OpenDir(name)
+	if err != nil {
+		return nil, err
+	}
+	defer directory.Close()
+	return directory.ReadDir(-1)
 }
 
 func (r *OSReader) Exists(path string) (bool, error) {
@@ -145,40 +171,43 @@ func (r *OSReader) Exists(path string) (bool, error) {
 	return false, err
 }
 
-func (r *OSReader) resolve(path string, followFinalSymlink bool) (string, error) {
+func rootedName(path string) (string, error) {
 	if strings.IndexByte(path, 0) >= 0 {
 		return "", fmt.Errorf("path contains a NUL byte")
 	}
 	if !filepath.IsAbs(path) {
 		return "", fmt.Errorf("system path must be absolute: %q", path)
 	}
-	relative := strings.TrimLeft(filepath.Clean(path), `/\\`)
-	candidate := filepath.Join(r.root, relative)
-	if err := ensureWithinRoot(r.root, candidate); err != nil {
-		return "", err
+	cleaned := filepath.Clean(path)
+	if cleaned != path {
+		return "", fmt.Errorf("system path must be canonical: %q", path)
 	}
-	if !followFinalSymlink {
-		return candidate, nil
-	}
-	resolved, err := filepath.EvalSymlinks(candidate)
-	if err != nil {
-		return "", err
-	}
-	if err := ensureWithinRoot(r.root, resolved); err != nil {
-		return "", err
-	}
-	return resolved, nil
-}
-
-func ensureWithinRoot(root, candidate string) error {
-	relative, err := filepath.Rel(root, candidate)
-	if err != nil {
-		return fmt.Errorf("compare system path with root: %w", err)
+	relative := strings.TrimPrefix(cleaned, string(filepath.Separator))
+	if relative == "" {
+		return ".", nil
 	}
 	if relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) || filepath.IsAbs(relative) {
-		return fmt.Errorf("%w: %s", ErrPathOutsideRoot, candidate)
+		return "", fmt.Errorf("%w: %s", ErrPathOutsideRoot, path)
 	}
-	return nil
+	return relative, nil
+}
+
+func sameFileSnapshot(left, right os.FileInfo) bool {
+	if left == nil || right == nil || left.Mode() != right.Mode() || left.Size() != right.Size() || !left.ModTime().Equal(right.ModTime()) {
+		return false
+	}
+	leftUID, leftGID, leftDevice, leftInode := statFields(left)
+	rightUID, rightGID, rightDevice, rightInode := statFields(right)
+	return leftUID == rightUID && leftGID == rightGID && leftDevice == rightDevice && leftInode == rightInode &&
+		samePlatformSnapshot(left, right)
+}
+
+type rootedAccess interface {
+	Close() error
+	Open(string) (*os.File, error)
+	OpenDir(string) (*os.File, error)
+	Stat(string) (os.FileInfo, error)
+	Lstat(string) (os.FileInfo, string, error)
 }
 
 func metadata(path string, info os.FileInfo, linkTarget string) FileMetadata {
