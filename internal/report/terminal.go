@@ -21,7 +21,7 @@ func WriteTerminal(output io.Writer, run model.ScanRun, options TerminalOptions)
 		}
 	}
 	visible := 0
-	for _, result := range run.Results {
+	for _, result := range model.SortedResultsByStatus(run.Results) {
 		if !options.All && result.Status != model.StatusFail && result.Status != model.StatusUnknown && result.Status != model.StatusError {
 			continue
 		}
@@ -52,7 +52,7 @@ func WriteTerminal(output io.Writer, run model.ScanRun, options TerminalOptions)
 		return err
 	}
 	for _, status := range orderedStatuses() {
-		if _, err := fmt.Fprintf(output, "%s=%d ", status, run.Metadata.Counts[status]); err != nil {
+		if _, err := fmt.Fprintf(output, "%s=%d ", statusDisplayLabel(status), run.Metadata.Counts[status]); err != nil {
 			return err
 		}
 	}
@@ -82,8 +82,9 @@ func scanSupportLabel(level model.ScanSupportLevel) string {
 }
 
 func colorStatus(status model.Status, enabled bool) string {
+	label := statusDisplayLabel(status)
 	if !enabled {
-		return string(status)
+		return label
 	}
 	color := "\x1b[37m"
 	switch status {
@@ -96,5 +97,12 @@ func colorStatus(status model.Status, enabled bool) string {
 	case model.StatusNotApplicable, model.StatusSkipped:
 		color = "\x1b[90m"
 	}
-	return color + string(status) + "\x1b[0m"
+	return color + label + "\x1b[0m"
+}
+
+func statusDisplayLabel(status model.Status) string {
+	if status == model.StatusNotApplicable {
+		return "해당 없음"
+	}
+	return string(status)
 }

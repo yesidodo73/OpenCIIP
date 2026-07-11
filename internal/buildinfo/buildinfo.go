@@ -3,18 +3,23 @@ package buildinfo
 import (
 	"context"
 	"crypto/sha256"
+	_ "embed"
 	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
 	"runtime/debug"
+	"strings"
 )
 
 var (
-	version = "dev"
+	version = ""
 	commit  = "unknown"
 	date    = "unknown"
 )
+
+//go:embed VERSION
+var embeddedVersion string
 
 // Info describes the exact OpenCIIP build that produced a result.
 type Info struct {
@@ -26,17 +31,20 @@ type Info struct {
 
 // Current returns build information set by release ldflags and Go module data.
 func Current() Info {
+	resolvedVersion := strings.TrimSpace(version)
+	if resolvedVersion == "" {
+		resolvedVersion = strings.TrimSpace(embeddedVersion)
+	}
+	if resolvedVersion == "" {
+		resolvedVersion = "dev"
+	}
 	info := Info{
-		Version:   version,
+		Version:   resolvedVersion,
 		Commit:    commit,
 		BuildDate: date,
 	}
 
 	if build, ok := debug.ReadBuildInfo(); ok {
-		if info.Version == "dev" && build.Main.Version != "" && build.Main.Version != "(devel)" {
-			info.Version = build.Main.Version
-		}
-
 		for _, setting := range build.Settings {
 			switch setting.Key {
 			case "vcs.revision":
@@ -52,8 +60,17 @@ func Current() Info {
 			}
 		}
 	}
+	if info.Modified && !strings.Contains(info.Version, "+dirty") {
+		info.Version += "+dirty"
+	}
 
 	return info
+}
+
+func IsPrerelease(version string) bool {
+	version = strings.TrimPrefix(strings.TrimSpace(version), "v")
+	version, _, _ = strings.Cut(version, "+")
+	return strings.Contains(version, "-")
 }
 
 // ExecutableSHA256 hashes one stably opened executable twice and rejects a

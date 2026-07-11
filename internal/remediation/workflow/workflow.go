@@ -78,8 +78,8 @@ func currentBuildIdentity(ctx context.Context, requireRelease bool) (model.Remed
 	if err := build.Validate(); err != nil {
 		return model.RemediationBuildIdentity{}, fmt.Errorf("현재 조치 빌드 identity가 유효하지 않습니다: %w", err)
 	}
-	if requireRelease && (strings.EqualFold(build.Version, "dev") || strings.EqualFold(build.Version, "unknown") || strings.EqualFold(build.Commit, "unknown") || build.Modified) {
-		return model.RemediationBuildIdentity{}, fmt.Errorf("dev, unknown 또는 수정된 빌드에서는 실제 조치나 롤백을 수행할 수 없습니다")
+	if requireRelease && (strings.EqualFold(build.Version, "dev") || strings.EqualFold(build.Version, "unknown") || strings.EqualFold(build.Commit, "unknown") || build.Modified || buildinfo.IsPrerelease(build.Version)) {
+		return model.RemediationBuildIdentity{}, fmt.Errorf("dev, unknown, 사전 릴리스 또는 수정된 빌드에서는 실제 조치나 롤백을 수행할 수 없습니다")
 	}
 	return build, nil
 }

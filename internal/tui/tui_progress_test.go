@@ -26,20 +26,37 @@ func TestDurationLabel(t *testing.T) {
 	}
 }
 
-func TestScanningViewShowsProgressAndETA(t *testing.T) {
+func TestScanningViewShowsCenteredProgressWithoutETA(t *testing.T) {
 	t.Parallel()
 	started := time.Date(2026, time.July, 12, 0, 0, 0, 0, time.UTC)
 	view := &Model{
 		width:        100,
+		height:       36,
 		scanStarted:  started,
 		scanProgress: engine.Progress{Completed: 10, Total: 20, RuleID: "U-11", Title: "불필요 계정 shell 제한"},
 		now:          func() time.Time { return started.Add(20 * time.Second) },
 	}
 	content := view.scanningView()
-	for _, expected := range []string{"10 / 20", "50%", "U-11", "예상 남은 시간", "20초"} {
+	for _, expected := range []string{"10 / 20", "50%", "U-11", "경과", "20초"} {
 		if !strings.Contains(content, expected) {
 			t.Errorf("scanning view is missing %q: %q", expected, content)
 		}
+	}
+	for _, unexpected := range []string{"ETA", "예상 남은 시간"} {
+		if strings.Contains(content, unexpected) {
+			t.Errorf("scanning view still contains %q: %q", unexpected, content)
+		}
+	}
+	lines := strings.Split(content, "\n")
+	firstContentLine := -1
+	for index, line := range lines {
+		if strings.TrimSpace(line) != "" {
+			firstContentLine = index
+			break
+		}
+	}
+	if firstContentLine <= 0 {
+		t.Fatalf("scanning view is not vertically centered: first content line %d", firstContentLine)
 	}
 }
 
@@ -47,7 +64,51 @@ func TestReadyViewWarnsWhenNotRoot(t *testing.T) {
 	t.Parallel()
 	view := &Model{platform: model.PlatformInfo{Name: "Rocky Linux 9.8", Privilege: "user"}}
 	content := view.readyView()
-	if !strings.Contains(content, "권한 경고") || !strings.Contains(content, "sudo openciip") {
+	if !strings.Contains(content, "보호된 설정") || !strings.Contains(content, "sudo openciip") {
 		t.Fatalf("ready view did not show the non-root warning: %q", content)
+	}
+}
+
+func TestReadyViewLeavesRemediationInExecutionOptions(t *testing.T) {
+	t.Parallel()
+	view := &Model{platform: model.PlatformInfo{RemediationSupport: model.RemediationSupportTargeted}}
+	content := view.readyView()
+	if strings.Contains(content, "자동 조치") {
+		t.Fatalf("ready view still shows remediation outside execution options: %q", content)
+	}
+}
+
+func TestReadyFooterUsesProjectCopyrightHolder(t *testing.T) {
+	t.Parallel()
+	footer := readyFooter()
+	if !strings.Contains(footer, "© 2026 yesidodo73") || strings.Contains(footer, "contributors") {
+		t.Fatalf("ready footer copyright = %q", footer)
+	}
+}
+
+func TestResultSummaryUsesUserFacingPriority(t *testing.T) {
+	t.Parallel()
+	summary := resultSummary(map[model.Status]int{
+		model.StatusFail:    1,
+		model.StatusUnknown: 2,
+		model.StatusError:   3,
+	})
+	failIndex := strings.Index(summary, "FAIL")
+	unknownIndex := strings.Index(summary, "UNKNOWN")
+	errorIndex := strings.Index(summary, "ERROR")
+	if failIndex < 0 || !(failIndex < unknownIndex && unknownIndex < errorIndex) {
+		t.Fatalf("result summary order = %q", summary)
+	}
+}
+
+func TestTUIUsesKoreanNotApplicableLabel(t *testing.T) {
+	t.Parallel()
+	summary := resultSummary(map[model.Status]int{model.StatusNotApplicable: 3})
+	if !strings.Contains(summary, "해당 없음 3") || strings.Contains(summary, "N/A") {
+		t.Fatalf("result summary not-applicable label = %q", summary)
+	}
+	badge := statusBadge(model.StatusNotApplicable)
+	if !strings.Contains(badge, "해당 없음") || strings.Contains(badge, "NOT_APPLICABLE") {
+		t.Fatalf("status badge not-applicable label = %q", badge)
 	}
 }

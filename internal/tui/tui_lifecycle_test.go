@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/yesidodo73/OpenCIIP/internal/model"
@@ -39,9 +40,14 @@ func TestFailedRemediationPlanClosesNewRemediator(t *testing.T) {
 	view := NewModelWithRemediation(context.Background(), nil, nil, func(context.Context) (Remediator, error) {
 		return remediator, nil
 	})
+	view.remediationCandidates = func(model.ScanRun, model.PlatformInfo) (bool, bool, error) {
+		return true, false, nil
+	}
+	view.scanSettings.remediationEnabled = true
 	view.reportPath = "/report"
 	view.run.Metadata.Platform.ScanSupport = model.ScanSupportTested
 	view.run.Metadata.Platform.RemediationSupport = model.RemediationSupportVerified
+	view.run.Metadata.Platform.Privilege = "root"
 	view.run.Results = []model.CheckResult{{
 		Status:       model.StatusFail,
 		Verification: model.Verification{State: model.VerificationVerified},
@@ -64,6 +70,90 @@ func TestFailedRemediationPlanClosesNewRemediator(t *testing.T) {
 	}
 	if remediator.closeCount != 1 {
 		t.Fatalf("close count = %d, want 1", remediator.closeCount)
+	}
+}
+
+func TestRemediationAvailabilityFailsClosedWithVisibleReason(t *testing.T) {
+	view := &Model{
+		remediatorFactory: func(context.Context) (Remediator, error) { return &lifecycleRemediator{}, nil },
+		platform: model.PlatformInfo{
+			ScanSupport:        model.ScanSupportTested,
+			RemediationSupport: model.RemediationSupportTargeted,
+		},
+	}
+	availability := view.remediationAvailability()
+	if availability.enabled || availability.label != "지원되지 않음" || availability.reason != "현재 OS와 버전에서 자동 조치가 지원되지 않습니다." {
+		t.Fatalf("pending platform availability = %#v", availability)
+	}
+	if rendered := remediationAvailabilityView(availability); !strings.Contains(rendered, "자동 조치") || !strings.Contains(rendered, "지원되지 않음") {
+		t.Fatalf("disabled remediation status is not visible: %q", rendered)
+	}
+}
+
+func TestRemediationAvailabilityRequiresVerifiedFail(t *testing.T) {
+	view := &Model{
+		remediatorFactory: func(context.Context) (Remediator, error) { return &lifecycleRemediator{}, nil },
+		reportPath:        "/report",
+		remediationCandidates: func(model.ScanRun, model.PlatformInfo) (bool, bool, error) {
+			return true, false, nil
+		},
+		scanSettings: scanSettings{remediationEnabled: true},
+	}
+	view.run.Metadata.Platform.ScanSupport = model.ScanSupportTested
+	view.run.Metadata.Platform.RemediationSupport = model.RemediationSupportVerified
+	view.run.Metadata.Platform.Privilege = "root"
+	view.run.Results = []model.CheckResult{{
+		Status:       model.StatusFail,
+		Verification: model.Verification{State: model.VerificationVerified},
+	}}
+	availability := view.remediationAvailability()
+	if !availability.enabled || availability.label != "사용 가능" {
+		t.Fatalf("verified FAIL availability = %#v", availability)
+	}
+}
+
+func TestRemediationAvailabilityRequiresRootAndMaskedReport(t *testing.T) {
+	t.Parallel()
+	base := Model{
+		remediatorFactory: func(context.Context) (Remediator, error) { return &lifecycleRemediator{}, nil },
+		reportPath:        "/report",
+		remediationCandidates: func(model.ScanRun, model.PlatformInfo) (bool, bool, error) {
+			return true, false, nil
+		},
+		scanSettings: scanSettings{remediationEnabled: true},
+	}
+	base.run.Metadata.Platform.ScanSupport = model.ScanSupportTested
+	base.run.Metadata.Platform.RemediationSupport = model.RemediationSupportVerified
+	if availability := base.remediationAvailability(); availability.enabled || availability.label != "root 권한 필요" {
+		t.Fatalf("non-root availability = %#v", availability)
+	}
+	base.run.Metadata.Platform.Privilege = "root"
+	base.scanSettings.noRedact = true
+	if availability := base.remediationAvailability(); availability.enabled || availability.label != "마스킹 필요" {
+		t.Fatalf("unredacted availability = %#v", availability)
+	}
+}
+
+func TestBuiltInPendingRecipeDoesNotEnableRemediation(t *testing.T) {
+	t.Parallel()
+	platform := model.PlatformInfo{
+		ID:                 "rocky",
+		VersionID:          "9.8",
+		Architecture:       "amd64",
+		ScanSupport:        model.ScanSupportTested,
+		RemediationSupport: model.RemediationSupportVerified,
+	}
+	run := model.ScanRun{
+		Metadata: model.RunMetadata{GuideYear: 2026, Platform: platform},
+		Results: []model.CheckResult{{
+			RuleID:       "U-19",
+			Status:       model.StatusFail,
+			Verification: model.Verification{State: model.VerificationVerified},
+		}},
+	}
+	verified, pending, err := builtInRemediationCandidates(run, platform)
+	if err != nil || verified || !pending {
+		t.Fatalf("built-in U-19 candidate = verified %t, pending %t, err %v", verified, pending, err)
 	}
 }
 

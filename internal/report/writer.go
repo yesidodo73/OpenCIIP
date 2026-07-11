@@ -24,7 +24,7 @@ type Writer struct {
 
 func NewWriter(basePath string) (*Writer, error) {
 	if strings.TrimSpace(basePath) == "" {
-		basePath = "reports"
+		basePath = DefaultDirectory()
 	}
 	absolute, err := filepath.Abs(basePath)
 	if err != nil {
@@ -37,10 +37,19 @@ func NewWriter(basePath string) (*Writer, error) {
 	return &Writer{basePath: absolute, baseInfo: info}, nil
 }
 
+func DefaultDirectory() string {
+	absolute, err := filepath.Abs("reports")
+	if err == nil {
+		return absolute
+	}
+	return filepath.Join(string(os.PathSeparator), "reports")
+}
+
 func (w *Writer) WriteScan(ctx context.Context, run model.ScanRun) (string, error) {
 	if run.Metadata.Redaction {
 		run = redact.ScanRun(run)
 	}
+	run.Results = model.SortedResultsByStatus(run.Results)
 	base, err := os.OpenRoot(w.basePath)
 	if err != nil {
 		return "", fmt.Errorf("open report root: %w", err)
@@ -343,7 +352,7 @@ func renderSummary(run model.ScanRun) string {
 	fmt.Fprintf(&builder, "종료 코드: %d\n\n", run.Metadata.ExitCode)
 	fmt.Fprintf(&builder, "상태별 합계\n")
 	for _, status := range orderedStatuses() {
-		fmt.Fprintf(&builder, "- %s: %d\n", status, run.Metadata.Counts[status])
+		fmt.Fprintf(&builder, "- %s: %d\n", statusDisplayLabel(status), run.Metadata.Counts[status])
 	}
 	if len(run.Metadata.Warnings) > 0 {
 		fmt.Fprintf(&builder, "\n주의 사항\n")
@@ -357,7 +366,7 @@ func renderSummary(run model.ScanRun) string {
 func renderProblems(run model.ScanRun) string {
 	var builder strings.Builder
 	problemCount := 0
-	for _, result := range run.Results {
+	for _, result := range model.SortedResultsByStatus(run.Results) {
 		if result.Status != model.StatusFail && result.Status != model.StatusUnknown && result.Status != model.StatusError {
 			continue
 		}
@@ -386,7 +395,7 @@ func renderProblems(run model.ScanRun) string {
 func renderEvidence(result model.CheckResult) string {
 	var builder strings.Builder
 	fmt.Fprintf(&builder, "%s %s\n", result.RuleID, result.Title)
-	fmt.Fprintf(&builder, "상태: %s\n", result.Status)
+	fmt.Fprintf(&builder, "상태: %s\n", statusDisplayLabel(result.Status))
 	fmt.Fprintf(&builder, "플랫폼 검증 상태: %s\n", result.Verification.State)
 	if len(result.BindingSources) > 0 {
 		fmt.Fprintf(&builder, "규칙 계층: %s\n", strings.Join(result.BindingSources, " → "))
@@ -425,11 +434,11 @@ func renderEvidence(result model.CheckResult) string {
 
 func orderedStatuses() []model.Status {
 	return []model.Status{
-		model.StatusPass,
 		model.StatusFail,
 		model.StatusUnknown,
-		model.StatusNotApplicable,
 		model.StatusError,
+		model.StatusPass,
+		model.StatusNotApplicable,
 		model.StatusSkipped,
 	}
 }

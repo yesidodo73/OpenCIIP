@@ -14,10 +14,12 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
+	"github.com/yesidodo73/OpenCIIP/internal/buildinfo"
 	"github.com/yesidodo73/OpenCIIP/internal/engine"
 	"github.com/yesidodo73/OpenCIIP/internal/exitcode"
 	"github.com/yesidodo73/OpenCIIP/internal/model"
 	"github.com/yesidodo73/OpenCIIP/internal/remediation/orchestrator"
+	"github.com/yesidodo73/OpenCIIP/internal/remediation/recipe"
 	"github.com/yesidodo73/OpenCIIP/internal/remediation/workflow"
 )
 
@@ -33,6 +35,8 @@ type ScanWriter interface {
 	WriteScan(context.Context, model.ScanRun) (string, error)
 }
 
+type ScanWriterFactory func(string) (ScanWriter, error)
+
 type Remediator interface {
 	PlanFromReport(context.Context, string, workflow.PlanOptions) (workflow.PlanResult, error)
 	Approve(context.Context, string, string, string, string) error
@@ -47,10 +51,15 @@ type Remediator interface {
 
 type RemediatorFactory func(context.Context) (Remediator, error)
 
+type remediationCandidateEvaluator func(model.ScanRun, model.PlatformInfo) (verified bool, pending bool, err error)
+
 type screen int
 
 const (
 	screenReady screen = iota
+	screenOptions
+	screenOptionPicker
+	screenConfirmNoRedact
 	screenScanning
 	screenResults
 	screenDetail
@@ -115,6 +124,12 @@ type resultItem struct {
 	result model.CheckResult
 }
 
+type remediationAvailability struct {
+	enabled bool
+	label   string
+	reason  string
+}
+
 func (i resultItem) Title() string {
 	return fmt.Sprintf("%s  %s  %s", statusBadge(i.result.Status), codeStyle.Render(i.result.RuleID), i.result.Title)
 }
@@ -125,39 +140,47 @@ func (i resultItem) FilterValue() string {
 }
 
 type Model struct {
-	ctx               context.Context
-	scanner           Scanner
-	writer            ScanWriter
-	remediatorFactory RemediatorFactory
-	remediator        Remediator
-	cancelScan        context.CancelFunc
-	cancelAction      context.CancelFunc
-	screen            screen
-	width             int
-	height            int
-	showAll           bool
-	run               model.ScanRun
-	reportPath        string
-	list              list.Model
-	viewport          viewport.Model
-	err               error
-	remediationErr    error
-	plan              workflow.PlanResult
-	journal           *model.RemediationJournal
-	rollback          model.RollbackAttempt
-	rollbackPreview   orchestrator.RollbackPreview
-	rollbackRunScope  bool
-	rollbackChangeSet string
-	failurePolicy     model.FailurePolicy
-	cancelReturn      screen
-	selectedChangeSet int
-	exitCode          int
-	platform          model.PlatformInfo
-	scanProgress      engine.Progress
-	scanProgressCh    <-chan engine.Progress
-	scanStarted       time.Time
-	scanTicks         int
-	now               func() time.Time
+	ctx                   context.Context
+	scanner               Scanner
+	writerFactory         ScanWriterFactory
+	remediatorFactory     RemediatorFactory
+	remediator            Remediator
+	cancelScan            context.CancelFunc
+	cancelAction          context.CancelFunc
+	screen                screen
+	width                 int
+	height                int
+	showAll               bool
+	run                   model.ScanRun
+	reportPath            string
+	list                  list.Model
+	viewport              viewport.Model
+	err                   error
+	remediationErr        error
+	plan                  workflow.PlanResult
+	journal               *model.RemediationJournal
+	rollback              model.RollbackAttempt
+	rollbackPreview       orchestrator.RollbackPreview
+	rollbackRunScope      bool
+	rollbackChangeSet     string
+	failurePolicy         model.FailurePolicy
+	cancelReturn          screen
+	selectedChangeSet     int
+	exitCode              int
+	platform              model.PlatformInfo
+	scanProgress          engine.Progress
+	scanProgressCh        <-chan engine.Progress
+	scanStarted           time.Time
+	scanTicks             int
+	now                   func() time.Time
+	scanSettings          scanSettings
+	optionIndex           int
+	editingOption         bool
+	editBuffer            string
+	optionErr             error
+	optionPicker          optionPickerState
+	readySelection        int
+	remediationCandidates remediationCandidateEvaluator
 }
 
 func NewModel(ctx context.Context, scanner Scanner, writer ScanWriter) *Model {
@@ -165,6 +188,14 @@ func NewModel(ctx context.Context, scanner Scanner, writer ScanWriter) *Model {
 }
 
 func NewModelWithRemediation(ctx context.Context, scanner Scanner, writer ScanWriter, factory RemediatorFactory) *Model {
+	return newModel(ctx, scanner, func(string) (ScanWriter, error) { return writer, nil }, factory)
+}
+
+func NewModelWithWriterFactory(ctx context.Context, scanner Scanner, writerFactory ScanWriterFactory, factory RemediatorFactory) *Model {
+	return newModel(ctx, scanner, writerFactory, factory)
+}
+
+func newModel(ctx context.Context, scanner Scanner, writerFactory ScanWriterFactory, factory RemediatorFactory) *Model {
 	delegate := list.NewDefaultDelegate()
 	delegate.ShowDescription = true
 	delegate.SetSpacing(1)
@@ -186,17 +217,19 @@ func NewModelWithRemediation(ctx context.Context, scanner Scanner, writer ScanWr
 		platformInfo = provider.PlatformInfo()
 	}
 	return &Model{
-		ctx:               ctx,
-		scanner:           scanner,
-		writer:            writer,
-		remediatorFactory: factory,
-		screen:            screenReady,
-		list:              resultList,
-		viewport:          detail,
-		failurePolicy:     model.FailureRollbackItem,
-		exitCode:          exitcode.OK,
-		platform:          platformInfo,
-		now:               time.Now,
+		ctx:                   ctx,
+		scanner:               scanner,
+		writerFactory:         writerFactory,
+		remediatorFactory:     factory,
+		screen:                screenReady,
+		list:                  resultList,
+		viewport:              detail,
+		failurePolicy:         model.FailureRollbackItem,
+		exitCode:              exitcode.OK,
+		platform:              platformInfo,
+		now:                   time.Now,
+		scanSettings:          defaultScanSettings(),
+		remediationCandidates: builtInRemediationCandidates,
 	}
 }
 
@@ -232,6 +265,7 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.run = message.run
 		m.reportPath = message.reportPath
+		m.showAll = m.scanSettings.showAll
 		m.exitCode = message.run.Metadata.ExitCode
 		m.screen = screenResults
 		m.updateItems()
@@ -313,6 +347,9 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.screen = screenRemediationStatus
 		return m, nil
 	case tea.KeyPressMsg:
+		if m.screen == screenOptions && m.editingOption {
+			return m.updateOptionEditor(message)
+		}
 		key := message.String()
 		if key == "ctrl+c" {
 			if m.cancelAction != nil {
@@ -344,9 +381,45 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		switch m.screen {
 		case screenReady:
-			if key == "enter" || key == "s" {
+			switch key {
+			case "up", "k":
+				m.readySelection = (m.readySelection + readyMenuCount - 1) % readyMenuCount
+				return m, nil
+			case "down", "j":
+				m.readySelection = (m.readySelection + 1) % readyMenuCount
+				return m, nil
+			case "enter":
+				switch m.readySelection {
+				case readyMenuScan:
+					return m, m.startScan()
+				case readyMenuOptions:
+					m.optionErr = nil
+					m.screen = screenOptions
+					return m, nil
+				case readyMenuQuit:
+					return m, tea.Quit
+				}
+			case "s":
 				return m, m.startScan()
+			case "o":
+				m.optionErr = nil
+				m.screen = screenOptions
+				return m, nil
 			}
+		case screenOptions:
+			return m.updateOptions(key)
+		case screenOptionPicker:
+			return m.updateOptionPicker(key)
+		case screenConfirmNoRedact:
+			switch key {
+			case "y":
+				m.scanSettings.noRedact = true
+				m.scanSettings.remediationEnabled = false
+				m.screen = screenOptions
+			case "n", "esc", "backspace":
+				m.screen = screenOptions
+			}
+			return m, nil
 		case screenResults:
 			switch key {
 			case "a":
@@ -488,6 +561,10 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			if key == "r" {
 				return m, m.startScan()
 			}
+			if key == "esc" || key == "backspace" {
+				m.screen = screenOptions
+				return m, nil
+			}
 		}
 	}
 
@@ -510,6 +587,12 @@ func (m *Model) View() tea.View {
 	switch m.screen {
 	case screenReady:
 		content = m.readyView()
+	case screenOptions:
+		content = m.optionsView()
+	case screenOptionPicker:
+		content = m.optionPickerView()
+	case screenConfirmNoRedact:
+		content = m.confirmNoRedactView()
 	case screenScanning:
 		content = m.scanningView()
 	case screenResults:
@@ -517,18 +600,26 @@ func (m *Model) View() tea.View {
 		if m.showAll {
 			header = "전체 항목"
 		}
-		m.list.Title = "점검 결과 - " + header
-		help := "Enter: 상세   a: 전체/문제 전환   /: 검색   r: 다시 점검"
-		if m.canPlanRemediation() {
-			help += "   m: 조치 dry-run"
+		m.list.Title = header
+		helpValues := []string{"Enter", "상세", "A", "전체/문제", "/", "검색", "R", "다시 점검"}
+		availability := m.remediationAvailability()
+		if availability.enabled {
+			helpValues = append(helpValues, "M", "조치 계획")
 		}
-		help += "   q: 종료"
-		content = resultSummary(m.run.Metadata.Counts) + "\n\n" + m.list.View() + "\n" + helpStyle.Render(help)
+		helpValues = append(helpValues, "Q", "종료")
+		content = screenHeader("점검 결과") + "\n\n" + m.list.View()
 		if m.reportPath != "" {
-			content += "\n" + helpStyle.Render("보고서: "+m.reportPath)
+			pathWidth := m.width - 18
+			if pathWidth < 24 {
+				pathWidth = 24
+			}
+			content += "\n\n" + labelStyle.Render("보고서") + "  " + helpStyle.Render(truncateStart(m.reportPath, pathWidth))
 		}
+		content += "\n\n" + resultSummary(m.run.Metadata.Counts)
+		content += "\n\n" + remediationAvailabilityView(availability)
+		content += "\n\n" + optionKeyLegend(helpValues...)
 	case screenDetail:
-		content = sectionTitleStyle.Render("항목 상세") + "\n\n" + m.viewport.View() + "\n" + helpStyle.Render("Esc: 결과 목록   q: 종료")
+		content = screenHeader("항목 상세") + "\n\n" + m.viewport.View() + "\n\n" + helpStyle.Render("Esc: 결과 목록   q: 종료")
 	case screenRemediationFailurePolicy:
 		content = titleStyle.Render("조치 실패 정책 선택") + "\n\n" +
 			"변경 세트 적용 또는 검증이 실패했을 때의 자동 롤백 범위를 선택해주세요.\n\n" +
@@ -576,7 +667,7 @@ func (m *Model) View() tea.View {
 	case screenRemediationError:
 		content = remediationErrorContent(m.journal, m.remediationErr) + "\n\n" + helpStyle.Render("Esc: 현재 저널 또는 점검 결과로 돌아가기   q: 종료")
 	case screenError:
-		content = errorPanelStyle.Render(errorStyle.Render("점검을 완료하지 못했습니다.")+"\n\n"+fmt.Sprint(m.err)) + "\n\n" + helpStyle.Render("r: 다시 시도   q: 종료")
+		content = errorPanelStyle.Render(errorStyle.Render("점검을 완료하지 못했습니다.")+"\n\n"+fmt.Sprint(m.err)) + "\n\n" + helpStyle.Render("r: 다시 시도   Esc: 실행 옵션   q: 종료")
 	}
 	content = frameStyle.Render(content)
 	view := tea.NewView(content)
@@ -586,48 +677,87 @@ func (m *Model) View() tea.View {
 }
 
 func (m *Model) readyView() string {
-	badges := lipgloss.JoinHorizontal(lipgloss.Left,
-		badgeStyle.Copy().Foreground(accentColor).BorderForeground(accentColor).Render("LINUX"),
-		"  ",
-		badgeStyle.Copy().Foreground(successColor).BorderForeground(successColor).Render("읽기 전용"),
-	)
-	platformName := strings.TrimSpace(m.platform.Name)
-	if platformName == "" {
-		platformName = "Linux 서버"
-	}
-
 	brand := titleStyle.Render(openCIIPLogo)
-	if m.width > 0 && m.width < openCIIPLogoWidth+4 {
-		brand = titleStyle.Render("OpenCIIP")
+	if m.width > 0 && m.width < openCIIPLogoWidth+10 {
+		brand = titleStyle.Render(">_ OpenCIIP")
 	}
 
-	content := brand + "\n" +
-		subtitleStyle.Render("주요정보통신기반시설 보안 점검") + "\n\n" +
-		badges + "\n\n" +
-		infoPanelStyle.Render(
-			labelStyle.Render("대상")+"  "+platformName+"\n"+
-				labelStyle.Render("범위")+"  U-01 ~ U-67\n"+
-				labelStyle.Render("방식")+"  시스템 설정을 변경하지 않는 읽기 전용 점검",
-		)
+	menu := readyMenuView(m.readySelection)
+	main := lipgloss.JoinVertical(lipgloss.Center,
+		brand,
+		subtitleStyle.Render("주요정보통신기반시설 보안 점검"),
+		"",
+		menu,
+		"",
+		helpStyle.Render("↑/↓  이동     Enter  선택"),
+	)
 
 	if m.platform.Privilege != "root" {
-		content += "\n\n" + warningPanelStyle.Render(
-			warningStyle.Render("권한 경고")+"\n"+
-				"root 권한이 아니므로 보호된 설정과 시스템 상태를 확인하지 못할 수 있습니다.\n"+
-				"전체 점검은 sudo openciip으로 실행하세요.",
-		)
+		main = lipgloss.JoinVertical(lipgloss.Center, main, "", warningStyle.Render("! 보호된 설정을 확인하려면 sudo openciip으로 실행하세요."))
 	}
-	return content + "\n\n" + helpStyle.Render("Enter 또는 s  점검 시작     q  종료")
+
+	width := m.width - 4
+	if width < 50 {
+		width = 50
+	}
+	height := m.height - 6
+	if height < lipgloss.Height(main) {
+		height = lipgloss.Height(main)
+	}
+	centered := lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, main)
+	return centered + "\n" + lipgloss.PlaceHorizontal(width, lipgloss.Center, readyFooter())
+}
+
+const (
+	readyMenuScan = iota
+	readyMenuOptions
+	readyMenuQuit
+	readyMenuCount
+)
+
+func readyMenuView(selected int) string {
+	items := []string{"점검 시작", "실행 옵션", "종료"}
+	lines := make([]string, 0, len(items))
+	const rowWidth = 34
+	for index, item := range items {
+		marker := "  "
+		style := lipgloss.NewStyle().Foreground(textColor)
+		if index == selected {
+			marker = accentStyle.Render("› ")
+			style = keyStyle
+		}
+		row := marker + style.Render(item)
+		if index == selected {
+			row = selectedRowStyle.Copy().Width(rowWidth).Render(row)
+		} else {
+			row = lipgloss.NewStyle().Width(rowWidth).Render(row)
+		}
+		lines = append(lines, row)
+	}
+	return lipgloss.JoinVertical(lipgloss.Left, lines...)
+}
+
+func readyFooter() string {
+	info := buildinfo.Current()
+	version := strings.TrimSpace(info.Version)
+	if version == "" {
+		version = "dev"
+	}
+	if info.Modified && !strings.Contains(version, "dirty") {
+		version += "+dirty"
+	}
+	return helpStyle.Render("OpenCIIP " + version + "\n© 2026 yesidodo73  ·  Apache License 2.0")
 }
 
 func (m *Model) scanningView() string {
 	progress := m.scanProgress
 	spinner := spinnerFrames[m.scanTicks%len(spinnerFrames)]
+	contentWidth := m.scanningContentWidth()
 	if progress.Total <= 0 {
-		return titleStyle.Render("OpenCIIP") + "\n" +
-			subtitleStyle.Render("Linux 서버 보안 점검") + "\n\n" +
+		content := screenHeader("Linux 서버 보안 점검") + "\n\n" +
 			accentStyle.Render(spinner+" 점검 항목을 준비하고 있습니다") + "\n\n" +
-			helpStyle.Render("q  점검 취소 및 종료")
+			statusRuleStyle.Render("─ 준비 중") + "\n" + helpStyle.Render("q  점검 취소 및 종료")
+		return m.centerScanningContent(content, contentWidth)
 	}
 
 	completed := progress.Completed
@@ -638,7 +768,7 @@ func (m *Model) scanningView() string {
 		completed = progress.Total
 	}
 	percent := completed * 100 / progress.Total
-	barWidth := m.width - 24
+	barWidth := contentWidth - 8
 	if barWidth < 24 {
 		barWidth = 24
 	}
@@ -652,25 +782,54 @@ func (m *Model) scanningView() string {
 	if elapsed < 0 {
 		elapsed = 0
 	}
-	eta := "계산 중"
-	if completed > 0 && completed < progress.Total {
-		remaining := time.Duration(int64(elapsed) * int64(progress.Total-completed) / int64(completed))
-		eta = durationLabel(remaining)
-	} else if completed >= progress.Total {
-		eta = "보고서 저장 중"
-	}
 	current := strings.TrimSpace(progress.RuleID + "  " + progress.Title)
 	if current == "" {
 		current = "점검 항목 준비 중"
 	}
 
-	return titleStyle.Render("OpenCIIP") + "\n" +
-		subtitleStyle.Render("Linux 서버 보안 점검") + "\n\n" +
+	content := screenHeader("Linux 서버 보안 점검") + "\n\n" +
 		fmt.Sprintf("%s  %s\n\n", accentStyle.Render(spinner+" 점검 중"), counterStyle.Render(fmt.Sprintf("%d / %d", completed, progress.Total))) +
 		bar + "  " + percentStyle.Render(fmt.Sprintf("%3d%%", percent)) + "\n\n" +
 		labelStyle.Render("현재") + "  " + current + "\n" +
-		labelStyle.Render("경과") + "  " + durationLabel(elapsed) + "    " + labelStyle.Render("예상 남은 시간") + "  " + eta + "\n\n" +
+		labelStyle.Render("경과") + "  " + durationLabel(elapsed) + "\n\n" +
+		statusRuleStyle.Render(strings.Repeat("─", contentWidth)) + "\n" +
 		helpStyle.Render("q  점검 취소 및 종료")
+	return m.centerScanningContent(content, contentWidth)
+}
+
+func (m *Model) scanningContentWidth() int {
+	width := m.width - 12
+	if m.width <= 0 {
+		width = 72
+	}
+	if width > 72 {
+		width = 72
+	}
+	if width < 44 {
+		width = 44
+	}
+	return width
+}
+
+func (m *Model) centerScanningContent(content string, contentWidth int) string {
+	availableWidth := m.width - 4
+	if availableWidth < contentWidth {
+		availableWidth = contentWidth
+	}
+	fixedWidth := lipgloss.NewStyle().Width(contentWidth).MaxWidth(contentWidth).Render(content)
+	availableHeight := m.height - 4
+	if availableHeight < lipgloss.Height(fixedWidth) {
+		availableHeight = lipgloss.Height(fixedWidth)
+	}
+	return lipgloss.Place(availableWidth, availableHeight, lipgloss.Center, lipgloss.Center, fixedWidth)
+}
+
+func screenHeader(section string) string {
+	return titleStyle.Render(">_ OpenCIIP") + "  " + subtitleStyle.Render(section)
+}
+
+func statusSeparator() string {
+	return statusRuleStyle.Render("  │  ")
 }
 
 func durationLabel(value time.Duration) string {
@@ -695,26 +854,26 @@ func resultSummary(counts map[model.Status]int) string {
 		status model.Status
 		label  string
 	}{
-		{model.StatusPass, "PASS"},
 		{model.StatusFail, "FAIL"},
 		{model.StatusUnknown, "UNKNOWN"},
 		{model.StatusError, "ERROR"},
-		{model.StatusNotApplicable, "N/A"},
+		{model.StatusPass, "PASS"},
+		{model.StatusNotApplicable, "해당 없음"},
+		{model.StatusSkipped, "SKIPPED"},
 	}
 	parts := make([]string, 0, len(values))
 	for _, value := range values {
-		parts = append(parts, summaryBadge(value.status, value.label, counts[value.status]))
+		parts = append(parts, statusStyle.Copy().Foreground(statusColor(value.status)).Render(fmt.Sprintf("%s %d", value.label, counts[value.status])))
 	}
-	return lipgloss.JoinHorizontal(lipgloss.Left, parts...)
-}
-
-func summaryBadge(status model.Status, label string, count int) string {
-	style := badgeStyle.Copy().Foreground(statusColor(status)).BorderForeground(statusColor(status))
-	return style.Render(fmt.Sprintf("%s %d", label, count)) + "  "
+	return statusRuleStyle.Render("─ ") + strings.Join(parts, statusSeparator())
 }
 
 func statusBadge(status model.Status) string {
-	return statusStyle.Copy().Foreground(statusColor(status)).Render(string(status))
+	label := string(status)
+	if status == model.StatusNotApplicable {
+		label = "해당 없음"
+	}
+	return statusStyle.Copy().Foreground(statusColor(status)).Render(label)
 }
 
 func statusColor(status model.Status) color.Color {
@@ -736,6 +895,18 @@ func (m *Model) startScan() tea.Cmd {
 	if m.cancelScan != nil {
 		return nil
 	}
+	options, err := m.scanSettings.engineOptions()
+	if err != nil {
+		m.optionErr = err
+		m.screen = screenOptions
+		return nil
+	}
+	if m.writerFactory == nil {
+		m.optionErr = fmt.Errorf("보고서 작성기가 설정되지 않았습니다")
+		m.screen = screenOptions
+		return nil
+	}
+	settings := m.scanSettings
 	scanContext, cancel := context.WithCancel(m.ctx)
 	m.cancelScan = cancel
 	m.screen = screenScanning
@@ -747,16 +918,18 @@ func (m *Model) startScan() tea.Cmd {
 	m.scanProgressCh = progress
 	runScan := func() tea.Msg {
 		defer close(progress)
-		run, err := m.scanner.Scan(scanContext, engine.Options{
-			EvidenceMode: "problems",
-			Progress: func(update engine.Progress) {
-				publishScanProgress(progress, update)
-			},
-		})
+		writer, err := m.writerFactory(settings.reportDir)
+		if err != nil {
+			return scanCompleteMsg{err: fmt.Errorf("보고서 저장 경로를 준비하지 못했습니다: %w", err)}
+		}
+		options.Progress = func(update engine.Progress) {
+			publishScanProgress(progress, update)
+		}
+		run, err := m.scanner.Scan(scanContext, options)
 		if err != nil {
 			return scanCompleteMsg{err: err}
 		}
-		path, err := m.writer.WriteScan(scanContext, run)
+		path, err := writer.WriteScan(scanContext, run)
 		return scanCompleteMsg{run: run, reportPath: path, err: err}
 	}
 	return tea.Batch(runScan, waitForScanProgress(progress), scanTick())
@@ -964,16 +1137,88 @@ func (m *Model) startApprovedRollback() (tea.Model, tea.Cmd) {
 }
 
 func (m *Model) canPlanRemediation() bool {
-	if m.remediatorFactory == nil || m.reportPath == "" || m.run.Metadata.Platform.ScanSupport != model.ScanSupportTested ||
-		m.run.Metadata.Platform.RemediationSupport != model.RemediationSupportVerified {
-		return false
+	return m.remediationAvailability().enabled
+}
+
+func (m *Model) remediationAvailability() remediationAvailability {
+	if m.remediatorFactory == nil {
+		return remediationAvailability{label: "지원되지 않음", reason: "현재 실행 환경에서 자동 조치가 지원되지 않습니다."}
 	}
-	for _, result := range m.run.Results {
-		if result.Status == model.StatusFail && result.Verification.State == model.VerificationVerified {
-			return true
+	platform := m.platform
+	if m.reportPath != "" {
+		platform = m.run.Metadata.Platform
+	}
+	switch platform.RemediationSupport {
+	case model.RemediationSupportVerified:
+		// Continue with report and result gates.
+	default:
+		return remediationAvailability{label: "지원되지 않음", reason: "현재 OS와 버전에서 자동 조치가 지원되지 않습니다."}
+	}
+	if m.reportPath == "" {
+		return remediationAvailability{label: "점검 필요", reason: "점검을 완료한 뒤 조치 가능한 항목을 확인합니다."}
+	}
+	if platform.ScanSupport != model.ScanSupportTested {
+		return remediationAvailability{label: "지원되지 않음", reason: "현재 OS와 버전에서 자동 조치가 지원되지 않습니다."}
+	}
+	if platform.Privilege != "root" {
+		return remediationAvailability{label: "root 권한 필요", reason: "자동 조치를 사용하려면 root 권한으로 실행해야 합니다."}
+	}
+	if m.scanSettings.noRedact {
+		return remediationAvailability{label: "마스킹 필요", reason: "자동 조치에는 민감정보가 마스킹된 점검 보고서가 필요합니다."}
+	}
+	if !m.scanSettings.remediationEnabled {
+		return remediationAvailability{label: "사용 안 함", reason: "실행 옵션에서 자동 조치를 활성화할 수 있습니다."}
+	}
+	evaluator := m.remediationCandidates
+	if evaluator == nil {
+		evaluator = builtInRemediationCandidates
+	}
+	verified, pending, err := evaluator(m.run, platform)
+	if err != nil {
+		return remediationAvailability{label: "사용 불가", reason: "내장 자동 조치 정의를 확인할 수 없습니다."}
+	}
+	if verified {
+		return remediationAvailability{enabled: true, label: "사용 가능", reason: "검증된 FAIL 항목의 변경 계획을 먼저 확인합니다."}
+	}
+	if pending {
+		return remediationAvailability{label: "지원되지 않음", reason: "현재 OS와 버전에서 자동 조치가 지원되지 않습니다."}
+	}
+	return remediationAvailability{label: "대상 없음", reason: "자동 조치 대상으로 확정된 FAIL 항목이 없습니다."}
+}
+
+func builtInRemediationCandidates(run model.ScanRun, platform model.PlatformInfo) (bool, bool, error) {
+	registry, err := recipe.LoadDefaults()
+	if err != nil {
+		return false, false, err
+	}
+	pending := false
+	for _, result := range run.Results {
+		if result.Status != model.StatusFail || result.Verification.State != model.VerificationVerified {
+			continue
+		}
+		item, exists := registry.Match(result.RuleID, platform)
+		if !exists || item.GuideYear != run.Metadata.GuideYear {
+			continue
+		}
+		switch item.Verification.State {
+		case model.RemediationRecipeVerificationVerified:
+			return true, pending, nil
+		case model.RemediationRecipeVerificationPending:
+			pending = true
 		}
 	}
-	return false
+	return false, pending, nil
+}
+
+func remediationAvailabilityView(availability remediationAvailability) string {
+	status := disabledStyle.Render(availability.label)
+	marker := disabledStyle.Render("○")
+	if availability.enabled {
+		status = successStyle.Render(availability.label)
+		marker = successStyle.Render("●")
+	}
+	return marker + "  " + labelStyle.Render("자동 조치") + "  " + status + "\n" +
+		"   " + helpStyle.Render(availability.reason)
 }
 
 func (m *Model) hasUnusedRemediationPlan() bool {
@@ -1078,7 +1323,7 @@ func (m *Model) resize() {
 
 func (m *Model) updateItems() {
 	items := make([]list.Item, 0, len(m.run.Results))
-	for _, result := range m.run.Results {
+	for _, result := range model.SortedResultsByStatus(m.run.Results) {
 		if !m.showAll && result.Status != model.StatusFail && result.Status != model.StatusUnknown && result.Status != model.StatusError {
 			continue
 		}
@@ -1261,6 +1506,15 @@ func Run(ctx context.Context, input io.Reader, output io.Writer, scanner Scanner
 
 func RunWithRemediation(ctx context.Context, input io.Reader, output io.Writer, scanner Scanner, writer ScanWriter, factory RemediatorFactory) (code int, runErr error) {
 	initial := NewModelWithRemediation(ctx, scanner, writer, factory)
+	return runProgram(ctx, input, output, initial)
+}
+
+func RunWithWriterFactory(ctx context.Context, input io.Reader, output io.Writer, scanner Scanner, writerFactory ScanWriterFactory, factory RemediatorFactory) (code int, runErr error) {
+	initial := NewModelWithWriterFactory(ctx, scanner, writerFactory, factory)
+	return runProgram(ctx, input, output, initial)
+}
+
+func runProgram(ctx context.Context, input io.Reader, output io.Writer, initial *Model) (code int, runErr error) {
 	defer func() {
 		if err := initial.closeRemediator(); err != nil {
 			code = exitcode.Error
@@ -1311,19 +1565,18 @@ func closeRemediator(remediator Remediator) error {
 }
 
 var (
-	accentColor  = lipgloss.Color("#58A6FF")
-	textColor    = lipgloss.Color("#E6EDF3")
-	mutedColor   = lipgloss.Color("#7D8590")
-	surfaceColor = lipgloss.Color("#161B22")
-	borderColor  = lipgloss.Color("#30363D")
-	successColor = lipgloss.Color("#3FB950")
-	warningColor = lipgloss.Color("#D29922")
-	errorColor   = lipgloss.Color("#F85149")
+	accentColor   = lipgloss.Color("#58A6FF")
+	textColor     = lipgloss.Color("#E6EDF3")
+	mutedColor    = lipgloss.Color("#7D8590")
+	borderColor   = lipgloss.Color("#30363D")
+	selectedColor = lipgloss.Color("#161B22")
+	successColor  = lipgloss.Color("#3FB950")
+	warningColor  = lipgloss.Color("#D29922")
+	errorColor    = lipgloss.Color("#F85149")
 
 	frameStyle           = lipgloss.NewStyle().Padding(1, 2)
 	titleStyle           = lipgloss.NewStyle().Bold(true).Foreground(accentColor)
 	subtitleStyle        = lipgloss.NewStyle().Foreground(mutedColor)
-	sectionTitleStyle    = lipgloss.NewStyle().Bold(true).Foreground(textColor)
 	detailTitleStyle     = lipgloss.NewStyle().Bold(true).Foreground(textColor)
 	labelStyle           = lipgloss.NewStyle().Bold(true).Foreground(mutedColor)
 	codeStyle            = lipgloss.NewStyle().Bold(true).Foreground(accentColor)
@@ -1331,27 +1584,19 @@ var (
 	errorStyle           = lipgloss.NewStyle().Bold(true).Foreground(errorColor)
 	warningStyle         = lipgloss.NewStyle().Bold(true).Foreground(warningColor)
 	accentStyle          = lipgloss.NewStyle().Bold(true).Foreground(accentColor)
+	successStyle         = lipgloss.NewStyle().Bold(true).Foreground(successColor)
+	keyStyle             = lipgloss.NewStyle().Bold(true).Foreground(textColor)
+	sectionStyle         = lipgloss.NewStyle().Bold(true).Foreground(accentColor)
+	selectedRowStyle     = lipgloss.NewStyle().Background(selectedColor)
+	keyCapStyle          = lipgloss.NewStyle().Bold(true).Foreground(textColor).Background(borderColor).Padding(0, 1)
+	disabledStyle        = lipgloss.NewStyle().Foreground(mutedColor)
+	statusRuleStyle      = lipgloss.NewStyle().Foreground(borderColor)
 	counterStyle         = lipgloss.NewStyle().Bold(true).Foreground(textColor)
 	percentStyle         = lipgloss.NewStyle().Bold(true).Foreground(accentColor)
 	progressDoneStyle    = lipgloss.NewStyle().Foreground(accentColor)
 	progressPendingStyle = lipgloss.NewStyle().Foreground(borderColor)
 
-	badgeStyle = lipgloss.NewStyle().
-			Bold(true).
-			Border(lipgloss.RoundedBorder()).
-			Padding(0, 1)
-	statusStyle    = lipgloss.NewStyle().Bold(true)
-	infoPanelStyle = lipgloss.NewStyle().
-			Foreground(textColor).
-			Background(surfaceColor).
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(borderColor).
-			Padding(1, 2)
-	warningPanelStyle = lipgloss.NewStyle().
-				Foreground(textColor).
-				Border(lipgloss.RoundedBorder()).
-				BorderForeground(warningColor).
-				Padding(1, 2)
+	statusStyle     = lipgloss.NewStyle().Bold(true)
 	errorPanelStyle = lipgloss.NewStyle().
 			Foreground(textColor).
 			Border(lipgloss.RoundedBorder()).

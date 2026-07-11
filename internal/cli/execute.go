@@ -53,14 +53,13 @@ func newRootCommand(stdin io.Reader, stdout, stderr io.Writer, resultCode *int) 
 				return &commandError{code: exitcode.Error, err: fmt.Errorf("점검을 준비하지 못했습니다: %w", err)}
 			}
 			defer application.Close()
-			writer, err := report.NewWriter("reports")
-			if err != nil {
-				return &commandError{code: exitcode.Error, err: fmt.Errorf("보고서 저장 경로를 준비하지 못했습니다: %w", err)}
-			}
 			factory := func(ctx context.Context) (tui.Remediator, error) {
 				return remediationworkflow.New(ctx, defaultRemediationStateDirectory, "/")
 			}
-			code, err := tui.RunWithRemediation(command.Context(), stdin, stdout, application, writer, factory)
+			writerFactory := func(path string) (tui.ScanWriter, error) {
+				return report.NewWriter(path)
+			}
+			code, err := tui.RunWithWriterFactory(command.Context(), stdin, stdout, application, writerFactory, factory)
 			if err != nil {
 				return &commandError{code: exitcode.Error, err: fmt.Errorf("TUI를 실행하지 못했습니다: %w", err)}
 			}
@@ -164,7 +163,7 @@ func newScanCommand(stdout io.Writer, resultCode *int) *cobra.Command {
 	flags.StringSliceVar(&options.categories, "category", nil, "점검 분류")
 	flags.StringSliceVar(&options.severities, "severity", nil, "중요도")
 	flags.StringVar(&options.evidence, "evidence", "problems", "증적 저장 범위: problems, all, none")
-	flags.StringVar(&options.reportDir, "report-dir", "reports", "보고서 저장 디렉터리")
+	flags.StringVar(&options.reportDir, "report-dir", report.DefaultDirectory(), "보고서 저장 디렉터리")
 	flags.BoolVar(&options.all, "all", false, "정상 항목을 포함한 모든 결과를 표시합니다")
 	flags.BoolVar(&options.quiet, "quiet", false, "최소 결과만 표시합니다")
 	flags.BoolVar(&options.noColor, "no-color", false, "색상 출력을 사용하지 않습니다")
