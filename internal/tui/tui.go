@@ -596,7 +596,12 @@ func (m *Model) readyView() string {
 		platformName = "Linux 서버"
 	}
 
-	content := titleStyle.Render("OpenCIIP") + "\n" +
+	brand := titleStyle.Render(openCIIPLogo)
+	if m.width > 0 && m.width < openCIIPLogoWidth+4 {
+		brand = titleStyle.Render("OpenCIIP")
+	}
+
+	content := brand + "\n" +
 		subtitleStyle.Render("주요정보통신기반시설 보안 점검") + "\n\n" +
 		badges + "\n\n" +
 		infoPanelStyle.Render(
@@ -1354,4 +1359,14 @@ var (
 			Padding(1, 2)
 
 	spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+)
+
+const (
+	openCIIPLogoWidth = 45
+	openCIIPLogo      = `   ____                   __________________
+  / __ \____  ___  ____  / ____/  _/  _/ __ \
+ / / / / __ \/ _ \/ __ \/ /    / / / // /_/ /
+/ /_/ / /_/ /  __/ / / / /____/ /_/ // ____/
+\____/ .___/\___/_/ /_/\____/___/___/_/
+    /_/`
 )
