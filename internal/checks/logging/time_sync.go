@@ -3,8 +3,11 @@ package logging
 import (
 	"context"
 	"encoding/csv"
+	"errors"
 	"fmt"
 	"io"
+	"os"
+	"path"
 	"sort"
 	"strings"
 	"time"
@@ -247,9 +250,25 @@ func readChronySources(ctx context.Context, environment evaluator.Environment) (
 		case "server", "pool", "peer":
 			sources = append(sources, fields[1])
 			facts = append(facts, map[string]any{"line": index + 1, "directive": directive, "source": fields[1]})
-		case "include", "confdir", "sourcedir":
+		case "include":
 			dynamic = true
-			facts = append(facts, map[string]any{"line": index + 1, "directive": directive, "path": fields[1]})
+			facts = append(facts, map[string]any{"line": index + 1, "directive": directive, "path": fields[1], "resolved": false})
+		case "confdir", "sourcedir":
+			suffix := ".conf"
+			if directive == "sourcedir" {
+				suffix = ".sources"
+			}
+			for _, directory := range fields[1:] {
+				count, unresolved, inspectErr := inspectChronyIncludeDirectory(environment, directory, suffix)
+				if inspectErr != nil {
+					return nil, false, model.Evidence{}, inspectErr
+				}
+				dynamic = dynamic || unresolved
+				facts = append(facts, map[string]any{
+					"line": index + 1, "directive": directive, "path": directory,
+					"matching_files": count, "resolved_empty": !unresolved,
+				})
+			}
 		}
 	}
 	sort.Strings(sources)
@@ -257,6 +276,26 @@ func readChronySources(ctx context.Context, environment evaluator.Environment) (
 		"directives":       facts,
 		"dynamic_includes": dynamic,
 	}), nil
+}
+
+func inspectChronyIncludeDirectory(environment evaluator.Environment, directory, suffix string) (int, bool, error) {
+	if !path.IsAbs(directory) || path.Clean(directory) != directory || strings.ContainsAny(directory, "\x00\r\n") {
+		return 0, true, nil
+	}
+	entries, err := environment.Files.ReadDir(directory)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return 0, false, nil
+		}
+		return 0, true, fmt.Errorf("inspect chrony include directory %s: %w", directory, err)
+	}
+	count := 0
+	for _, entry := range entries {
+		if entry.Type().IsRegular() && path.Base(entry.Name()) == entry.Name() && strings.HasSuffix(entry.Name(), suffix) {
+			count++
+		}
+	}
+	return count, count > 0, nil
 }
 
 func trackingValue(output, key string) string {

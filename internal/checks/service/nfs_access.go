@@ -26,7 +26,8 @@ type effectiveNFSExport struct {
 
 func evaluateNFSAccessControl(ctx context.Context, rule model.ResolvedRule, environment evaluator.Environment) evaluator.Outcome {
 	if !environment.Commands.Available("exportfs") {
-		return evaluator.Outcome{Status: model.StatusUnknown, UnknownReason: model.UnknownUnsupportedConfiguration, Summary: "NFS export 관리 도구가 없어 활성 export 유무를 확정할 수 없습니다.", Expected: "활성 NFS export와 접근 통제 설정을 결정적으로 확인할 수 있어야 합니다.", Observed: "exportfs 없음"}
+		presence := evaluateNFSDisabled(ctx, rule, environment)
+		return nfsAccessWithoutExportfs(presence)
 	}
 	spec := executor.Spec{Name: "exportfs", Arguments: []string{"-v"}, Timeout: 20 * time.Second, MaxOutput: 4 << 20}
 	result, err := environment.Commands.Run(ctx, spec)
@@ -170,6 +171,29 @@ func evaluateNFSAccessControl(ctx context.Context, rule model.ResolvedRule, envi
 		return evaluator.Outcome{Status: model.StatusUnknown, UnknownReason: model.UnknownManualVerification, Summary: "NFS 접근 통제의 일부 조건을 정책과 대조하거나 확정해야 합니다.", Expected: "승인 client·security flavor·쓰기 경로로 제한하고 exports 파일 권한이 안전해야 합니다.", Observed: strings.Join(uniqueStrings(parts), "; "), Evidence: evidence}
 	}
 	return evaluator.Outcome{Status: model.StatusPass, Summary: "NFS export가 승인 정책으로 제한되고 설정 파일 권한이 안전합니다.", Expected: "승인 client·security flavor·쓰기 경로로 제한하고 exports 파일 권한이 안전해야 합니다.", Observed: fmt.Sprintf("export %d개를 승인 정책과 대조했습니다.", len(exports)), Evidence: evidence}
+}
+
+func nfsAccessWithoutExportfs(presence evaluator.Outcome) evaluator.Outcome {
+	if presence.Status == model.StatusError {
+		return presence
+	}
+	if presence.Status == model.StatusNotApplicable {
+		return evaluator.Outcome{
+			Status:   model.StatusNotApplicable,
+			Summary:  "NFS 서버 구성요소와 export가 없습니다.",
+			Expected: "활성 NFS export에만 접근 통제 기준을 적용합니다.",
+			Observed: presence.Observed,
+			Evidence: presence.Evidence,
+		}
+	}
+	return evaluator.Outcome{
+		Status:        model.StatusUnknown,
+		UnknownReason: model.UnknownUnsupportedConfiguration,
+		Summary:       "NFS export 관리 도구가 없어 활성 export의 접근 통제를 확정할 수 없습니다.",
+		Expected:      "활성 NFS export와 접근 통제 설정을 결정적으로 확인할 수 있어야 합니다.",
+		Observed:      "exportfs 없음; " + presence.Observed,
+		Evidence:      presence.Evidence,
+	}
 }
 
 func parseEffectiveNFSExports(data []byte) ([]effectiveNFSExport, error) {

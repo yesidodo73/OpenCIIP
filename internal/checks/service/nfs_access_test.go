@@ -23,3 +23,15 @@ func TestNFSAccessControlDoesNotAssumeNotApplicableWhenExportfsIsMissing(t *test
 		t.Fatalf("evaluateNFSAccessControl() = %s, %s, want UNKNOWN unsupported_configuration", outcome.Status, outcome.UnknownReason)
 	}
 }
+
+func TestNFSAccessControlIsNotApplicableWhenIndependentInspectionFindsNoServer(t *testing.T) {
+	presence := evaluator.Outcome{
+		Status:   model.StatusNotApplicable,
+		Observed: "NFS server unit, process, thread, export 없음",
+		Evidence: []model.Evidence{{Kind: model.EvidenceFact, Source: "nfs-presence"}},
+	}
+	outcome := nfsAccessWithoutExportfs(presence)
+	if outcome.Status != model.StatusNotApplicable || len(outcome.Evidence) != 1 {
+		t.Fatalf("nfsAccessWithoutExportfs() = %s evidence=%d, want NOT_APPLICABLE with evidence", outcome.Status, len(outcome.Evidence))
+	}
+}
