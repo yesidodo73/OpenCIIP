@@ -18,6 +18,8 @@ sudo openciip
 sudo openciip scan
 ```
 
+root 권한 없이 실행하면 보호된 설정과 시스템 상태를 확인하지 못할 수 있습니다. 이 경우 실행 전에 경고가 표시되며 일부 항목이 `ERROR` 또는 `UNKNOWN`으로 끝날 수 있습니다.
+
 자주 사용하는 예시는 다음과 같습니다.
 
 ```bash

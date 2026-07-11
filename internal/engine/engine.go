@@ -29,6 +29,14 @@ type Options struct {
 	Selection    model.Selection
 	EvidenceMode string
 	NoRedact     bool
+	Progress     func(Progress)
+}
+
+type Progress struct {
+	Completed int
+	Total     int
+	RuleID    string
+	Title     string
 }
 
 type Engine struct {
@@ -86,12 +94,24 @@ func (e *Engine) Scan(ctx context.Context, options Options) (model.ScanRun, erro
 			}
 			break
 		}
+		notifyProgress(options.Progress, Progress{
+			Completed: index,
+			Total:     len(selected),
+			RuleID:    rule.ID,
+			Title:     rule.Title,
+		})
 		result := e.registry.Evaluate(ctx, rule, e.environment)
 		if evidenceMode == "none" || (evidenceMode == "problems" &&
 			(result.Status == model.StatusPass || result.Status == model.StatusNotApplicable || result.Status == model.StatusSkipped)) {
 			result.Evidence = nil
 		}
 		results = append(results, result)
+		notifyProgress(options.Progress, Progress{
+			Completed: index + 1,
+			Total:     len(selected),
+			RuleID:    rule.ID,
+			Title:     rule.Title,
+		})
 	}
 
 	completedAt := e.now()
@@ -123,6 +143,12 @@ func (e *Engine) Scan(ctx context.Context, options Options) (model.ScanRun, erro
 		ExitCode:       exitStatus,
 	}
 	return model.ScanRun{Metadata: metadata, Results: results}, nil
+}
+
+func notifyProgress(callback func(Progress), progress Progress) {
+	if callback != nil {
+		callback(progress)
+	}
 }
 
 func selectRules(resolved []model.ResolvedRule, profiles model.ProfileSet, selection model.Selection) ([]model.ResolvedRule, error) {

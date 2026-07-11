@@ -120,6 +120,9 @@ func newScanCommand(stdout io.Writer, resultCode *int) *cobra.Command {
 				return &commandError{code: exitcode.Error, err: fmt.Errorf("점검을 준비하지 못했습니다: %w", err)}
 			}
 			defer application.Close()
+			if application.PlatformInfo().Privilege != "root" {
+				_, _ = fmt.Fprintln(command.ErrOrStderr(), "주의: root 권한이 아니므로 보호된 설정과 시스템 상태를 확인하지 못할 수 있습니다. 전체 점검은 sudo openciip scan으로 실행하세요.")
+			}
 			run, err := application.Scan(command.Context(), engine.Options{
 				Selection:    selection,
 				EvidenceMode: options.evidence,

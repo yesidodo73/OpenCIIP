@@ -20,6 +20,7 @@ type Application struct {
 	engine   *engine.Engine
 	host     *hostidentity.Collector
 	files    *system.OSReader
+	platform model.PlatformInfo
 	warnings []string
 }
 
@@ -71,11 +72,18 @@ func New(ctx context.Context, systemRoot string) (*Application, error) {
 		return nil, fmt.Errorf("prepare host identity collector: %w", err)
 	}
 	succeeded = true
-	return &Application{engine: checkEngine, host: host, files: files, warnings: warnings}, nil
+	return &Application{engine: checkEngine, host: host, files: files, platform: platformInfo, warnings: warnings}, nil
 }
 
 func NewDefault(ctx context.Context) (*Application, error) {
 	return New(ctx, string(os.PathSeparator))
+}
+
+func (a *Application) PlatformInfo() model.PlatformInfo {
+	if a == nil {
+		return model.PlatformInfo{}
+	}
+	return a.platform
 }
 
 func (a *Application) Close() error {

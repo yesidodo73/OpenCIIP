@@ -19,7 +19,13 @@ func TestScanProducesDeterministicSelectionCountsAndEvidenceBoundary(t *testing.
 	t.Parallel()
 
 	engine := newFixtureEngine(t)
-	run, err := engine.Scan(context.Background(), Options{EvidenceMode: "problems"})
+	progress := make([]Progress, 0, 4)
+	run, err := engine.Scan(context.Background(), Options{
+		EvidenceMode: "problems",
+		Progress: func(update Progress) {
+			progress = append(progress, update)
+		},
+	})
 	if err != nil {
 		t.Fatalf("Scan() error = %v", err)
 	}
@@ -40,6 +46,9 @@ func TestScanProducesDeterministicSelectionCountsAndEvidenceBoundary(t *testing.
 	}
 	if run.Metadata.SchemaVersion != model.RunMetadataSchemaVersion {
 		t.Fatalf("schema version = %d, want %d", run.Metadata.SchemaVersion, model.RunMetadataSchemaVersion)
+	}
+	if len(progress) != 4 || progress[0].Completed != 0 || progress[0].Total != 2 || progress[len(progress)-1].Completed != 2 {
+		t.Fatalf("progress = %#v, want start and completion updates for two rules", progress)
 	}
 }
 
