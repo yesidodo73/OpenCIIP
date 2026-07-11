@@ -1,3 +1,5 @@
 AGENTS.md
 ROADMAP.md
-docs/
+docs/*
+!docs/CHECKS.md
+!docs/USAGE.md
