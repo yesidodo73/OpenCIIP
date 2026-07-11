@@ -24,10 +24,11 @@ func NewDetector(files system.Reader) *Detector {
 func (d *Detector) Detect(ctx context.Context) (model.PlatformInfo, []string, error) {
 	warnings := make([]string, 0, 4)
 	info := model.PlatformInfo{
-		OS:           runtime.GOOS,
-		Architecture: runtime.GOARCH,
-		Privilege:    currentPrivilege(),
-		Support:      model.SupportUnsupported,
+		OS:                 runtime.GOOS,
+		Architecture:       runtime.GOARCH,
+		Privilege:          currentPrivilege(),
+		ScanSupport:        model.ScanSupportUnsupported,
+		RemediationSupport: model.RemediationSupportUnsupported,
 	}
 	if hostname, err := os.Hostname(); err == nil {
 		info.Hostname = hostname

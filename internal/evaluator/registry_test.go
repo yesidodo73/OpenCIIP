@@ -25,7 +25,7 @@ func testResolvedRule(verification model.VerificationState) model.ResolvedRule {
 	}
 }
 
-func TestRegistryEvaluateVerificationBoundary(t *testing.T) {
+func TestRegistryEvaluateKeepsEvidenceBasedStatusForPendingRules(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -34,24 +34,25 @@ func TestRegistryEvaluateVerificationBoundary(t *testing.T) {
 		outcome      Outcome
 		wantStatus   model.Status
 		wantReason   model.UnknownReason
-		wantObserved string
 		wantCode     string
 	}{
 		{
-			name:         "pending pass becomes unknown",
+			name:         "pending pass remains pass",
 			verification: model.VerificationPending,
-			outcome:      Outcome{Status: model.StatusPass, Summary: "예비 양호", Observed: "value=1"},
-			wantStatus:   model.StatusUnknown,
-			wantReason:   model.UnknownUnsupportedConfiguration,
-			wantObserved: "예비 상태=PASS",
+			outcome:      Outcome{Status: model.StatusPass, Summary: "양호", Observed: "value=1"},
+			wantStatus:   model.StatusPass,
 		},
 		{
-			name:         "pending fail becomes unknown",
+			name:         "pending fail remains fail",
 			verification: model.VerificationPending,
-			outcome:      Outcome{Status: model.StatusFail, Summary: "예비 취약"},
-			wantStatus:   model.StatusUnknown,
-			wantReason:   model.UnknownUnsupportedConfiguration,
-			wantObserved: "예비 상태=FAIL",
+			outcome:      Outcome{Status: model.StatusFail, Summary: "취약"},
+			wantStatus:   model.StatusFail,
+		},
+		{
+			name:         "pending not applicable remains not applicable",
+			verification: model.VerificationPending,
+			outcome:      Outcome{Status: model.StatusNotApplicable, Summary: "적용 대상 없음"},
+			wantStatus:   model.StatusNotApplicable,
 		},
 		{
 			name:         "pending collection error remains error",
@@ -91,9 +92,6 @@ func TestRegistryEvaluateVerificationBoundary(t *testing.T) {
 			}
 			if result.UnknownReason != test.wantReason {
 				t.Fatalf("unknown reason = %s, want %s", result.UnknownReason, test.wantReason)
-			}
-			if test.wantObserved != "" && !strings.Contains(result.Observed, test.wantObserved) {
-				t.Fatalf("observed = %q, want substring %q", result.Observed, test.wantObserved)
 			}
 			if result.ErrorCode != test.wantCode {
 				t.Fatalf("error code = %q, want %q", result.ErrorCode, test.wantCode)

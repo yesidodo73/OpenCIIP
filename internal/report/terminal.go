@@ -16,7 +16,7 @@ type TerminalOptions struct {
 
 func WriteTerminal(output io.Writer, run model.ScanRun, options TerminalOptions) error {
 	if !options.Quiet {
-		if _, err := fmt.Fprintf(output, "OpenCIIP 점검 결과 - %s (%s %s)\n\n", run.Metadata.Platform.Hostname, run.Metadata.Platform.Name, run.Metadata.Platform.VersionID); err != nil {
+		if _, err := fmt.Fprintf(output, "OpenCIIP 점검 결과 - %s (%s %s)\n점검 상태: %s\n\n", run.Metadata.Platform.Hostname, run.Metadata.Platform.Name, run.Metadata.Platform.VersionID, scanSupportLabel(run.Metadata.Platform.ScanSupport)); err != nil {
 			return err
 		}
 	}
@@ -68,6 +68,17 @@ func WriteTerminal(output io.Writer, run model.ScanRun, options TerminalOptions)
 		}
 	}
 	return nil
+}
+
+func scanSupportLabel(level model.ScanSupportLevel) string {
+	switch level {
+	case model.ScanSupportTested:
+		return "테스트 완료 환경"
+	case model.ScanSupportSupported:
+		return "Linux 공통 점검"
+	default:
+		return "지원 대상 아님"
+	}
 }
 
 func colorStatus(status model.Status, enabled bool) string {

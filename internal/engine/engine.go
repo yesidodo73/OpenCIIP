@@ -105,7 +105,7 @@ func (e *Engine) Scan(ctx context.Context, options Options) (model.ScanRun, erro
 		exitStatus = exitcode.Error
 	}
 	metadata := model.RunMetadata{
-		SchemaVersion:  1,
+		SchemaVersion:  model.RunMetadataSchemaVersion,
 		RunID:          id,
 		ToolVersion:    info.Version,
 		ToolCommit:     info.Commit,
@@ -121,9 +121,6 @@ func (e *Engine) Scan(ctx context.Context, options Options) (model.ScanRun, erro
 		Redaction:      !options.NoRedact,
 		Complete:       complete,
 		ExitCode:       exitStatus,
-	}
-	if e.environment.Platform.Support != model.SupportVerified && strings.TrimSpace(e.environment.Platform.VerificationWarning) != "" {
-		metadata.Warnings = append(metadata.Warnings, e.environment.Platform.VerificationWarning)
 	}
 	return model.ScanRun{Metadata: metadata, Results: results}, nil
 }

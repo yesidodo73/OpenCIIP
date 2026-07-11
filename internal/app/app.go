@@ -51,6 +51,9 @@ func New(ctx context.Context, systemRoot string) (*Application, error) {
 	if err != nil {
 		return nil, fmt.Errorf("resolve platform support: %w", err)
 	}
+	if platformInfo.ScanSupport == model.ScanSupportUnsupported {
+		return nil, fmt.Errorf("현재는 Linux 서버 점검만 지원합니다")
+	}
 	registry := evaluator.NewRegistry()
 	if err := checks.RegisterAll(registry, bundle.EvaluatorIDs()); err != nil {
 		return nil, err

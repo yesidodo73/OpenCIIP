@@ -206,13 +206,14 @@ type BindingDefaults struct {
 }
 
 type BindingLayer struct {
-	SchemaVersion        int              `json:"schema_version" yaml:"schema_version"`
-	ID                   string           `json:"id" yaml:"id"`
-	Priority             int              `json:"priority" yaml:"priority"`
-	Selector             PlatformSelector `json:"selector" yaml:"selector"`
-	PlatformVerification *Verification    `json:"platform_verification,omitempty" yaml:"platform_verification,omitempty"`
-	Defaults             BindingDefaults  `json:"defaults,omitempty" yaml:"defaults,omitempty"`
-	Bindings             []RuleBinding    `json:"bindings" yaml:"bindings"`
+	SchemaVersion        int               `json:"schema_version" yaml:"schema_version"`
+	ID                   string            `json:"id" yaml:"id"`
+	Priority             int               `json:"priority" yaml:"priority"`
+	Selector             PlatformSelector  `json:"selector" yaml:"selector"`
+	ScanSupport          *ScanSupportLevel `json:"scan_support,omitempty" yaml:"scan_support,omitempty"`
+	PlatformVerification *Verification     `json:"platform_verification,omitempty" yaml:"platform_verification,omitempty"`
+	Defaults             BindingDefaults   `json:"defaults,omitempty" yaml:"defaults,omitempty"`
+	Bindings             []RuleBinding     `json:"bindings" yaml:"bindings"`
 }
 
 type ResolvedRule struct {

@@ -222,7 +222,7 @@ func (w *Workflow) currentGateSnapshot(ctx context.Context, requireRelease bool)
 	if err != nil {
 		return gateSnapshot{}, fmt.Errorf("현재 플랫폼의 검증 상태를 다시 해석하지 못했습니다: %w", err)
 	}
-	if currentPlatform.Support != model.SupportVerified {
+	if currentPlatform.ScanSupport != model.ScanSupportTested || currentPlatform.RemediationSupport != model.RemediationSupportVerified {
 		return gateSnapshot{}, fmt.Errorf("현재 플랫폼의 자동 조치 지원 상태가 verified가 아닙니다")
 	}
 	if currentPlatform.Privilege != "root" {
@@ -721,8 +721,9 @@ func (w *Workflow) validateReportCompatibility(scan model.ScanRun, current gateS
 	if !model.SameRemediationPlatformIdentity(metadata.Platform, current.platform) {
 		return fmt.Errorf("보고서 플랫폼과 현재 플랫폼이 일치하지 않습니다")
 	}
-	if metadata.Platform.Support != model.SupportVerified || current.platform.Support != model.SupportVerified {
-		return fmt.Errorf("Rocky Linux 9.8 실제 VM 검증이 완료된 빌드와 보고서에서만 자동 조치를 계획할 수 있습니다")
+	if metadata.Platform.ScanSupport != model.ScanSupportTested || current.platform.ScanSupport != model.ScanSupportTested ||
+		metadata.Platform.RemediationSupport != model.RemediationSupportVerified || current.platform.RemediationSupport != model.RemediationSupportVerified {
+		return fmt.Errorf("읽기 전용 점검과 자동 조치 검증을 모두 마친 환경에서만 자동 조치를 계획할 수 있습니다")
 	}
 	return nil
 }
@@ -732,14 +733,14 @@ func (w *Workflow) eligibleRecipe(scan model.ScanRun, result model.CheckResult, 
 		return model.RemediationRecipe{}, false, "FAIL 판정이 아님"
 	}
 	if !resolved.Applicable || resolved.Verification.State != model.VerificationVerified {
-		return model.RemediationRecipe{}, false, "Rocky Linux 9.8 검증 상태가 verified가 아님"
+		return model.RemediationRecipe{}, false, "현재 환경의 규칙 검증이 완료되지 않음"
 	}
 	item, exists := current.recipes.Match(result.RuleID, current.platform)
 	if !exists {
 		return model.RemediationRecipe{}, false, "지원되는 내장 조치 정의가 없음"
 	}
 	if err := requireVerifiedRecipe(item); err != nil {
-		return model.RemediationRecipe{}, false, "조치 정의의 Rocky Linux 9.8 검증 provenance가 유효한 verified 상태가 아님"
+		return model.RemediationRecipe{}, false, "현재 환경의 조치 정의 검증이 완료되지 않음"
 	}
 	if item.GuideYear != scan.Metadata.GuideYear {
 		return model.RemediationRecipe{}, false, "조치 정의의 가이드 연도가 보고서와 다름"

@@ -77,8 +77,8 @@ func TestDefaultRockyLinux98ResolutionUsesAllApplicableLayers(t *testing.T) {
 			t.Fatalf("resolved rule %s unexpectedly became inapplicable", rule.ID)
 		}
 		if rule.Verification.State != model.VerificationPending ||
-			!reflect.DeepEqual(rule.Verification.Environments, []string{"Rocky Linux 9.8"}) {
-			t.Fatalf("resolved rule %s verification = %#v, want Rocky Linux 9.8 pending", rule.ID, rule.Verification)
+			!reflect.DeepEqual(rule.Verification.Environments, []string{"Rocky Linux 9.8 amd64"}) {
+			t.Fatalf("resolved rule %s verification = %#v, want Rocky Linux 9.8 amd64 pending", rule.ID, rule.Verification)
 		}
 		byID[rule.ID] = rule
 	}
@@ -160,7 +160,7 @@ func assertDefaultLayers(t *testing.T, bundle Bundle) {
 	}{
 		{id: "linux-common", priority: 100, selector: model.PlatformSelector{OS: "linux"}},
 		{id: "rhel-9", priority: 200, selector: model.PlatformSelector{Family: "rhel", VersionMajor: "9"}},
-		{id: "rocky-linux-9.8", priority: 300, selector: model.PlatformSelector{ID: "rocky", Version: "9.8"}},
+		{id: "rocky-linux-9.8", priority: 300, selector: model.PlatformSelector{ID: "rocky", Version: "9.8", Architecture: "amd64"}},
 	}
 	for index, expected := range want {
 		layer := bundle.Layers[index]

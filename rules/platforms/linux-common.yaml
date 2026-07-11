@@ -3,6 +3,7 @@ id: linux-common
 priority: 100
 selector:
   os: linux
+scan_support: supported
 bindings:
   - rule_id: U-01
     evaluator: unix.account.remote_root_login

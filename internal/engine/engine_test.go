@@ -38,6 +38,9 @@ func TestScanProducesDeterministicSelectionCountsAndEvidenceBoundary(t *testing.
 	if run.Metadata.ExitCode != exitcode.Failed || !run.Metadata.Complete || run.Metadata.EvidenceMode != "problems" {
 		t.Fatalf("metadata = %#v", run.Metadata)
 	}
+	if run.Metadata.SchemaVersion != model.RunMetadataSchemaVersion {
+		t.Fatalf("schema version = %d, want %d", run.Metadata.SchemaVersion, model.RunMetadataSchemaVersion)
+	}
 }
 
 func TestScanCancellationCreatesSkippedResultsAndIncompleteRun(t *testing.T) {
@@ -167,7 +170,8 @@ func newFixtureEngine(t *testing.T) *Engine {
 		Files:    files,
 		Commands: inertCommandRunner{},
 		Platform: model.PlatformInfo{
-			OS: "linux", ID: "rocky", VersionID: "9.8", Family: "rhel", Architecture: "amd64", Support: model.SupportVerified,
+			OS: "linux", ID: "rocky", VersionID: "9.8", Family: "rhel", Architecture: "amd64",
+			ScanSupport: model.ScanSupportTested, RemediationSupport: model.RemediationSupportVerified,
 		},
 	})
 	if err != nil {

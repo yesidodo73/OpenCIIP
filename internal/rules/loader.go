@@ -107,6 +107,14 @@ func validateBindingLayer(layer model.BindingLayer) error {
 	if !validSelector(layer.Selector) {
 		return fmt.Errorf("binding layer %s must have at least one canonical selector", layer.ID)
 	}
+	if layer.ScanSupport != nil {
+		if !layer.ScanSupport.Valid() {
+			return fmt.Errorf("binding layer %s has invalid scan support %q", layer.ID, *layer.ScanSupport)
+		}
+		if *layer.ScanSupport == model.ScanSupportTested && !isExactTestedPlatformSelector(layer.Selector) {
+			return fmt.Errorf("binding layer %s tested scan support requires exact id, version, and architecture selectors", layer.ID)
+		}
+	}
 	if layer.PlatformVerification != nil {
 		if !isExactPlatformSelector(layer.Selector) {
 			return fmt.Errorf("binding layer %s platform verification requires exact id and version selectors without version_major", layer.ID)
@@ -161,6 +169,10 @@ func validSelector(selector model.PlatformSelector) bool {
 
 func isExactPlatformSelector(selector model.PlatformSelector) bool {
 	return selector.ID != "" && selector.Version != "" && selector.VersionMajor == ""
+}
+
+func isExactTestedPlatformSelector(selector model.PlatformSelector) bool {
+	return isExactPlatformSelector(selector) && selector.Architecture != ""
 }
 
 func validateVerification(verification model.Verification) error {

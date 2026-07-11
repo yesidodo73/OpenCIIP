@@ -66,7 +66,7 @@ func (m *Manager) Plan(ctx context.Context, request PlanRequest) (*model.Remedia
 	if strings.TrimSpace(request.ScanRunID) == "" || strings.TrimSpace(request.ScanToolVersion) == "" || strings.TrimSpace(request.ScanToolCommit) == "" || strings.TrimSpace(request.RuleSetVersion) == "" || !request.FailurePolicy.Valid() || len(request.ChangeSets) == 0 {
 		return nil, &Error{Code: CodeInvalidInput, Operation: "plan", Err: fmt.Errorf("scan identity, versions, failure policy, and change sets are required")}
 	}
-	if request.Platform.Support != model.SupportVerified {
+	if request.Platform.ScanSupport != model.ScanSupportTested || request.Platform.RemediationSupport != model.RemediationSupportVerified {
 		return nil, &Error{Code: CodeUnsupportedOperation, Operation: "plan", Err: fmt.Errorf("only a verified platform can be bound to a remediation plan")}
 	}
 	if err := request.RemediationBuild.Validate(); err != nil {

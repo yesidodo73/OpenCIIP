@@ -464,11 +464,11 @@ func (m *Model) View() tea.View {
 	switch m.screen {
 	case screenReady:
 		content = titleStyle.Render("OpenCIIP") + "\n\n" +
-			"Rocky Linux 9.8 대상 2026 Unix 서버 취약점 점검을 시작합니다.\n" +
+			"Linux 서버의 2026 Unix 서버 보안 항목을 점검합니다.\n" +
 			"점검은 기본적으로 시스템을 변경하지 않습니다.\n\n" +
 			helpStyle.Render("Enter 또는 s: 점검 시작   q: 종료")
 	case screenScanning:
-		content = titleStyle.Render("OpenCIIP") + "\n\n시스템을 점검하고 있습니다. 완료될 때까지 기다려 주십시오.\n\n" + helpStyle.Render("q: 점검 취소 및 종료")
+		content = titleStyle.Render("OpenCIIP") + "\n\n시스템을 점검하고 있습니다. 완료될 때까지 기다려주세요.\n\n" + helpStyle.Render("q: 점검 취소 및 종료")
 	case screenResults:
 		header := "문제 항목"
 		if m.showAll {
@@ -488,7 +488,7 @@ func (m *Model) View() tea.View {
 		content = m.viewport.View() + "\n" + helpStyle.Render("Esc: 결과 목록   q: 종료")
 	case screenRemediationFailurePolicy:
 		content = titleStyle.Render("조치 실패 정책 선택") + "\n\n" +
-			"변경 세트 적용 또는 검증이 실패했을 때의 자동 롤백 범위를 선택해 주십시오.\n\n" +
+			"변경 세트 적용 또는 검증이 실패했을 때의 자동 롤백 범위를 선택해주세요.\n\n" +
 			"i  rollback_item: 실패한 항목 변경 세트만 복원합니다.\n" +
 			"r  rollback_run: 실패한 항목을 복원한 뒤 앞서 적용한 실행 전체를 역순으로 복원합니다.\n\n" +
 			helpStyle.Render("i: 항목 단위   r: 실행 전체   Esc: 돌아가기   q: 종료")
@@ -732,7 +732,8 @@ func (m *Model) startApprovedRollback() (tea.Model, tea.Cmd) {
 }
 
 func (m *Model) canPlanRemediation() bool {
-	if m.remediatorFactory == nil || m.reportPath == "" || m.run.Metadata.Platform.Support != model.SupportVerified {
+	if m.remediatorFactory == nil || m.reportPath == "" || m.run.Metadata.Platform.ScanSupport != model.ScanSupportTested ||
+		m.run.Metadata.Platform.RemediationSupport != model.RemediationSupportVerified {
 		return false
 	}
 	for _, result := range m.run.Results {

@@ -27,6 +27,14 @@
     "selector": {
       "$ref": "#/$defs/platformSelector"
     },
+    "scan_support": {
+      "type": "string",
+      "enum": [
+        "unsupported",
+        "supported",
+        "tested"
+      ]
+    },
     "platform_verification": {
       "$ref": "#/$defs/verification"
     },
@@ -65,6 +73,29 @@
                 "const": ""
               }
             }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "scan_support": {
+            "const": "tested"
+          }
+        },
+        "required": [
+          "scan_support"
+        ]
+      },
+      "then": {
+        "properties": {
+          "selector": {
+            "required": [
+              "id",
+              "version",
+              "architecture"
+            ]
           }
         }
       }

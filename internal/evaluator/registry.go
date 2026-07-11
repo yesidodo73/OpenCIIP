@@ -128,35 +128,7 @@ func (r *Registry) Evaluate(ctx context.Context, rule model.ResolvedRule, enviro
 	result.Evidence = append([]model.Evidence(nil), outcome.Evidence...)
 	result.ErrorCode = outcome.ErrorCode
 	result.ErrorMessage = outcome.ErrorMessage
-	applyVerificationBoundary(&result, rule.Verification)
 	return result
-}
-
-func applyVerificationBoundary(result *model.CheckResult, verification model.Verification) {
-	if verification.State == model.VerificationVerified || result.Status == model.StatusError ||
-		result.Status == model.StatusUnknown || result.Status == model.StatusSkipped {
-		return
-	}
-	switch result.Status {
-	case model.StatusPass, model.StatusFail, model.StatusNotApplicable:
-		// Only valid provisional conclusions are eligible for the pending boundary.
-	default:
-		return
-	}
-	provisionalStatus := result.Status
-	provisionalSummary := result.Summary
-	provisionalObserved := result.Observed
-	result.Status = model.StatusUnknown
-	result.UnknownReason = model.UnknownUnsupportedConfiguration
-	result.Summary = "대상 운영체제의 실제 VM 검증 전이므로 예비 판정을 최종 결과로 확정하지 않았습니다."
-	parts := []string{fmt.Sprintf("예비 상태=%s", provisionalStatus)}
-	if strings.TrimSpace(provisionalSummary) != "" {
-		parts = append(parts, "예비 판정="+provisionalSummary)
-	}
-	if strings.TrimSpace(provisionalObserved) != "" {
-		parts = append(parts, "예비 확인값="+provisionalObserved)
-	}
-	result.Observed = strings.Join(parts, "; ")
 }
 
 func normalizeResult(result *model.CheckResult) {

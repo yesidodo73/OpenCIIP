@@ -40,7 +40,8 @@ func TestFailedRemediationPlanClosesNewRemediator(t *testing.T) {
 		return remediator, nil
 	})
 	view.reportPath = "/report"
-	view.run.Metadata.Platform.Support = model.SupportVerified
+	view.run.Metadata.Platform.ScanSupport = model.ScanSupportTested
+	view.run.Metadata.Platform.RemediationSupport = model.RemediationSupportVerified
 	view.run.Results = []model.CheckResult{{
 		Status:       model.StatusFail,
 		Verification: model.Verification{State: model.VerificationVerified},

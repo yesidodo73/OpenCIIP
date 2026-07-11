@@ -4,13 +4,15 @@ priority: 300
 selector:
   id: rocky
   version: "9.8"
+  architecture: amd64
+scan_support: tested
 platform_verification:
   state: pending
   environments:
-    - Rocky Linux 9.8
+    - Rocky Linux 9.8 amd64
 defaults:
   verification:
     state: pending
     environments:
-      - Rocky Linux 9.8
+      - Rocky Linux 9.8 amd64
 bindings: []

@@ -34,7 +34,10 @@ func TestDetectorDetectCollectsFactsWithoutHardcodingDistributionSupport(t *test
 	if info.Family != "rhel" || info.KernelRelease != "5.14.0-test.el9.x86_64" || info.InitSystem != "systemd" || info.PackageManager != "dnf" {
 		t.Fatalf("Detect() host facts = %#v", info)
 	}
-	if info.Support != model.SupportUnsupported {
-		t.Fatalf("Detect() support = %q, want %q before binding verification", info.Support, model.SupportUnsupported)
+	if info.ScanSupport != model.ScanSupportUnsupported {
+		t.Fatalf("Detect() scan support = %q, want %q before rule resolution", info.ScanSupport, model.ScanSupportUnsupported)
+	}
+	if info.RemediationSupport != model.RemediationSupportUnsupported {
+		t.Fatalf("Detect() remediation support = %q, want %q before rule resolution", info.RemediationSupport, model.RemediationSupportUnsupported)
 	}
 }

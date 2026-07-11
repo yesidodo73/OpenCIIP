@@ -70,9 +70,21 @@ func TestValidateLoadedScanRejectsTamperedOrIncompleteMetadata(t *testing.T) {
 			},
 		},
 		{
-			name: "unknown platform support",
+			name: "unknown scan support",
 			mutate: func(run *model.ScanRun) {
-				run.Metadata.Platform.Support = "trusted"
+				run.Metadata.Platform.ScanSupport = "trusted"
+			},
+		},
+		{
+			name: "unknown remediation support",
+			mutate: func(run *model.ScanRun) {
+				run.Metadata.Platform.RemediationSupport = "trusted"
+			},
+		},
+		{
+			name: "verified remediation without tested scan support",
+			mutate: func(run *model.ScanRun) {
+				run.Metadata.Platform.ScanSupport = model.ScanSupportSupported
 			},
 		},
 		{
@@ -230,7 +242,7 @@ func validLoadedScanFixture() model.ScanRun {
 	resultCompletedAt := startedAt.Add(100 * time.Millisecond)
 	return model.ScanRun{
 		Metadata: model.RunMetadata{
-			SchemaVersion:  1,
+			SchemaVersion:  model.RunMetadataSchemaVersion,
 			RunID:          "scan-20260711",
 			ToolVersion:    "v0.1.0",
 			ToolCommit:     strings.Repeat("b", 40),
@@ -240,18 +252,19 @@ func validLoadedScanFixture() model.ScanRun {
 			CompletedAt:    completedAt,
 			DurationMS:     completedAt.Sub(startedAt).Milliseconds(),
 			Platform: model.PlatformInfo{
-				Hostname:       "rocky-test",
-				OS:             "linux",
-				ID:             "rocky",
-				Name:           "Rocky Linux 9.8",
-				VersionID:      "9.8",
-				Family:         "rhel",
-				Architecture:   "x86_64",
-				KernelRelease:  "5.14.0-test.el9.x86_64",
-				InitSystem:     "systemd",
-				PackageManager: "dnf",
-				Privilege:      "root",
-				Support:        model.SupportVerified,
+				Hostname:           "rocky-test",
+				OS:                 "linux",
+				ID:                 "rocky",
+				Name:               "Rocky Linux 9.8",
+				VersionID:          "9.8",
+				Family:             "rhel",
+				Architecture:       "amd64",
+				KernelRelease:      "5.14.0-test.el9.x86_64",
+				InitSystem:         "systemd",
+				PackageManager:     "dnf",
+				Privilege:          "root",
+				ScanSupport:        model.ScanSupportTested,
+				RemediationSupport: model.RemediationSupportVerified,
 			},
 			Counts:       map[model.Status]int{model.StatusPass: 1},
 			EvidenceMode: "problems",

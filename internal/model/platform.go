@@ -1,32 +1,45 @@
 package model
 
-// SupportLevel distinguishes implementation targets from verified support.
-type SupportLevel string
+// ScanSupportLevel describes how broadly read-only checks can run on a platform.
+type ScanSupportLevel string
 
 const (
-	SupportUnsupported SupportLevel = "unsupported"
-	SupportTargeted    SupportLevel = "targeted"
-	SupportVerified    SupportLevel = "verified"
+	ScanSupportUnsupported ScanSupportLevel = "unsupported"
+	ScanSupportSupported   ScanSupportLevel = "supported"
+	ScanSupportTested      ScanSupportLevel = "tested"
 )
 
-func (s SupportLevel) Valid() bool {
-	return s == SupportUnsupported || s == SupportTargeted || s == SupportVerified
+func (s ScanSupportLevel) Valid() bool {
+	return s == ScanSupportUnsupported || s == ScanSupportSupported || s == ScanSupportTested
+}
+
+// RemediationSupportLevel is intentionally narrower than read-only scan support.
+type RemediationSupportLevel string
+
+const (
+	RemediationSupportUnsupported RemediationSupportLevel = "unsupported"
+	RemediationSupportTargeted    RemediationSupportLevel = "targeted"
+	RemediationSupportVerified    RemediationSupportLevel = "verified"
+)
+
+func (s RemediationSupportLevel) Valid() bool {
+	return s == RemediationSupportUnsupported || s == RemediationSupportTargeted || s == RemediationSupportVerified
 }
 
 type PlatformInfo struct {
-	Hostname            string       `json:"hostname"`
-	OS                  string       `json:"os"`
-	ID                  string       `json:"id"`
-	Name                string       `json:"name"`
-	VersionID           string       `json:"version_id"`
-	Family              string       `json:"family"`
-	Architecture        string       `json:"architecture"`
-	KernelRelease       string       `json:"kernel_release"`
-	InitSystem          string       `json:"init_system"`
-	PackageManager      string       `json:"package_manager"`
-	Privilege           string       `json:"privilege"`
-	Support             SupportLevel `json:"support"`
-	VerificationWarning string       `json:"verification_warning,omitempty"`
+	Hostname           string                  `json:"hostname"`
+	OS                 string                  `json:"os"`
+	ID                 string                  `json:"id"`
+	Name               string                  `json:"name"`
+	VersionID          string                  `json:"version_id"`
+	Family             string                  `json:"family"`
+	Architecture       string                  `json:"architecture"`
+	KernelRelease      string                  `json:"kernel_release"`
+	InitSystem         string                  `json:"init_system"`
+	PackageManager     string                  `json:"package_manager"`
+	Privilege          string                  `json:"privilege"`
+	ScanSupport        ScanSupportLevel        `json:"scan_support"`
+	RemediationSupport RemediationSupportLevel `json:"remediation_support"`
 }
 
 func SameRemediationPlatformIdentity(left, right PlatformInfo) bool {
@@ -35,5 +48,5 @@ func SameRemediationPlatformIdentity(left, right PlatformInfo) bool {
 		left.ID == right.ID &&
 		left.VersionID == right.VersionID &&
 		left.Architecture == right.Architecture &&
-		left.Support == right.Support
+		left.RemediationSupport == right.RemediationSupport
 }

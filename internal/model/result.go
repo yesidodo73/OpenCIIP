@@ -2,6 +2,8 @@ package model
 
 import "time"
 
+const RunMetadataSchemaVersion = 2
+
 type EvidenceKind string
 
 const (

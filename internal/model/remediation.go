@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-const RemediationSchemaVersion = 1
+const RemediationSchemaVersion = 2
 
 type RemediationRisk string
 
@@ -1401,7 +1401,10 @@ func validateRemediationPlatform(platform PlatformInfo) error {
 			return fmt.Errorf("remediation platform %s is required and must be canonical", name)
 		}
 	}
-	if platform.Support != SupportVerified {
+	if platform.ScanSupport != ScanSupportTested {
+		return fmt.Errorf("remediation platform has not completed read-only scan testing")
+	}
+	if platform.RemediationSupport != RemediationSupportVerified {
 		return fmt.Errorf("remediation platform support is not verified")
 	}
 	return nil

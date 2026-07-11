@@ -151,7 +151,7 @@ func validateLoadedScan(run model.ScanRun) error {
 	if len(run.Results) == 0 {
 		return fmt.Errorf("점검 결과가 비어 있습니다")
 	}
-	if metadata.SchemaVersion != 1 || !canonicalIdentityString(metadata.RunID) || metadata.GuideYear != 2026 {
+	if metadata.SchemaVersion != model.RunMetadataSchemaVersion || !canonicalIdentityString(metadata.RunID) || metadata.GuideYear != 2026 {
 		return fmt.Errorf("지원하지 않는 schema, 실행 ID 또는 가이드 연도입니다")
 	}
 	if !canonicalIdentityString(metadata.ToolVersion) || !canonicalIdentityString(metadata.ToolCommit) {
@@ -308,14 +308,17 @@ func validateReportPlatform(platform model.PlatformInfo) error {
 			return fmt.Errorf("플랫폼 identity가 비어 있거나 정규화되지 않았습니다")
 		}
 	}
-	if !platform.Support.Valid() {
-		return fmt.Errorf("플랫폼 지원 상태가 잘못되었습니다")
+	if !platform.ScanSupport.Valid() {
+		return fmt.Errorf("플랫폼 점검 지원 상태가 잘못되었습니다")
 	}
-	if platform.Support == model.SupportVerified && platform.VerificationWarning != "" {
-		return fmt.Errorf("verified 플랫폼에 검증 경고가 남아 있습니다")
+	if platform.ScanSupport == model.ScanSupportUnsupported {
+		return fmt.Errorf("지원되지 않는 플랫폼의 점검 보고서입니다")
 	}
-	if platform.Support != model.SupportVerified && !canonicalIdentityString(platform.VerificationWarning) {
-		return fmt.Errorf("검증되지 않은 플랫폼에 검증 경고가 없습니다")
+	if !platform.RemediationSupport.Valid() {
+		return fmt.Errorf("플랫폼 자동 조치 지원 상태가 잘못되었습니다")
+	}
+	if platform.RemediationSupport == model.RemediationSupportVerified && platform.ScanSupport != model.ScanSupportTested {
+		return fmt.Errorf("점검 테스트를 완료하지 않은 플랫폼에 자동 조치가 허용되어 있습니다")
 	}
 	return nil
 }
