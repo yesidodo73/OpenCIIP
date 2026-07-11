@@ -226,7 +226,7 @@ func newRemediationRollbackCommand(stdout io.Writer, resultCode *int, parent *re
 			if value.CascadeRequired {
 				cascade = " --cascade"
 			}
-			if _, err := fmt.Fprintf(stdout, "\n표시된 범위 전체를 승인하려면 다음 형식을 사용하십시오.\nopenciip remediate rollback item %s %s --preview-digest %s%s --yes\n", arguments[0], arguments[1], value.PreviewDigest, cascade); err != nil {
+			if _, err := fmt.Fprintf(stdout, "\n표시된 범위 전체를 승인하려면 다음 형식을 사용하세요.\nopenciip remediate rollback item %s %s --preview-digest %s%s --yes\n", arguments[0], arguments[1], value.PreviewDigest, cascade); err != nil {
 				return remediationFailure("항목 롤백 승인 안내를 출력하지 못했습니다", err)
 			}
 			*resultCode = exitcode.OK
@@ -249,7 +249,7 @@ func newRemediationRollbackCommand(stdout io.Writer, resultCode *int, parent *re
 			if err := writeRollbackPreview(stdout, value); err != nil {
 				return remediationFailure("실행 전체 롤백 미리보기를 출력하지 못했습니다", err)
 			}
-			if _, err := fmt.Fprintf(stdout, "\n표시된 전체 범위를 승인하려면 다음 형식을 사용하십시오.\nopenciip remediate rollback run %s --preview-digest %s --yes\n", arguments[0], value.PreviewDigest); err != nil {
+			if _, err := fmt.Fprintf(stdout, "\n표시된 전체 범위를 승인하려면 다음 형식을 사용하세요.\nopenciip remediate rollback run %s --preview-digest %s --yes\n", arguments[0], value.PreviewDigest); err != nil {
 				return remediationFailure("실행 전체 롤백 승인 안내를 출력하지 못했습니다", err)
 			}
 			*resultCode = exitcode.OK
@@ -388,7 +388,7 @@ func writeRemediationPlan(output io.Writer, planned workflow.PlanResult) error {
 	if err := writeStringList(output, "제외 항목", planned.Skipped); err != nil {
 		return err
 	}
-	_, err := fmt.Fprintf(output, "\n이 계획은 아직 승인되지 않았으며 시스템을 변경하지 않았습니다.\n승인하려면 plan digest를 다시 확인한 뒤 다음 형식을 사용하십시오.\nopenciip remediate approve %s --plan-digest %s --yes\n", value.RunID, value.PlanDigest)
+	_, err := fmt.Fprintf(output, "\n이 계획은 아직 승인되지 않았으며 시스템을 변경하지 않았습니다.\n승인하려면 plan digest를 다시 확인한 뒤 다음 형식을 사용하세요.\nopenciip remediate approve %s --plan-digest %s --yes\n", value.RunID, value.PlanDigest)
 	return err
 }
 

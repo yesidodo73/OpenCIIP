@@ -31,7 +31,7 @@ func evaluateTimeSync(ctx context.Context, rule model.ResolvedRule, environment 
 			Status:        model.StatusUnknown,
 			UnknownReason: model.UnknownUnsupportedConfiguration,
 			Summary:       "지원되는 방식으로 시각 동기화 서비스 상태를 확인할 수 없습니다.",
-			Expected:      "Rocky Linux 9.8 systemd 환경에서 chronyd를 사용해야 합니다.",
+			Expected:      "systemd 환경에서 chronyd 상태를 확인할 수 있어야 합니다.",
 			Observed:      environment.Platform.InitSystem,
 		}
 	}

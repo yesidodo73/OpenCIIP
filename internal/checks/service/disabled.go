@@ -102,7 +102,7 @@ func disabledEvaluator(policy disabledPolicy) evaluator.Func {
 				Status:        model.StatusUnknown,
 				UnknownReason: model.UnknownUnsupportedConfiguration,
 				Summary:       fmt.Sprintf("%s 서비스 상태를 지원하는 방식으로 확인할 수 없습니다.", policy.label),
-				Expected:      "systemd 기반 Rocky Linux 9.8 환경이 필요합니다.",
+				Expected:      "systemd 기반 Linux 환경이 필요합니다.",
 				Observed:      environment.Platform.InitSystem,
 			}
 		}

@@ -38,7 +38,7 @@ func evaluateRHostsTrust(ctx context.Context, _ model.ResolvedRule, environment 
 			Status:        model.StatusUnknown,
 			UnknownReason: model.UnknownUnsupportedConfiguration,
 			Summary:       "r 계열 서비스 상태를 지원하는 방식으로 확인할 수 없습니다.",
-			Expected:      "systemd 기반 Rocky Linux 9.8에서 r 계열 활성 경로를 확인할 수 있어야 합니다.",
+			Expected:      "systemd 기반 Linux에서 r 계열 활성 경로를 확인할 수 있어야 합니다.",
 			Observed:      environment.Platform.InitSystem,
 		}
 	}

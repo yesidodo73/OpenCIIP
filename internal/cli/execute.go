@@ -46,7 +46,7 @@ func newRootCommand(stdin io.Reader, stdout, stderr io.Writer, resultCode *int) 
 		SilenceErrors: true,
 		RunE: func(command *cobra.Command, _ []string) error {
 			if !isInteractive(stdin, stdout) {
-				return &commandError{code: exitcode.Usage, err: fmt.Errorf("대화형 터미널이 아닙니다. 자동화 환경에서는 openciip scan을 사용하십시오")}
+				return &commandError{code: exitcode.Usage, err: fmt.Errorf("대화형 터미널이 아닙니다. 자동화 환경에서는 openciip scan을 사용하세요")}
 			}
 			application, err := app.NewDefault(command.Context())
 			if err != nil {
@@ -72,7 +72,9 @@ func newRootCommand(stdin io.Reader, stdout, stderr io.Writer, resultCode *int) 
 	command.SetOut(stdout)
 	command.SetErr(stderr)
 	command.AddCommand(newScanCommand(stdout, resultCode))
-	command.AddCommand(newRemediateCommand(stdout, resultCode))
+	remediate := newRemediateCommand(stdout, resultCode)
+	remediate.Hidden = true
+	command.AddCommand(remediate)
 	command.AddCommand(newVersionCommand(stdout))
 	return command
 }

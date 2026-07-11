@@ -67,6 +67,7 @@ sudo ./openciip scan --all
 
 ```text
 OpenCIIP 점검 결과 - server01 (Rocky Linux 9.8)
+점검 상태: 테스트 완료 환경
 
 FAIL                 U-02  비밀번호 관리정책 설정
   비밀번호 정책이 점검 기준을 충족하지 않습니다.

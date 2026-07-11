@@ -20,7 +20,7 @@ func evaluateDNSPatchLevel(ctx context.Context, _ model.ResolvedRule, environmen
 			Status:        model.StatusUnknown,
 			UnknownReason: model.UnknownUnsupportedConfiguration,
 			Summary:       "DNS 서비스 대상을 지원하는 방식으로 확인할 수 없습니다.",
-			Expected:      "systemd 기반 Rocky Linux 9.8의 활성 BIND와 vendor 보안 권고를 확인해야 합니다.",
+			Expected:      "systemd 기반 Linux의 활성 BIND와 배포판 보안 권고를 확인해야 합니다.",
 			Observed:      "init=" + environment.Platform.InitSystem,
 		}
 	}

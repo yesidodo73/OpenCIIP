@@ -25,7 +25,7 @@ const (
 
 func evaluateStartupPermissions(ctx context.Context, _ model.ResolvedRule, environment evaluator.Environment) evaluator.Outcome {
 	if environment.Platform.InitSystem != "systemd" {
-		return evaluator.Outcome{Status: model.StatusUnknown, UnknownReason: model.UnknownUnsupportedConfiguration, Summary: "시작 파일 권한을 지원하는 방식으로 확인할 수 없습니다.", Expected: "systemd 기반 Rocky Linux 9.8 환경이 필요합니다.", Observed: "init=" + environment.Platform.InitSystem}
+		return evaluator.Outcome{Status: model.StatusUnknown, UnknownReason: model.UnknownUnsupportedConfiguration, Summary: "시작 파일 권한을 지원하는 방식으로 확인할 수 없습니다.", Expected: "systemd 기반 Linux 환경이 필요합니다.", Observed: "init=" + environment.Platform.InitSystem}
 	}
 	specs := []executor.Spec{
 		{Name: "systemctl", Arguments: []string{"list-unit-files", "--no-pager", "--no-legend", "--plain", "--state=enabled,enabled-runtime,linked,linked-runtime"}, Timeout: 30 * time.Second, MaxOutput: 4 << 20},

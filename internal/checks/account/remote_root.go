@@ -24,7 +24,7 @@ func evaluateRemoteRootLogin(ctx context.Context, _ model.ResolvedRule, environm
 			Status:        model.StatusUnknown,
 			UnknownReason: model.UnknownUnsupportedConfiguration,
 			Summary:       "원격 root 로그인 경로를 지원하는 방식으로 확인할 수 없습니다.",
-			Expected:      "Rocky Linux 9.8의 systemd 기반 SSH 및 Telnet 활성 경로에서 root 직접 로그인이 차단되어야 합니다.",
+			Expected:      "systemd 기반 SSH 및 Telnet 활성 경로에서 root 직접 로그인이 차단되어야 합니다.",
 			Observed:      "init=" + environment.Platform.InitSystem,
 		}
 	}

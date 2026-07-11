@@ -187,7 +187,7 @@ func evaluateRootPath(ctx context.Context, _ model.ResolvedRule, environment eva
 			Status:        model.StatusUnknown,
 			UnknownReason: model.UnknownUnsupportedConfiguration,
 			Summary:       "root 계정의 셸 시작 규칙을 지원하지 않습니다.",
-			Expected:      "Rocky Linux 9.8에서 지원되는 bash 또는 sh 시작 파일 우선순위를 정적으로 해석할 수 있어야 합니다.",
+			Expected:      "지원되는 bash 또는 sh 시작 파일 우선순위를 정적으로 해석할 수 있어야 합니다.",
 			Observed:      "shell=" + root.Shell,
 			Evidence:      append([]model.Evidence{accountEvidence}, policyEvidence...),
 		}
