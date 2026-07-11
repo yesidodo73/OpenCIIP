@@ -93,7 +93,6 @@ func (r *Registry) Evaluate(ctx context.Context, rule model.ResolvedRule, enviro
 	if !rule.Applicable {
 		result.Status = model.StatusNotApplicable
 		result.Summary = "이 시스템에는 해당 점검 항목이 적용되지 않습니다."
-		applyVerificationBoundary(&result, rule.Verification)
 		return result
 	}
 	if rule.Verification.State == model.VerificationRejected {
