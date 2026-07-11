@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"image/color"
 	"io"
 	"strings"
+	"time"
 
 	"charm.land/bubbles/v2/list"
 	"charm.land/bubbles/v2/viewport"
@@ -21,6 +23,10 @@ import (
 
 type Scanner interface {
 	Scan(context.Context, engine.Options) (model.ScanRun, error)
+}
+
+type PlatformProvider interface {
+	PlatformInfo() model.PlatformInfo
 }
 
 type ScanWriter interface {
@@ -73,6 +79,14 @@ type scanCompleteMsg struct {
 	err        error
 }
 
+type scanProgressMsg struct {
+	progress engine.Progress
+	source   <-chan engine.Progress
+	open     bool
+}
+
+type scanTickMsg time.Time
+
 type remediationPlanMsg struct {
 	remediator Remediator
 	plan       workflow.PlanResult
@@ -102,7 +116,7 @@ type resultItem struct {
 }
 
 func (i resultItem) Title() string {
-	return fmt.Sprintf("%-18s %s  %s", i.result.Status, i.result.RuleID, i.result.Title)
+	return fmt.Sprintf("%s  %s  %s", statusBadge(i.result.Status), codeStyle.Render(i.result.RuleID), i.result.Title)
 }
 
 func (i resultItem) Description() string { return i.result.Summary }
@@ -138,6 +152,12 @@ type Model struct {
 	cancelReturn      screen
 	selectedChangeSet int
 	exitCode          int
+	platform          model.PlatformInfo
+	scanProgress      engine.Progress
+	scanProgressCh    <-chan engine.Progress
+	scanStarted       time.Time
+	scanTicks         int
+	now               func() time.Time
 }
 
 func NewModel(ctx context.Context, scanner Scanner, writer ScanWriter) *Model {
@@ -147,13 +167,24 @@ func NewModel(ctx context.Context, scanner Scanner, writer ScanWriter) *Model {
 func NewModelWithRemediation(ctx context.Context, scanner Scanner, writer ScanWriter, factory RemediatorFactory) *Model {
 	delegate := list.NewDefaultDelegate()
 	delegate.ShowDescription = true
+	delegate.SetSpacing(1)
+	delegate.Styles.NormalTitle = delegate.Styles.NormalTitle.Foreground(textColor)
+	delegate.Styles.NormalDesc = delegate.Styles.NormalDesc.Foreground(mutedColor)
+	delegate.Styles.SelectedTitle = delegate.Styles.SelectedTitle.BorderForeground(accentColor).Foreground(accentColor)
+	delegate.Styles.SelectedDesc = delegate.Styles.SelectedDesc.BorderForeground(accentColor).Foreground(textColor)
+	delegate.Styles.FilterMatch = delegate.Styles.FilterMatch.Foreground(warningColor)
 	resultList := list.New(nil, delegate, 80, 20)
 	resultList.Title = "점검 결과"
 	resultList.SetFilteringEnabled(true)
 	resultList.SetShowStatusBar(true)
+	resultList.SetShowHelp(false)
 	resultList.SetStatusBarItemName("항목", "항목")
 	detail := viewport.New()
 	detail.SoftWrap = true
+	platformInfo := model.PlatformInfo{}
+	if provider, ok := scanner.(PlatformProvider); ok {
+		platformInfo = provider.PlatformInfo()
+	}
 	return &Model{
 		ctx:               ctx,
 		scanner:           scanner,
@@ -164,6 +195,8 @@ func NewModelWithRemediation(ctx context.Context, scanner Scanner, writer ScanWr
 		viewport:          detail,
 		failurePolicy:     model.FailureRollbackItem,
 		exitCode:          exitcode.OK,
+		platform:          platformInfo,
+		now:               time.Now,
 	}
 }
 
@@ -176,8 +209,21 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = message.Height
 		m.resize()
 		return m, nil
+	case scanProgressMsg:
+		if message.source != m.scanProgressCh || !message.open || m.screen != screenScanning {
+			return m, nil
+		}
+		m.scanProgress = message.progress
+		return m, waitForScanProgress(message.source)
+	case scanTickMsg:
+		if m.screen != screenScanning {
+			return m, nil
+		}
+		m.scanTicks++
+		return m, scanTick()
 	case scanCompleteMsg:
 		m.cancelScan = nil
+		m.scanProgressCh = nil
 		if message.err != nil {
 			m.err = message.err
 			m.exitCode = exitcode.Error
@@ -463,12 +509,9 @@ func (m *Model) View() tea.View {
 	var content string
 	switch m.screen {
 	case screenReady:
-		content = titleStyle.Render("OpenCIIP") + "\n\n" +
-			"Linux 서버의 2026 Unix 서버 보안 항목을 점검합니다.\n" +
-			"점검은 기본적으로 시스템을 변경하지 않습니다.\n\n" +
-			helpStyle.Render("Enter 또는 s: 점검 시작   q: 종료")
+		content = m.readyView()
 	case screenScanning:
-		content = titleStyle.Render("OpenCIIP") + "\n\n시스템을 점검하고 있습니다. 완료될 때까지 기다려주세요.\n\n" + helpStyle.Render("q: 점검 취소 및 종료")
+		content = m.scanningView()
 	case screenResults:
 		header := "문제 항목"
 		if m.showAll {
@@ -480,12 +523,12 @@ func (m *Model) View() tea.View {
 			help += "   m: 조치 dry-run"
 		}
 		help += "   q: 종료"
-		content = m.list.View() + "\n" + helpStyle.Render(help)
+		content = resultSummary(m.run.Metadata.Counts) + "\n\n" + m.list.View() + "\n" + helpStyle.Render(help)
 		if m.reportPath != "" {
 			content += "\n" + helpStyle.Render("보고서: "+m.reportPath)
 		}
 	case screenDetail:
-		content = m.viewport.View() + "\n" + helpStyle.Render("Esc: 결과 목록   q: 종료")
+		content = sectionTitleStyle.Render("항목 상세") + "\n\n" + m.viewport.View() + "\n" + helpStyle.Render("Esc: 결과 목록   q: 종료")
 	case screenRemediationFailurePolicy:
 		content = titleStyle.Render("조치 실패 정책 선택") + "\n\n" +
 			"변경 세트 적용 또는 검증이 실패했을 때의 자동 롤백 범위를 선택해주세요.\n\n" +
@@ -533,12 +576,155 @@ func (m *Model) View() tea.View {
 	case screenRemediationError:
 		content = remediationErrorContent(m.journal, m.remediationErr) + "\n\n" + helpStyle.Render("Esc: 현재 저널 또는 점검 결과로 돌아가기   q: 종료")
 	case screenError:
-		content = errorStyle.Render("점검을 완료하지 못했습니다.") + "\n\n" + fmt.Sprint(m.err) + "\n\n" + helpStyle.Render("r: 다시 시도   q: 종료")
+		content = errorPanelStyle.Render(errorStyle.Render("점검을 완료하지 못했습니다.")+"\n\n"+fmt.Sprint(m.err)) + "\n\n" + helpStyle.Render("r: 다시 시도   q: 종료")
 	}
+	content = frameStyle.Render(content)
 	view := tea.NewView(content)
 	view.AltScreen = true
 	view.WindowTitle = "OpenCIIP"
 	return view
+}
+
+func (m *Model) readyView() string {
+	badges := lipgloss.JoinHorizontal(lipgloss.Left,
+		badgeStyle.Copy().Foreground(accentColor).BorderForeground(accentColor).Render("LINUX"),
+		"  ",
+		badgeStyle.Copy().Foreground(successColor).BorderForeground(successColor).Render("읽기 전용"),
+	)
+	platformName := strings.TrimSpace(m.platform.Name)
+	if platformName == "" {
+		platformName = "Linux 서버"
+	}
+
+	content := titleStyle.Render("OpenCIIP") + "\n" +
+		subtitleStyle.Render("주요정보통신기반시설 보안 점검") + "\n\n" +
+		badges + "\n\n" +
+		infoPanelStyle.Render(
+			labelStyle.Render("대상")+"  "+platformName+"\n"+
+				labelStyle.Render("범위")+"  U-01 ~ U-67\n"+
+				labelStyle.Render("방식")+"  시스템 설정을 변경하지 않는 읽기 전용 점검",
+		)
+
+	if m.platform.Privilege != "root" {
+		content += "\n\n" + warningPanelStyle.Render(
+			warningStyle.Render("권한 경고")+"\n"+
+				"root 권한이 아니므로 보호된 설정과 시스템 상태를 확인하지 못할 수 있습니다.\n"+
+				"전체 점검은 sudo openciip으로 실행하세요.",
+		)
+	}
+	return content + "\n\n" + helpStyle.Render("Enter 또는 s  점검 시작     q  종료")
+}
+
+func (m *Model) scanningView() string {
+	progress := m.scanProgress
+	spinner := spinnerFrames[m.scanTicks%len(spinnerFrames)]
+	if progress.Total <= 0 {
+		return titleStyle.Render("OpenCIIP") + "\n" +
+			subtitleStyle.Render("Linux 서버 보안 점검") + "\n\n" +
+			accentStyle.Render(spinner+" 점검 항목을 준비하고 있습니다") + "\n\n" +
+			helpStyle.Render("q  점검 취소 및 종료")
+	}
+
+	completed := progress.Completed
+	if completed < 0 {
+		completed = 0
+	}
+	if completed > progress.Total {
+		completed = progress.Total
+	}
+	percent := completed * 100 / progress.Total
+	barWidth := m.width - 24
+	if barWidth < 24 {
+		barWidth = 24
+	}
+	if barWidth > 64 {
+		barWidth = 64
+	}
+	filled := completed * barWidth / progress.Total
+	bar := progressDoneStyle.Render(strings.Repeat("━", filled)) + progressPendingStyle.Render(strings.Repeat("━", barWidth-filled))
+
+	elapsed := m.now().Sub(m.scanStarted)
+	if elapsed < 0 {
+		elapsed = 0
+	}
+	eta := "계산 중"
+	if completed > 0 && completed < progress.Total {
+		remaining := time.Duration(int64(elapsed) * int64(progress.Total-completed) / int64(completed))
+		eta = durationLabel(remaining)
+	} else if completed >= progress.Total {
+		eta = "보고서 저장 중"
+	}
+	current := strings.TrimSpace(progress.RuleID + "  " + progress.Title)
+	if current == "" {
+		current = "점검 항목 준비 중"
+	}
+
+	return titleStyle.Render("OpenCIIP") + "\n" +
+		subtitleStyle.Render("Linux 서버 보안 점검") + "\n\n" +
+		fmt.Sprintf("%s  %s\n\n", accentStyle.Render(spinner+" 점검 중"), counterStyle.Render(fmt.Sprintf("%d / %d", completed, progress.Total))) +
+		bar + "  " + percentStyle.Render(fmt.Sprintf("%3d%%", percent)) + "\n\n" +
+		labelStyle.Render("현재") + "  " + current + "\n" +
+		labelStyle.Render("경과") + "  " + durationLabel(elapsed) + "    " + labelStyle.Render("예상 남은 시간") + "  " + eta + "\n\n" +
+		helpStyle.Render("q  점검 취소 및 종료")
+}
+
+func durationLabel(value time.Duration) string {
+	if value < 0 {
+		value = 0
+	}
+	value = value.Round(time.Second)
+	hours := int(value / time.Hour)
+	minutes := int(value/time.Minute) % 60
+	seconds := int(value/time.Second) % 60
+	if hours > 0 {
+		return fmt.Sprintf("%d시간 %02d분 %02d초", hours, minutes, seconds)
+	}
+	if minutes > 0 {
+		return fmt.Sprintf("%d분 %02d초", minutes, seconds)
+	}
+	return fmt.Sprintf("%d초", seconds)
+}
+
+func resultSummary(counts map[model.Status]int) string {
+	values := []struct {
+		status model.Status
+		label  string
+	}{
+		{model.StatusPass, "PASS"},
+		{model.StatusFail, "FAIL"},
+		{model.StatusUnknown, "UNKNOWN"},
+		{model.StatusError, "ERROR"},
+		{model.StatusNotApplicable, "N/A"},
+	}
+	parts := make([]string, 0, len(values))
+	for _, value := range values {
+		parts = append(parts, summaryBadge(value.status, value.label, counts[value.status]))
+	}
+	return lipgloss.JoinHorizontal(lipgloss.Left, parts...)
+}
+
+func summaryBadge(status model.Status, label string, count int) string {
+	style := badgeStyle.Copy().Foreground(statusColor(status)).BorderForeground(statusColor(status))
+	return style.Render(fmt.Sprintf("%s %d", label, count)) + "  "
+}
+
+func statusBadge(status model.Status) string {
+	return statusStyle.Copy().Foreground(statusColor(status)).Render(string(status))
+}
+
+func statusColor(status model.Status) color.Color {
+	switch status {
+	case model.StatusPass:
+		return successColor
+	case model.StatusFail, model.StatusError:
+		return errorColor
+	case model.StatusUnknown:
+		return warningColor
+	case model.StatusNotApplicable, model.StatusSkipped:
+		return mutedColor
+	default:
+		return textColor
+	}
 }
 
 func (m *Model) startScan() tea.Cmd {
@@ -549,14 +735,55 @@ func (m *Model) startScan() tea.Cmd {
 	m.cancelScan = cancel
 	m.screen = screenScanning
 	m.err = nil
-	return func() tea.Msg {
-		run, err := m.scanner.Scan(scanContext, engine.Options{EvidenceMode: "problems"})
+	m.scanStarted = m.now()
+	m.scanProgress = engine.Progress{}
+	m.scanTicks = 0
+	progress := make(chan engine.Progress, 1)
+	m.scanProgressCh = progress
+	runScan := func() tea.Msg {
+		defer close(progress)
+		run, err := m.scanner.Scan(scanContext, engine.Options{
+			EvidenceMode: "problems",
+			Progress: func(update engine.Progress) {
+				publishScanProgress(progress, update)
+			},
+		})
 		if err != nil {
 			return scanCompleteMsg{err: err}
 		}
 		path, err := m.writer.WriteScan(scanContext, run)
 		return scanCompleteMsg{run: run, reportPath: path, err: err}
 	}
+	return tea.Batch(runScan, waitForScanProgress(progress), scanTick())
+}
+
+func publishScanProgress(channel chan engine.Progress, progress engine.Progress) {
+	select {
+	case channel <- progress:
+		return
+	default:
+	}
+	select {
+	case <-channel:
+	default:
+	}
+	select {
+	case channel <- progress:
+	default:
+	}
+}
+
+func waitForScanProgress(channel <-chan engine.Progress) tea.Cmd {
+	return func() tea.Msg {
+		progress, open := <-channel
+		return scanProgressMsg{progress: progress, source: channel, open: open}
+	}
+}
+
+func scanTick() tea.Cmd {
+	return tea.Tick(time.Second, func(value time.Time) tea.Msg {
+		return scanTickMsg(value)
+	})
 }
 
 func (m *Model) startRemediationPlan() (tea.Model, tea.Cmd) {
@@ -827,17 +1054,21 @@ func (m *Model) selectedChangeSetID() string {
 }
 
 func (m *Model) resize() {
-	width := m.width
+	width := m.width - 4
 	if width < 40 {
 		width = 40
 	}
-	height := m.height - 4
-	if height < 8 {
-		height = 8
+	listHeight := m.height - 12
+	if listHeight < 8 {
+		listHeight = 8
 	}
-	m.list.SetSize(width, height)
+	viewportHeight := m.height - 7
+	if viewportHeight < 8 {
+		viewportHeight = 8
+	}
+	m.list.SetSize(width, listHeight)
 	m.viewport.SetWidth(width)
-	m.viewport.SetHeight(height)
+	m.viewport.SetHeight(viewportHeight)
 }
 
 func (m *Model) updateItems() {
@@ -853,24 +1084,19 @@ func (m *Model) updateItems() {
 
 func detailContent(result model.CheckResult) string {
 	var builder strings.Builder
-	fmt.Fprintf(&builder, "%s %s\n\n", result.RuleID, result.Title)
-	fmt.Fprintf(&builder, "상태: %s\n중요도: %s\n분류: %s\n\n", result.Status, result.Severity, result.Category)
-	fmt.Fprintf(&builder, "플랫폼 검증 상태: %s\n", result.Verification.State)
-	if len(result.BindingSources) > 0 {
-		fmt.Fprintf(&builder, "규칙 계층: %s\n", strings.Join(result.BindingSources, " → "))
-	}
-	builder.WriteString("\n")
-	fmt.Fprintf(&builder, "판정 이유\n%s\n\n", result.Summary)
+	fmt.Fprintf(&builder, "%s  %s\n%s\n\n", statusBadge(result.Status), codeStyle.Render(result.RuleID), detailTitleStyle.Render(result.Title))
+	fmt.Fprintf(&builder, "%s  %s    %s  %s\n\n", labelStyle.Render("중요도"), result.Severity, labelStyle.Render("분류"), result.Category)
+	fmt.Fprintf(&builder, "%s\n%s\n\n", labelStyle.Render("판정 이유"), result.Summary)
 	if result.Expected != "" {
-		fmt.Fprintf(&builder, "기준\n%s\n\n", result.Expected)
+		fmt.Fprintf(&builder, "%s\n%s\n\n", labelStyle.Render("기준"), result.Expected)
 	}
 	if result.Observed != "" {
-		fmt.Fprintf(&builder, "확인 결과\n%s\n\n", result.Observed)
+		fmt.Fprintf(&builder, "%s\n%s\n\n", labelStyle.Render("확인 결과"), result.Observed)
 	}
 	if result.UnknownReason != "" {
-		fmt.Fprintf(&builder, "확정 불가 사유: %s\n\n", result.UnknownReason)
+		fmt.Fprintf(&builder, "%s  %s\n\n", labelStyle.Render("확정 불가 사유"), result.UnknownReason)
 	}
-	fmt.Fprintf(&builder, "가이드 근거\n%s, %v쪽\n", result.Reference.Section, result.Reference.Pages)
+	fmt.Fprintf(&builder, "%s\n%s, %v쪽\n", labelStyle.Render("가이드 근거"), result.Reference.Section, result.Reference.Pages)
 	return builder.String()
 }
 
@@ -1080,7 +1306,52 @@ func closeRemediator(remediator Remediator) error {
 }
 
 var (
-	titleStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#5FAFFF"))
-	helpStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#808080"))
-	errorStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FF5F5F"))
+	accentColor  = lipgloss.Color("#58A6FF")
+	textColor    = lipgloss.Color("#E6EDF3")
+	mutedColor   = lipgloss.Color("#7D8590")
+	surfaceColor = lipgloss.Color("#161B22")
+	borderColor  = lipgloss.Color("#30363D")
+	successColor = lipgloss.Color("#3FB950")
+	warningColor = lipgloss.Color("#D29922")
+	errorColor   = lipgloss.Color("#F85149")
+
+	frameStyle           = lipgloss.NewStyle().Padding(1, 2)
+	titleStyle           = lipgloss.NewStyle().Bold(true).Foreground(accentColor)
+	subtitleStyle        = lipgloss.NewStyle().Foreground(mutedColor)
+	sectionTitleStyle    = lipgloss.NewStyle().Bold(true).Foreground(textColor)
+	detailTitleStyle     = lipgloss.NewStyle().Bold(true).Foreground(textColor)
+	labelStyle           = lipgloss.NewStyle().Bold(true).Foreground(mutedColor)
+	codeStyle            = lipgloss.NewStyle().Bold(true).Foreground(accentColor)
+	helpStyle            = lipgloss.NewStyle().Foreground(mutedColor)
+	errorStyle           = lipgloss.NewStyle().Bold(true).Foreground(errorColor)
+	warningStyle         = lipgloss.NewStyle().Bold(true).Foreground(warningColor)
+	accentStyle          = lipgloss.NewStyle().Bold(true).Foreground(accentColor)
+	counterStyle         = lipgloss.NewStyle().Bold(true).Foreground(textColor)
+	percentStyle         = lipgloss.NewStyle().Bold(true).Foreground(accentColor)
+	progressDoneStyle    = lipgloss.NewStyle().Foreground(accentColor)
+	progressPendingStyle = lipgloss.NewStyle().Foreground(borderColor)
+
+	badgeStyle = lipgloss.NewStyle().
+			Bold(true).
+			Border(lipgloss.RoundedBorder()).
+			Padding(0, 1)
+	statusStyle    = lipgloss.NewStyle().Bold(true)
+	infoPanelStyle = lipgloss.NewStyle().
+			Foreground(textColor).
+			Background(surfaceColor).
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(borderColor).
+			Padding(1, 2)
+	warningPanelStyle = lipgloss.NewStyle().
+				Foreground(textColor).
+				Border(lipgloss.RoundedBorder()).
+				BorderForeground(warningColor).
+				Padding(1, 2)
+	errorPanelStyle = lipgloss.NewStyle().
+			Foreground(textColor).
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(errorColor).
+			Padding(1, 2)
+
+	spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 )
