@@ -13,6 +13,7 @@ import (
 
 	"github.com/yesidodo73/OpenCIIP/internal/checks/support"
 	"github.com/yesidodo73/OpenCIIP/internal/evaluator"
+	"github.com/yesidodo73/OpenCIIP/internal/model"
 	"github.com/yesidodo73/OpenCIIP/internal/system"
 )
 
@@ -26,6 +27,42 @@ const verifiedRockyProfileDLoop = `for i in /etc/profile.d/*.sh /etc/profile.d/s
     fi
 done
 `
+
+func TestStartupEvaluatorsClassifyMountInventoryLimitAsInsufficientEvidence(t *testing.T) {
+	t.Parallel()
+
+	reader := startupFixtureReader{files: fstest.MapFS{
+		"etc/shells": &fstest.MapFile{Data: []byte("/bin/bash\n"), Mode: 0o644},
+	}}
+	environment := evaluator.Environment{
+		Files: reader,
+		Commands: homeExistsFixtureRunner{
+			passwd:  "root:x:0:0::/root:/bin/bash",
+			findmnt: findmntFixtureWithMountCount(maximumHomeMountEntries + 1),
+		},
+		Platform: model.PlatformInfo{Family: "rhel"},
+	}
+	tests := []struct {
+		name     string
+		evaluate func(context.Context, model.ResolvedRule, evaluator.Environment) evaluator.Outcome
+	}{
+		{name: "U14 root PATH", evaluate: evaluateRootPath},
+		{name: "U30 umask", evaluate: evaluateUmask},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			outcome := test.evaluate(context.Background(), model.ResolvedRule{}, environment)
+			if outcome.Status != model.StatusUnknown ||
+				outcome.UnknownReason != model.UnknownInsufficientEvidence ||
+				outcome.ErrorCode != "" {
+				t.Fatalf("outcome = %#v, want UNKNOWN insufficient_evidence", outcome)
+			}
+			if !containsEvidenceSource(outcome.Evidence, "home-mount-inventory-limit") {
+				t.Fatalf("evidence = %#v, want mount inventory limit fact", outcome.Evidence)
+			}
+		})
+	}
+}
 
 func TestStartupContextsDoNotInjectUnreferencedProfileD(t *testing.T) {
 	t.Parallel()

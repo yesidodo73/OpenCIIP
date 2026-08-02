@@ -87,7 +87,7 @@ func hostsLPDMissingConclusion(initSystem string, activeSignals []string, eviden
 		return evaluator.Outcome{Status: model.StatusUnknown, UnknownReason: model.UnknownUnsupportedConfiguration, Summary: "활성 LPD 경로가 있으나 실제 접근 통제 파일을 확정할 수 없습니다.", Expected: "LPD가 비활성이거나 실제 hosts.lpd가 root 소유 0600 허용 비트 이내여야 합니다.", Observed: strings.Join(activeSignals, "; "), Evidence: evidence}
 	}
 	if initSystem != "systemd" {
-		return evaluator.Outcome{Status: model.StatusUnknown, UnknownReason: model.UnknownUnsupportedConfiguration, Summary: "hosts.lpd는 없지만 LPD 부팅 활성 경로를 지원하는 방식으로 확인할 수 없습니다.", Expected: "LPD가 비활성이거나 실제 접근 통제 파일의 권한이 안전해야 합니다.", Observed: initSystem, Evidence: evidence}
+		return evaluator.Outcome{Status: model.StatusUnknown, UnknownReason: model.UnknownUnsupportedConfiguration, Summary: "hosts.lpd가 없고 LPD 서비스의 부팅 활성 여부를 확인할 수 없습니다.", Expected: "LPD가 비활성이거나 실제 접근 통제 파일의 권한이 안전해야 합니다.", Observed: initSystem, Evidence: evidence}
 	}
 	return evaluator.Outcome{Status: model.StatusPass, Summary: "/etc/hosts.lpd가 없고 활성 LPD 서비스 경로도 확인되지 않았습니다.", Expected: "파일이 없거나 root 소유이고 권한이 0600 허용 비트 이내여야 합니다.", Observed: "파일 및 활성 LPD 경로 없음", Evidence: evidence}
 }

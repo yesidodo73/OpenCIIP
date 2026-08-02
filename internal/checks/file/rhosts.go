@@ -26,10 +26,11 @@ var (
 )
 
 type trustInspection struct {
-	Checked    int
-	Violations []pathFinding
-	Unknowns   []pathFinding
-	Evidence   []model.Evidence
+	Checked        int
+	ACLUnavailable bool
+	Violations     []pathFinding
+	Unknowns       []pathFinding
+	Evidence       []model.Evidence
 }
 
 func evaluateRHostsTrust(ctx context.Context, _ model.ResolvedRule, environment evaluator.Environment) evaluator.Outcome {
@@ -37,7 +38,7 @@ func evaluateRHostsTrust(ctx context.Context, _ model.ResolvedRule, environment 
 		return evaluator.Outcome{
 			Status:        model.StatusUnknown,
 			UnknownReason: model.UnknownUnsupportedConfiguration,
-			Summary:       "r 계열 서비스 상태를 지원하는 방식으로 확인할 수 없습니다.",
+			Summary:       "r 계열 서비스의 현재 상태와 부팅 시 활성 상태를 함께 확인할 수 없습니다.",
 			Expected:      "systemd 기반 Linux에서 r 계열 활성 경로를 확인할 수 있어야 합니다.",
 			Observed:      environment.Platform.InitSystem,
 		}
@@ -163,18 +164,36 @@ func evaluateRHostsTrust(ctx context.Context, _ model.ResolvedRule, environment 
 	}
 	mounts, mountEvidence, err := collectHomeMounts(ctx, environment)
 	if err != nil {
+		if isHomeMountInventoryLimit(err) {
+			evidence = append(
+				evidence,
+				accountEvidence,
+				mountEvidence,
+				homeMountInventoryLimitEvidence(err),
+			)
+			return evaluator.Outcome{
+				Status:        model.StatusUnknown,
+				UnknownReason: model.UnknownInsufficientEvidence,
+				Summary:       "마운트 목록이 안전한 점검 한도를 초과해 활성 r 서비스의 사용자 신뢰 파일을 확인할 수 없습니다.",
+				Expected:      expected,
+				Observed:      fmt.Sprintf("마운트 항목 상한 %d개 초과", maximumHomeMountEntries),
+				Evidence:      evidence,
+			}
+		}
 		return fileError("home_mounts_failed", "홈 디렉터리의 파일 시스템 유형을 확인하지 못했습니다.", err)
 	}
 	evidence = append(evidence, accountEvidence, mountEvidence)
 	violations := make([]pathFinding, 0)
 	unknowns := make([]pathFinding, 0)
 	checked := 0
+	aclUnavailable := false
 
 	inspection, err := inspectTrustPath(ctx, environment, "/etc/hosts.equiv", "system", []uint32{0})
 	if err != nil {
 		return fileError("hosts_equiv_inspection_failed", "hosts.equiv 파일을 안전하게 확인하지 못했습니다.", err)
 	}
 	checked += inspection.Checked
+	aclUnavailable = aclUnavailable || inspection.ACLUnavailable
 	violations = append(violations, inspection.Violations...)
 	unknowns = append(unknowns, inspection.Unknowns...)
 	evidence = append(evidence, inspection.Evidence...)
@@ -219,6 +238,7 @@ func evaluateRHostsTrust(ctx context.Context, _ model.ResolvedRule, environment 
 			return fileError("rhosts_inspection_failed", ".rhosts 파일을 안전하게 확인하지 못했습니다.", fmt.Errorf("%s: %w", candidate, err))
 		}
 		checked += inspection.Checked
+		aclUnavailable = aclUnavailable || inspection.ACLUnavailable
 		violations = append(violations, inspection.Violations...)
 		unknowns = append(unknowns, inspection.Unknowns...)
 		evidence = append(evidence, inspection.Evidence...)
@@ -235,10 +255,16 @@ func evaluateRHostsTrust(ctx context.Context, _ model.ResolvedRule, environment 
 		}
 	}
 	if len(unknowns) > 0 {
+		reason := model.UnknownAmbiguousResult
+		summary := "활성 r 계열 서비스가 있으나 공유·원격 홈 또는 심볼릭 링크 때문에 신뢰 파일을 완전히 확인할 수 없습니다."
+		if aclUnavailable {
+			reason = model.UnknownUnsupportedConfiguration
+			summary = "POSIX ACL을 확인할 수 있는 수집 방법이 없어 활성 r 계열 서비스 신뢰 파일 권한을 확정할 수 없습니다."
+		}
 		return evaluator.Outcome{
 			Status:        model.StatusUnknown,
-			UnknownReason: model.UnknownAmbiguousResult,
-			Summary:       "활성 r 계열 서비스가 있으나 공유·원격 홈 또는 심볼릭 링크 때문에 신뢰 파일을 완전히 확인할 수 없습니다.",
+			UnknownReason: reason,
+			Summary:       summary,
 			Expected:      expected,
 			Observed:      findingsObserved(nil, unknowns),
 			Evidence:      evidence,
@@ -316,11 +342,19 @@ func inspectTrustPath(ctx context.Context, environment evaluator.Environment, sy
 		reasons = append(reasons, "특수 권한 비트 설정")
 	}
 	aclViolations, aclEvidence, err := inspectNonOwnerACL(ctx, environment, metadata, os.FileMode(0o7))
-	if err != nil {
-		return trustInspection{}, err
+	if strings.TrimSpace(aclEvidence.Source) != "" {
+		result.Evidence = append(result.Evidence, aclEvidence)
 	}
-	result.Evidence = append(result.Evidence, aclEvidence)
-	reasons = append(reasons, aclViolations...)
+	if err != nil {
+		if support.IsACLToolUnavailable(err) {
+			result.ACLUnavailable = true
+			result.Unknowns = append(result.Unknowns, pathFinding{Account: account, Path: systemPath, Reason: support.ACLInspectionUnavailableReason})
+		} else {
+			return trustInspection{}, err
+		}
+	} else {
+		reasons = append(reasons, aclViolations...)
+	}
 
 	data, readMetadata, err := environment.Files.ReadFile(ctx, systemPath, 1<<20)
 	if err != nil {

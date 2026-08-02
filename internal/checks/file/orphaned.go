@@ -49,7 +49,7 @@ type findmntEntry struct {
 func evaluateOrphanedOwner(ctx context.Context, _ model.ResolvedRule, environment evaluator.Environment) evaluator.Outcome {
 	mountSpec := executor.Spec{
 		Name:      "findmnt",
-		Arguments: []string{"--json", "--list", "--real", "--output", "TARGET,FSTYPE,OPTIONS"},
+		Arguments: []string{"--json", "--list", "--output", "TARGET,FSTYPE,OPTIONS"},
 		Timeout:   20 * time.Second,
 		MaxOutput: 4 << 20,
 	}
@@ -57,15 +57,20 @@ func evaluateOrphanedOwner(ctx context.Context, _ model.ResolvedRule, environmen
 	if err != nil {
 		return fileError("findmnt_failed", "로컬 파일 시스템을 확인하지 못했습니다.", err)
 	}
+	mountEvidence := support.CommandEvidence(mountSpec, mountResult)
 	if mountResult.ExitCode != 0 || mountResult.Truncated {
-		return fileError("findmnt_failed", "로컬 파일 시스템을 확인하지 못했습니다.", fmt.Errorf("exit=%d truncated=%t", mountResult.ExitCode, mountResult.Truncated))
+		outcome := fileError("findmnt_failed", "로컬 파일 시스템을 확인하지 못했습니다.", fmt.Errorf("exit=%d truncated=%t", mountResult.ExitCode, mountResult.Truncated))
+		outcome.Evidence = []model.Evidence{mountEvidence}
+		return outcome
 	}
 	var output findmntOutput
 	if err := json.Unmarshal(mountResult.Stdout, &output); err != nil {
-		return fileError("findmnt_parse_failed", "로컬 파일 시스템 정보를 해석하지 못했습니다.", err)
+		outcome := fileError("findmnt_parse_failed", "로컬 파일 시스템 정보를 해석하지 못했습니다.", err)
+		outcome.Evidence = []model.Evidence{mountEvidence}
+		return outcome
 	}
 	mounts := persistentMounts(output.Filesystems)
-	evidence := []model.Evidence{support.CommandEvidence(mountSpec, mountResult)}
+	evidence := []model.Evidence{mountEvidence}
 	if len(mounts) == 0 {
 		return evaluator.Outcome{
 			Status:   model.StatusNotApplicable,

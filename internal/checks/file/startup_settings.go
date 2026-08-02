@@ -186,8 +186,8 @@ func evaluateRootPath(ctx context.Context, _ model.ResolvedRule, environment eva
 		return evaluator.Outcome{
 			Status:        model.StatusUnknown,
 			UnknownReason: model.UnknownUnsupportedConfiguration,
-			Summary:       "root 계정의 셸 시작 규칙을 지원하지 않습니다.",
-			Expected:      "지원되는 bash 또는 sh 시작 파일 우선순위를 정적으로 해석할 수 있어야 합니다.",
+			Summary:       "root 계정에 적용되는 셸 시작 파일과 우선순위를 확정할 수 없습니다.",
+			Expected:      "bash 또는 sh 시작 파일의 적용 순서를 정적으로 확인할 수 있어야 합니다.",
 			Observed:      "shell=" + root.Shell,
 			Evidence:      append([]model.Evidence{accountEvidence}, policyEvidence...),
 		}
@@ -204,6 +204,20 @@ func evaluateRootPath(ctx context.Context, _ model.ResolvedRule, environment eva
 	}
 	mounts, mountEvidence, err := collectHomeMounts(ctx, environment)
 	if err != nil {
+		if isHomeMountInventoryLimit(err) {
+			evidence := append(append([]model.Evidence{accountEvidence}, policyEvidence...),
+				mountEvidence,
+				homeMountInventoryLimitEvidence(err),
+			)
+			return evaluator.Outcome{
+				Status:        model.StatusUnknown,
+				UnknownReason: model.UnknownInsufficientEvidence,
+				Summary:       "마운트 목록이 안전한 점검 한도를 초과해 root 시작 파일의 위치를 확정할 수 없습니다.",
+				Expected:      "지원되는 모든 root 로그인·대화형 시작 경로의 최종 PATH를 로컬 파일에서 정적으로 확정할 수 있어야 합니다.",
+				Observed:      fmt.Sprintf("마운트 항목 상한 %d개 초과", maximumHomeMountEntries),
+				Evidence:      evidence,
+			}
+		}
 		return startupSettingsError("mount_inventory_failed", "root 홈이 위치한 파일 시스템을 확인하지 못했습니다.", err)
 	}
 	mountKind, _, found := mounts.classify(root.Home)
@@ -302,6 +316,20 @@ func evaluateUmask(ctx context.Context, _ model.ResolvedRule, environment evalua
 	}
 	mounts, mountEvidence, err := collectHomeMounts(ctx, environment)
 	if err != nil {
+		if isHomeMountInventoryLimit(err) {
+			evidence := append(append([]model.Evidence{accountEvidence}, policyEvidence...),
+				mountEvidence,
+				homeMountInventoryLimitEvidence(err),
+			)
+			return evaluator.Outcome{
+				Status:        model.StatusUnknown,
+				UnknownReason: model.UnknownInsufficientEvidence,
+				Summary:       "마운트 목록이 안전한 점검 한도를 초과해 모든 적용 계정의 시작 파일을 확인할 수 없습니다.",
+				Expected:      "모든 적용 계정의 로그인 및 대화형 셸 최종 UMASK에 0022 비트가 모두 포함되어야 합니다.",
+				Observed:      fmt.Sprintf("마운트 항목 상한 %d개 초과", maximumHomeMountEntries),
+				Evidence:      evidence,
+			}
+		}
 		return startupSettingsError("mount_inventory_failed", "계정 홈이 위치한 파일 시스템을 확인하지 못했습니다.", err)
 	}
 	inspector := newStartupInspector(ctx, environment)
@@ -1301,8 +1329,8 @@ func unsupportedStartupPlatform(platform model.PlatformInfo, subject string) eva
 	return evaluator.Outcome{
 		Status:        model.StatusUnknown,
 		UnknownReason: model.UnknownUnsupportedConfiguration,
-		Summary:       subject + " 정적 시작 파일 분석은 현재 RHEL 계열에만 구현되어 있습니다.",
-		Expected:      "운영체제 계열별 시작 파일 경로와 우선순위가 검증되어야 합니다.",
+		Summary:       subject + "에 적용되는 셸 시작 파일과 우선순위를 이 운영체제에서 확정할 수 없습니다.",
+		Expected:      "실제로 적용되는 모든 셸 시작 파일과 우선순위를 확인할 수 있어야 합니다.",
 		Observed:      fmt.Sprintf("id=%s version=%s family=%s", platform.ID, platform.VersionID, platform.Family),
 		Evidence: []model.Evidence{support.FactEvidence("startup-platform", map[string]any{
 			"id": platform.ID, "version_id": platform.VersionID, "family": platform.Family,

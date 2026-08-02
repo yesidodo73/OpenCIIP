@@ -133,12 +133,19 @@ func collectFilesystemSnapshot(ctx context.Context, environment evaluator.Enviro
 	eligible := make([]scanMount, 0)
 	excluded := make(map[string]int)
 	unsupported := 0
-	targetCounts := make(map[string]int)
+	targetClasses := make(map[string][]string)
+	for _, mount := range all {
+		classification := classifyScanFilesystem(mount.FSType)
+		targetClasses[mount.Target] = append(targetClasses[mount.Target], classification)
+	}
 	for index := range all {
 		mount := all[index]
-		targetCounts[mount.Target]++
-		switch classifyScanFilesystem(mount.FSType) {
+		classification := classifyScanFilesystem(mount.FSType)
+		switch classification {
 		case "persistent-posix":
+			if len(targetClasses[mount.Target]) > 1 {
+				continue
+			}
 			metadata, statErr := environment.Files.Stat(mount.Target)
 			if statErr != nil {
 				return filesystemSnapshot{}, privatePathError("stat_mount", mount.Target, statErr)
@@ -155,11 +162,7 @@ func collectFilesystemSnapshot(ctx context.Context, environment evaluator.Enviro
 			unsupported++
 		}
 	}
-	for _, count := range targetCounts {
-		if count > 1 {
-			unsupported += count
-		}
-	}
+	unsupported += ambiguousEligibleMountCount(targetClasses)
 
 	digest := mountSnapshotDigest(all)
 	evidence := support.FactEvidence("filesystem-mount-snapshot", map[string]any{
@@ -179,6 +182,17 @@ func collectFilesystemSnapshot(ctx context.Context, environment evaluator.Enviro
 		Digest:           digest,
 		Evidence:         evidence,
 	}, nil
+}
+
+func ambiguousEligibleMountCount(targetClasses map[string][]string) int {
+	ambiguous := 0
+	for _, classes := range targetClasses {
+		if len(classes) < 2 || !containsAny(classes, "persistent-posix") {
+			continue
+		}
+		ambiguous += len(classes)
+	}
+	return ambiguous
 }
 
 func canonicalMountOptions(value string) (string, bool, error) {
