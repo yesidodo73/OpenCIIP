@@ -6,13 +6,14 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
-	"unicode/utf8"
 
+	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
 	"github.com/yesidodo73/OpenCIIP/internal/engine"
 	"github.com/yesidodo73/OpenCIIP/internal/model"
+	"github.com/yesidodo73/OpenCIIP/internal/presentation"
 	"github.com/yesidodo73/OpenCIIP/internal/report"
 )
 
@@ -152,7 +153,10 @@ func (m *Model) updateOptions(key string) (tea.Model, tea.Cmd) {
 			m.openOptionPicker(m.optionIndex)
 		} else if editableOption(m.optionIndex) {
 			m.editingOption = true
-			m.editBuffer = m.rawOptionValue(m.optionIndex)
+			m.optionInput.SetValue(m.rawOptionValue(m.optionIndex))
+			m.optionInput.CursorEnd()
+			m.optionInput.SetWidth(m.optionContentWidth() - 6)
+			m.optionInput.Focus()
 			m.optionErr = nil
 		} else {
 			m.changeOption(1)
@@ -181,31 +185,26 @@ func (m *Model) updateOptions(key string) (tea.Model, tea.Cmd) {
 func (m *Model) updateOptionEditor(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch message.String() {
 	case "enter":
-		m.setRawOptionValue(m.optionIndex, strings.TrimSpace(m.editBuffer))
+		m.setRawOptionValue(m.optionIndex, strings.TrimSpace(m.optionInput.Value()))
 		m.editingOption = false
-		m.editBuffer = ""
+		m.optionInput.Blur()
+		m.optionInput.SetValue("")
 		_, m.optionErr = m.scanSettings.engineOptions()
 		return m, nil
 	case "esc":
 		m.editingOption = false
-		m.editBuffer = ""
-		return m, nil
-	case "backspace":
-		if len(m.editBuffer) > 0 {
-			_, size := utf8.DecodeLastRuneInString(m.editBuffer)
-			m.editBuffer = m.editBuffer[:len(m.editBuffer)-size]
-		}
+		m.optionInput.Blur()
+		m.optionInput.SetValue("")
 		return m, nil
 	case "ctrl+u":
-		m.editBuffer = ""
+		m.optionInput.SetValue("")
 		return m, nil
 	case "ctrl+c":
 		return m, tea.Quit
 	}
-	if text := message.Key().Text; text != "" {
-		m.editBuffer += strings.ReplaceAll(strings.ReplaceAll(text, "\r", ""), "\n", "")
-	}
-	return m, nil
+	updated, command := m.optionInput.Update(message)
+	m.optionInput = updated
+	return m, command
 }
 
 func (m *Model) changeOption(direction int) {
@@ -553,7 +552,7 @@ func (m *Model) optionPickerView() string {
 		if state.selected[choice.value] {
 			checkbox = successStyle.Render("[✓]")
 		}
-		row := marker + checkbox + "  " + style.Render(choice.label)
+		row := marker + checkbox + "  " + style.Render(presentation.Sanitize(choice.label))
 		if index == state.index {
 			row = selectedRowStyle.Copy().Width(contentWidth).Render(row)
 		}
@@ -612,17 +611,17 @@ func (m *Model) optionsView() string {
 		builder.WriteString("\n")
 		builder.WriteString(optionSectionDivider("경로 입력", contentWidth))
 		builder.WriteString("\n")
-		builder.WriteString(selectedRowStyle.Copy().Width(contentWidth).Render(accentStyle.Render("› ") + keyStyle.Render(m.editBuffer+"█")))
+		builder.WriteString(selectedRowStyle.Copy().Width(contentWidth).Render(accentStyle.Render("› ") + sanitizedTextInputView(m.optionInput)))
 		builder.WriteString("\n\n")
 		builder.WriteString(optionKeyLegend("Enter", "저장", "Esc", "취소", "Ctrl+U", "지우기"))
 	} else {
 		builder.WriteString("\n")
 		builder.WriteString(optionSectionDivider("설명", contentWidth))
 		builder.WriteString("\n")
-		builder.WriteString(helpStyle.Render(m.optionHint(m.optionIndex)))
+		builder.WriteString(helpStyle.Render(presentation.Sanitize(m.optionHint(m.optionIndex))))
 		if m.optionErr != nil {
 			builder.WriteString("\n")
-			builder.WriteString(errorStyle.Render("! " + m.optionErr.Error()))
+			builder.WriteString(errorStyle.Render("! " + presentation.Sanitize(m.optionErr.Error())))
 		}
 		builder.WriteString("\n\n")
 		builder.WriteString(optionKeyLegend("↑↓", "이동", "←→", "변경", "Enter", "상세", "S", "점검", "R", "기본값", "Esc", "뒤로"))
@@ -631,6 +630,7 @@ func (m *Model) optionsView() string {
 }
 
 func (m *Model) optionRow(index int, label string, contentWidth int) string {
+	label = presentation.Sanitize(label)
 	labelWidth := 14
 	if contentWidth < 58 {
 		labelWidth = 11
@@ -699,6 +699,7 @@ func (m *Model) remediationOptionAvailable() bool {
 }
 
 func optionSectionDivider(title string, width int) string {
+	title = presentation.Sanitize(title)
 	lineWidth := width - lipgloss.Width(title) - 2
 	if lineWidth < 1 {
 		lineWidth = 1
@@ -709,7 +710,11 @@ func optionSectionDivider(title string, width int) string {
 func optionKeyLegend(values ...string) string {
 	parts := make([]string, 0, len(values)/2)
 	for index := 0; index+1 < len(values); index += 2 {
-		parts = append(parts, keyCapStyle.Render(values[index])+" "+helpStyle.Render(values[index+1]))
+		parts = append(
+			parts,
+			keyCapStyle.Render(presentation.Sanitize(values[index]))+" "+
+				helpStyle.Render(presentation.Sanitize(values[index+1])),
+		)
 	}
 	return strings.Join(parts, "   ")
 }
@@ -766,7 +771,29 @@ func (m *Model) displayOptionValue(index int, maxValueWidth int) string {
 	}
 }
 
+func sanitizedTextInputView(input textinput.Model) string {
+	value := input.Value()
+	sanitized := presentation.Sanitize(value)
+	if sanitized == value {
+		return input.View()
+	}
+
+	characters := []rune(value)
+	position := input.Position()
+	if position < 0 {
+		position = 0
+	}
+	if position > len(characters) {
+		position = len(characters)
+	}
+	sanitizedPosition := len([]rune(presentation.Sanitize(string(characters[:position]))))
+	input.SetValue(sanitized)
+	input.SetCursor(sanitizedPosition)
+	return input.View()
+}
+
 func truncateStart(value string, maxWidth int) string {
+	value = presentation.Sanitize(value)
 	if maxWidth <= 0 {
 		return ""
 	}
@@ -810,9 +837,9 @@ func selectedOptionLabel(option int, raw string) string {
 		labels = append(labels, label)
 	}
 	if len(labels) > 3 {
-		return fmt.Sprintf("%s 외 %d개", strings.Join(labels[:2], ", "), len(labels)-2)
+		return presentation.Sanitize(fmt.Sprintf("%s 외 %d개", strings.Join(labels[:2], ", "), len(labels)-2))
 	}
-	return strings.Join(labels, ", ")
+	return presentation.Sanitize(strings.Join(labels, ", "))
 }
 
 func (m *Model) optionHint(index int) string {
@@ -839,7 +866,7 @@ func (m *Model) optionHint(index int) string {
 		if m.scanSettings.noRedact {
 			return "자동 조치에는 민감정보가 마스킹된 점검 보고서가 필요합니다."
 		}
-		return "점검 후 조치 가능한 FAIL 항목의 변경 계획을 확인할 수 있습니다. 실제 변경 전에는 별도 승인이 필요합니다."
+		return "점검 후 조치 가능한 취약 항목의 변경 계획을 확인할 수 있습니다. 실제 변경 전에는 별도 승인이 필요합니다."
 	default:
 		return ""
 	}

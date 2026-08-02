@@ -1,6 +1,7 @@
 package report
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,6 +13,56 @@ import (
 
 func TestValidateLoadedScanAcceptsCanonicalFixture(t *testing.T) {
 	if err := validateLoadedScan(validLoadedScanFixture()); err != nil {
+		t.Fatalf("validateLoadedScan() error = %v", err)
+	}
+}
+
+func TestValidateLoadedScanAcceptsCompleteUnixInventory(t *testing.T) {
+	run := validLoadedScanFixture()
+	run.Metadata.Selection = model.Selection{Profiles: []string{"all"}}
+	run.Results = make([]model.CheckResult, 0, 67)
+	for index := 1; index <= 67; index++ {
+		item := validLoadedScanFixture().Results[0]
+		item.RuleID = fmt.Sprintf("U-%02d", index)
+		item.Reference.Item = item.RuleID
+		run.Results = append(run.Results, item)
+	}
+	run.Metadata.Counts[model.StatusPass] = len(run.Results)
+
+	if err := validateLoadedScan(run); err != nil {
+		t.Fatalf("validateLoadedScan() error = %v", err)
+	}
+}
+
+func TestValidateLoadedScanAcceptsAllEvidenceWhenEveryResultHasEvidence(t *testing.T) {
+	run := validLoadedScanFixture()
+	run.Metadata.EvidenceMode = "all"
+	run.Results[0].Evidence = []model.Evidence{
+		{
+			Kind:       model.EvidenceFact,
+			Source:     "test fixture",
+			CapturedAt: run.Results[0].StartedAt,
+			Redacted:   true,
+			Fact:       map[string]any{"effective": true},
+		},
+	}
+
+	if err := validateLoadedScan(run); err != nil {
+		t.Fatalf("validateLoadedScan() error = %v", err)
+	}
+}
+
+func TestValidateLoadedScanAcceptsFilteredProfileSelection(t *testing.T) {
+	run := validLoadedScanFixture()
+	run.Metadata.Selection = model.Selection{
+		Profiles:   []string{"all"},
+		Categories: []model.Category{model.CategoryPatch},
+	}
+	run.Results[0].RuleID = "U-64"
+	run.Results[0].Category = model.CategoryPatch
+	run.Results[0].Reference.Item = "U-64"
+
+	if err := validateLoadedScan(run); err != nil {
 		t.Fatalf("validateLoadedScan() error = %v", err)
 	}
 }
@@ -64,6 +115,18 @@ func TestValidateLoadedScanRejectsTamperedOrIncompleteMetadata(t *testing.T) {
 			},
 		},
 		{
+			name: "missing executable digest",
+			mutate: func(run *model.ScanRun) {
+				run.Metadata.ToolExecutableSHA256 = ""
+			},
+		},
+		{
+			name: "non canonical executable digest",
+			mutate: func(run *model.ScanRun) {
+				run.Metadata.ToolExecutableSHA256 = strings.Repeat("A", 64)
+			},
+		},
+		{
 			name: "unknown evidence mode",
 			mutate: func(run *model.ScanRun) {
 				run.Metadata.EvidenceMode = "standard"
@@ -98,6 +161,62 @@ func TestValidateLoadedScanRejectsTamperedOrIncompleteMetadata(t *testing.T) {
 			mutate: func(run *model.ScanRun) {
 				run.Results = append(run.Results, run.Results[0])
 				run.Metadata.Counts[model.StatusPass] = 2
+			},
+		},
+		{
+			name: "result id below unix inventory",
+			mutate: func(run *model.ScanRun) {
+				run.Results[0].RuleID = "U-00"
+				run.Results[0].Reference.Item = "U-00"
+			},
+		},
+		{
+			name: "result id above unix inventory",
+			mutate: func(run *model.ScanRun) {
+				run.Results[0].RuleID = "U-68"
+				run.Results[0].Reference.Item = "U-68"
+			},
+		},
+		{
+			name: "selection id above unix inventory",
+			mutate: func(run *model.ScanRun) {
+				run.Metadata.Selection.RuleIDs = []string{"U-99"}
+			},
+		},
+		{
+			name: "selected result is missing",
+			mutate: func(run *model.ScanRun) {
+				run.Metadata.Selection.RuleIDs = []string{"U-01", "U-02"}
+			},
+		},
+		{
+			name: "result is outside selection",
+			mutate: func(run *model.ScanRun) {
+				run.Metadata.Selection.RuleIDs = []string{"U-02"}
+			},
+		},
+		{
+			name: "all evidence mode has result without evidence",
+			mutate: func(run *model.ScanRun) {
+				run.Metadata.EvidenceMode = "all"
+			},
+		},
+		{
+			name: "all profile has incomplete inventory",
+			mutate: func(run *model.ScanRun) {
+				run.Metadata.Selection = model.Selection{Profiles: []string{"all"}}
+			},
+		},
+		{
+			name: "unknown profile",
+			mutate: func(run *model.ScanRun) {
+				run.Metadata.Selection = model.Selection{Profiles: []string{"custom"}}
+			},
+		},
+		{
+			name: "empty selection",
+			mutate: func(run *model.ScanRun) {
+				run.Metadata.Selection = model.Selection{}
 			},
 		},
 	}
@@ -242,15 +361,16 @@ func validLoadedScanFixture() model.ScanRun {
 	resultCompletedAt := startedAt.Add(100 * time.Millisecond)
 	return model.ScanRun{
 		Metadata: model.RunMetadata{
-			SchemaVersion:  model.RunMetadataSchemaVersion,
-			RunID:          "scan-20260711",
-			ToolVersion:    "v0.1.0",
-			ToolCommit:     strings.Repeat("b", 40),
-			GuideYear:      2026,
-			RuleSetVersion: "sha256:" + strings.Repeat("a", 64),
-			StartedAt:      startedAt,
-			CompletedAt:    completedAt,
-			DurationMS:     completedAt.Sub(startedAt).Milliseconds(),
+			SchemaVersion:        model.RunMetadataSchemaVersion,
+			RunID:                "scan-20260711",
+			ToolVersion:          "v0.1.0",
+			ToolCommit:           strings.Repeat("b", 40),
+			ToolExecutableSHA256: strings.Repeat("d", 64),
+			GuideYear:            2026,
+			RuleSetVersion:       "sha256:" + strings.Repeat("a", 64),
+			StartedAt:            startedAt,
+			CompletedAt:          completedAt,
+			DurationMS:           completedAt.Sub(startedAt).Milliseconds(),
 			Platform: model.PlatformInfo{
 				Hostname:           "rocky-test",
 				OS:                 "linux",
@@ -267,6 +387,7 @@ func validLoadedScanFixture() model.ScanRun {
 				RemediationSupport: model.RemediationSupportVerified,
 			},
 			Counts:       map[model.Status]int{model.StatusPass: 1},
+			Selection:    model.Selection{RuleIDs: []string{"U-01"}},
 			EvidenceMode: "problems",
 			Redaction:    true,
 			Complete:     true,

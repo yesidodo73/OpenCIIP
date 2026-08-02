@@ -93,11 +93,25 @@ func TestResultSummaryUsesUserFacingPriority(t *testing.T) {
 		model.StatusUnknown: 2,
 		model.StatusError:   3,
 	})
-	failIndex := strings.Index(summary, "FAIL")
-	unknownIndex := strings.Index(summary, "UNKNOWN")
-	errorIndex := strings.Index(summary, "ERROR")
+	failIndex := strings.Index(summary, "취약")
+	unknownIndex := strings.Index(summary, "수동 확인 필요")
+	errorIndex := strings.Index(summary, "확인 실패")
 	if failIndex < 0 || !(failIndex < unknownIndex && unknownIndex < errorIndex) {
 		t.Fatalf("result summary order = %q", summary)
+	}
+}
+
+func TestTUIUsesUserFacingStatusLabels(t *testing.T) {
+	t.Parallel()
+	tests := map[model.Status]string{
+		model.StatusFail: "취약", model.StatusUnknown: "수동 확인 필요",
+		model.StatusError: "확인 실패", model.StatusPass: "양호",
+		model.StatusNotApplicable: "해당 없음", model.StatusSkipped: "점검하지 않음",
+	}
+	for status, want := range tests {
+		if got := statusLabel(status); got != want {
+			t.Errorf("statusLabel(%s) = %q, want %q", status, got, want)
+		}
 	}
 }
 

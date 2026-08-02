@@ -13,7 +13,10 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/charmbracelet/x/ansi"
+
 	"github.com/yesidodo73/OpenCIIP/internal/model"
+	"github.com/yesidodo73/OpenCIIP/internal/presentation"
 	"github.com/yesidodo73/OpenCIIP/internal/redact"
 )
 
@@ -344,8 +347,11 @@ func renderSummary(run model.ScanRun) string {
 	var builder strings.Builder
 	fmt.Fprintf(&builder, "OpenCIIP 점검 결과\n")
 	fmt.Fprintf(&builder, "실행 ID: %s\n", run.Metadata.RunID)
+	fmt.Fprintf(&builder, "도구 버전: %s\n", run.Metadata.ToolVersion)
+	fmt.Fprintf(&builder, "도구 커밋: %s\n", run.Metadata.ToolCommit)
+	fmt.Fprintf(&builder, "실행 바이너리 SHA-256: %s\n", run.Metadata.ToolExecutableSHA256)
 	fmt.Fprintf(&builder, "가이드 연도: %d\n", run.Metadata.GuideYear)
-	fmt.Fprintf(&builder, "대상: %s (%s %s, %s)\n", run.Metadata.Platform.Hostname, run.Metadata.Platform.Name, run.Metadata.Platform.VersionID, run.Metadata.Platform.Architecture)
+	fmt.Fprintf(&builder, "대상: %s (%s, %s)\n", run.Metadata.Platform.Hostname, platformDisplayName(run.Metadata.Platform), run.Metadata.Platform.Architecture)
 	fmt.Fprintf(&builder, "시작 시각: %s\n", run.Metadata.StartedAt.Format(time.RFC3339))
 	fmt.Fprintf(&builder, "완료 시각: %s\n", run.Metadata.CompletedAt.Format(time.RFC3339))
 	fmt.Fprintf(&builder, "완료 여부: %t\n", run.Metadata.Complete)
@@ -360,7 +366,7 @@ func renderSummary(run model.ScanRun) string {
 			fmt.Fprintf(&builder, "- %s\n", warning)
 		}
 	}
-	return builder.String()
+	return presentation.Sanitize(builder.String())
 }
 
 func renderProblems(run model.ScanRun) string {
@@ -371,36 +377,27 @@ func renderProblems(run model.ScanRun) string {
 			continue
 		}
 		problemCount++
-		fmt.Fprintf(&builder, "[%s] %s %s\n", result.Status, result.RuleID, result.Title)
+		fmt.Fprintf(&builder, "[%s] %s %s\n", statusDisplayLabel(result.Status), result.RuleID, result.Title)
 		fmt.Fprintf(&builder, "중요도: %s\n", result.Severity)
-		fmt.Fprintf(&builder, "플랫폼 검증 상태: %s\n", result.Verification.State)
-		fmt.Fprintf(&builder, "결과: %s\n", result.Summary)
-		if result.Observed != "" {
-			fmt.Fprintf(&builder, "확인값: %s\n", result.Observed)
-		}
-		if result.UnknownReason != "" {
-			fmt.Fprintf(&builder, "확정 불가 사유: %s\n", result.UnknownReason)
-		}
+		writeHumanField(&builder, "판정 이유", result.Summary, 0)
+		writeHumanAssessment(&builder, result)
 		if result.ErrorCode != "" {
-			fmt.Fprintf(&builder, "오류 코드: %s\n", result.ErrorCode)
+			writeHumanField(&builder, "오류 코드", result.ErrorCode, 0)
 		}
 		fmt.Fprintf(&builder, "가이드 근거: %s, %v쪽\n\n", result.Reference.Section, result.Reference.Pages)
 	}
 	if problemCount == 0 {
 		builder.WriteString("문제가 발견된 항목이 없습니다.\n")
 	}
-	return builder.String()
+	return presentation.Sanitize(builder.String())
 }
 
 func renderEvidence(result model.CheckResult) string {
 	var builder strings.Builder
 	fmt.Fprintf(&builder, "%s %s\n", result.RuleID, result.Title)
 	fmt.Fprintf(&builder, "상태: %s\n", statusDisplayLabel(result.Status))
-	fmt.Fprintf(&builder, "플랫폼 검증 상태: %s\n", result.Verification.State)
-	if len(result.BindingSources) > 0 {
-		fmt.Fprintf(&builder, "규칙 계층: %s\n", strings.Join(result.BindingSources, " → "))
-	}
-	fmt.Fprintf(&builder, "판정 이유: %s\n", result.Summary)
+	writeHumanField(&builder, "판정 이유", result.Summary, 0)
+	writeHumanAssessment(&builder, result)
 	fmt.Fprintf(&builder, "가이드 근거: %s, %v쪽\n", result.Reference.Section, result.Reference.Pages)
 	for index, evidence := range result.Evidence {
 		fmt.Fprintf(&builder, "\n[증적 %d]\n", index+1)
@@ -429,7 +426,91 @@ func renderEvidence(result model.CheckResult) string {
 			}
 		}
 	}
-	return builder.String()
+	return presentation.Sanitize(builder.String())
+}
+
+const humanReportWidth = 100
+
+func writeHumanAssessment(builder *strings.Builder, result model.CheckResult) {
+	if strings.TrimSpace(result.Expected) != "" {
+		writeHumanField(builder, "기준", result.Expected, 0)
+	}
+	if len(result.DisplayDetails) > 0 {
+		builder.WriteString("확인 결과:\n")
+		for _, detail := range result.DisplayDetails {
+			label := strings.TrimSpace(detail.Label)
+			if label == "" {
+				label = "판정 결과"
+			}
+			writeHumanLine(builder, "  - ", label)
+			if strings.TrimSpace(detail.Expected) != "" && strings.TrimSpace(detail.Expected) != strings.TrimSpace(result.Expected) {
+				writeHumanField(builder, "기준", detail.Expected, 4)
+			}
+			if strings.TrimSpace(detail.Current) != "" {
+				writeHumanField(builder, "현재", detail.Current, 4)
+			}
+			if strings.TrimSpace(detail.Source) != "" {
+				writeHumanField(builder, "위치", detail.Source, 4)
+			}
+		}
+		return
+	}
+	if strings.TrimSpace(result.Observed) != "" {
+		writeHumanField(builder, "확인 결과", result.Observed, 0)
+	}
+}
+
+func writeHumanField(builder *strings.Builder, label, value string, indent int) {
+	items := splitHumanItems(value)
+	if len(items) == 0 {
+		return
+	}
+	padding := strings.Repeat(" ", indent)
+	if len(items) == 1 {
+		writeHumanLine(builder, padding+label+": ", items[0])
+		return
+	}
+	builder.WriteString(padding + label + ":\n")
+	for _, item := range items {
+		writeHumanLine(builder, padding+"  - ", item)
+	}
+}
+
+func splitHumanItems(value string) []string {
+	value = presentation.Sanitize(value)
+	lines := strings.Split(strings.ReplaceAll(value, "\r\n", "\n"), "\n")
+	items := make([]string, 0, len(lines))
+	for _, line := range lines {
+		for _, item := range strings.Split(line, "; ") {
+			if item = strings.TrimSpace(item); item != "" {
+				items = append(items, item)
+			}
+		}
+	}
+	return items
+}
+
+func writeHumanLine(builder *strings.Builder, prefix, value string) {
+	prefix = presentation.Sanitize(prefix)
+	value = strings.TrimSpace(presentation.Sanitize(value))
+	if value == "" {
+		return
+	}
+	available := humanReportWidth - ansi.StringWidth(prefix)
+	if available < 20 {
+		available = 20
+	}
+	lines := strings.Split(ansi.Wrap(value, available, ""), "\n")
+	continuation := strings.Repeat(" ", ansi.StringWidth(prefix))
+	for index, line := range lines {
+		if index == 0 {
+			builder.WriteString(prefix)
+		} else {
+			builder.WriteString(continuation)
+		}
+		builder.WriteString(line)
+		builder.WriteByte('\n')
+	}
 }
 
 func orderedStatuses() []model.Status {

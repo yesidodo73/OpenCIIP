@@ -10,14 +10,18 @@ import (
 	"time"
 
 	"charm.land/bubbles/v2/list"
+	"charm.land/bubbles/v2/textinput"
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/yesidodo73/OpenCIIP/internal/buildinfo"
 	"github.com/yesidodo73/OpenCIIP/internal/engine"
 	"github.com/yesidodo73/OpenCIIP/internal/exitcode"
 	"github.com/yesidodo73/OpenCIIP/internal/model"
+	"github.com/yesidodo73/OpenCIIP/internal/presentation"
+	"github.com/yesidodo73/OpenCIIP/internal/redact"
 	"github.com/yesidodo73/OpenCIIP/internal/remediation/orchestrator"
 	"github.com/yesidodo73/OpenCIIP/internal/remediation/recipe"
 	"github.com/yesidodo73/OpenCIIP/internal/remediation/workflow"
@@ -131,13 +135,16 @@ type remediationAvailability struct {
 }
 
 func (i resultItem) Title() string {
-	return fmt.Sprintf("%s  %s  %s", statusBadge(i.result.Status), codeStyle.Render(i.result.RuleID), i.result.Title)
+	return fmt.Sprintf(
+		"%s  %s  %s",
+		statusLabel(i.result.Status),
+		presentation.Sanitize(i.result.RuleID),
+		presentation.Sanitize(i.result.Title),
+	)
 }
 
-func (i resultItem) Description() string { return i.result.Summary }
-func (i resultItem) FilterValue() string {
-	return i.result.RuleID + " " + i.result.Title + " " + string(i.result.Status)
-}
+func (i resultItem) Description() string { return presentation.Sanitize(i.result.Summary) }
+func (i resultItem) FilterValue() string { return i.Title() }
 
 type Model struct {
 	ctx                   context.Context
@@ -176,7 +183,7 @@ type Model struct {
 	scanSettings          scanSettings
 	optionIndex           int
 	editingOption         bool
-	editBuffer            string
+	optionInput           textinput.Model
 	optionErr             error
 	optionPicker          optionPickerState
 	readySelection        int
@@ -196,14 +203,7 @@ func NewModelWithWriterFactory(ctx context.Context, scanner Scanner, writerFacto
 }
 
 func newModel(ctx context.Context, scanner Scanner, writerFactory ScanWriterFactory, factory RemediatorFactory) *Model {
-	delegate := list.NewDefaultDelegate()
-	delegate.ShowDescription = true
-	delegate.SetSpacing(1)
-	delegate.Styles.NormalTitle = delegate.Styles.NormalTitle.Foreground(textColor)
-	delegate.Styles.NormalDesc = delegate.Styles.NormalDesc.Foreground(mutedColor)
-	delegate.Styles.SelectedTitle = delegate.Styles.SelectedTitle.BorderForeground(accentColor).Foreground(accentColor)
-	delegate.Styles.SelectedDesc = delegate.Styles.SelectedDesc.BorderForeground(accentColor).Foreground(textColor)
-	delegate.Styles.FilterMatch = delegate.Styles.FilterMatch.Foreground(warningColor)
+	delegate := newResultDelegate(true)
 	resultList := list.New(nil, delegate, 80, 20)
 	resultList.Title = "점검 결과"
 	resultList.SetFilteringEnabled(true)
@@ -212,6 +212,9 @@ func newModel(ctx context.Context, scanner Scanner, writerFactory ScanWriterFact
 	resultList.SetStatusBarItemName("항목", "항목")
 	detail := viewport.New()
 	detail.SoftWrap = true
+	pathInput := textinput.New()
+	pathInput.Prompt = ""
+	pathInput.CharLimit = 4096
 	platformInfo := model.PlatformInfo{}
 	if provider, ok := scanner.(PlatformProvider); ok {
 		platformInfo = provider.PlatformInfo()
@@ -224,6 +227,7 @@ func newModel(ctx context.Context, scanner Scanner, writerFactory ScanWriterFact
 		screen:                screenReady,
 		list:                  resultList,
 		viewport:              detail,
+		optionInput:           pathInput,
 		failurePolicy:         model.FailureRollbackItem,
 		exitCode:              exitcode.OK,
 		platform:              platformInfo,
@@ -233,9 +237,125 @@ func newModel(ctx context.Context, scanner Scanner, writerFactory ScanWriterFact
 	}
 }
 
+type resultDelegate struct {
+	list.DefaultDelegate
+}
+
+func newResultDelegate(showDescription bool) resultDelegate {
+	delegate := list.NewDefaultDelegate()
+	delegate.ShowDescription = showDescription
+	delegate.SetSpacing(0)
+	delegate.Styles.NormalTitle = delegate.Styles.NormalTitle.Foreground(textColor)
+	delegate.Styles.NormalDesc = delegate.Styles.NormalDesc.Foreground(mutedColor)
+	delegate.Styles.SelectedTitle = delegate.Styles.SelectedTitle.BorderForeground(accentColor).Foreground(accentColor)
+	delegate.Styles.SelectedDesc = delegate.Styles.SelectedDesc.BorderForeground(accentColor).Foreground(textColor)
+	delegate.Styles.FilterMatch = delegate.Styles.FilterMatch.Foreground(warningColor)
+	return resultDelegate{DefaultDelegate: delegate}
+}
+
+func (d resultDelegate) Render(writer io.Writer, view list.Model, index int, item list.Item) {
+	result, ok := item.(resultItem)
+	if !ok || view.Width() <= 0 {
+		return
+	}
+	styles := &d.Styles
+	isSelected := index == view.Index()
+	emptyFilter := view.FilterState() == list.Filtering && view.FilterValue() == ""
+	isFiltered := view.FilterState() == list.Filtering || view.FilterState() == list.FilterApplied
+
+	containerStyle := styles.NormalTitle
+	descriptionStyle := styles.NormalDesc
+	if emptyFilter {
+		containerStyle = styles.DimmedTitle
+		descriptionStyle = styles.DimmedDesc
+	} else if isSelected && view.FilterState() != list.Filtering {
+		containerStyle = styles.SelectedTitle
+		descriptionStyle = styles.SelectedDesc
+	}
+	textWidth := view.Width() - containerStyle.GetPaddingLeft() - containerStyle.GetPaddingRight()
+	if textWidth <= 0 {
+		return
+	}
+
+	title := ansi.Truncate(result.Title(), textWidth, "…")
+	matchedRunes := []int(nil)
+	if isFiltered {
+		matchedRunes = view.MatchesForItem(index)
+	}
+	baseStyle := containerStyle.Inline(true)
+	styledTitle := renderResultTitle(result, title, baseStyle, styles.FilterMatch, matchedRunes, emptyFilter)
+	titleContainer := containerStyle.UnsetForeground().UnsetBold()
+	title = titleContainer.Render(styledTitle)
+
+	description := ""
+	if d.ShowDescription {
+		lines := make([]string, 0, d.Height()-1)
+		for lineIndex, line := range strings.Split(result.Description(), "\n") {
+			if lineIndex >= d.Height()-1 {
+				break
+			}
+			lines = append(lines, ansi.Truncate(line, textWidth, "…"))
+		}
+		description = descriptionStyle.Render(strings.Join(lines, "\n"))
+	}
+	if d.ShowDescription {
+		_, _ = fmt.Fprintf(writer, "%s\n%s", title, description)
+		return
+	}
+	_, _ = fmt.Fprint(writer, title)
+}
+
+func renderResultTitle(item resultItem, title string, baseStyle, filterMatch lipgloss.Style, matchedRunes []int, dimmed bool) string {
+	runes := []rune(title)
+	if len(runes) == 0 {
+		return ""
+	}
+	matched := make(map[int]struct{}, len(matchedRunes))
+	for _, index := range matchedRunes {
+		matched[index] = struct{}{}
+	}
+	statusEnd := len([]rune(statusLabel(item.result.Status)))
+	ruleStart := statusEnd + 2
+	ruleEnd := ruleStart + len([]rune(presentation.Sanitize(item.result.RuleID)))
+
+	var builder strings.Builder
+	for index, value := range runes {
+		style := baseStyle
+		if !dimmed {
+			switch {
+			case index < statusEnd:
+				style = statusStyle.Copy().Foreground(statusColor(item.result.Status)).Inline(true)
+			case index >= ruleStart && index < ruleEnd:
+				style = codeStyle.Inline(true)
+			}
+		}
+		if _, exists := matched[index]; exists {
+			style = style.Inherit(filterMatch)
+		}
+		builder.WriteString(style.Render(string(value)))
+	}
+	return builder.String()
+}
+
 func (m *Model) Init() tea.Cmd { return nil }
 
+func sanitizeTUIInputMessage(message tea.Msg) tea.Msg {
+	switch value := message.(type) {
+	case tea.PasteMsg:
+		value.Content = presentation.Sanitize(value.Content)
+		return value
+	case tea.KeyPressMsg:
+		key := tea.Key(value)
+		if key.Text != "" {
+			key.Text = presentation.Sanitize(key.Text)
+			return tea.KeyPressMsg(key)
+		}
+	}
+	return message
+}
+
 func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
+	message = sanitizeTUIInputMessage(message)
 	switch message := message.(type) {
 	case tea.WindowSizeMsg:
 		m.width = message.Width
@@ -264,6 +384,9 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.run = message.run
+		if message.run.Metadata.Redaction {
+			m.run = redact.ScanRun(message.run)
+		}
 		m.reportPath = message.reportPath
 		m.showAll = m.scanSettings.showAll
 		m.exitCode = message.run.Metadata.ExitCode
@@ -361,6 +484,11 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, tea.Quit
 		}
+		if m.screen == screenResults && m.list.SettingFilter() {
+			updated, command := m.list.Update(message)
+			m.list = updated
+			return m, command
+		}
 		if key == "q" {
 			if m.cancelScan != nil {
 				m.cancelScan()
@@ -429,7 +557,7 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			case "enter":
 				selected, ok := m.list.SelectedItem().(resultItem)
 				if ok {
-					m.viewport.SetContent(detailContent(selected.result))
+					m.viewport.SetContent(detailContent(selected.result, m.viewport.Width()))
 					m.viewport.GotoTop()
 					m.screen = screenDetail
 				}
@@ -665,9 +793,9 @@ func (m *Model) View() tea.View {
 	case screenRemediationRollingBack:
 		content = titleStyle.Render("롤백 실행") + "\n\n백업과 현재 상태를 재검증한 뒤 승인된 역순으로 복원하고 있습니다.\n독립적인 분기는 다른 분기의 실패와 관계없이 계속 시도합니다.\n\n" + helpStyle.Render("q 또는 Ctrl+C: 안전한 중단 요청 후 저널 기록 완료 대기")
 	case screenRemediationError:
-		content = remediationErrorContent(m.journal, m.remediationErr) + "\n\n" + helpStyle.Render("Esc: 현재 저널 또는 점검 결과로 돌아가기   q: 종료")
+		content = remediationErrorContent(m.journal, m.remediationErr, !m.scanSettings.noRedact) + "\n\n" + helpStyle.Render("Esc: 현재 저널 또는 점검 결과로 돌아가기   q: 종료")
 	case screenError:
-		content = errorPanelStyle.Render(errorStyle.Render("점검을 완료하지 못했습니다.")+"\n\n"+fmt.Sprint(m.err)) + "\n\n" + helpStyle.Render("r: 다시 시도   Esc: 실행 옵션   q: 종료")
+		content = errorPanelStyle.Render(errorStyle.Render("점검을 완료하지 못했습니다.")+"\n\n"+protectedDisplayText(fmt.Sprint(m.err), !m.scanSettings.noRedact)) + "\n\n" + helpStyle.Render("r: 다시 시도   Esc: 실행 옵션   q: 종료")
 	}
 	content = frameStyle.Render(content)
 	view := tea.NewView(content)
@@ -746,6 +874,7 @@ func readyFooter() string {
 	if info.Modified && !strings.Contains(version, "dirty") {
 		version += "+dirty"
 	}
+	version = presentation.Sanitize(version)
 	return helpStyle.Render("OpenCIIP " + version + "\n© 2026 yesidodo73  ·  Apache License 2.0")
 }
 
@@ -782,7 +911,7 @@ func (m *Model) scanningView() string {
 	if elapsed < 0 {
 		elapsed = 0
 	}
-	current := strings.TrimSpace(progress.RuleID + "  " + progress.Title)
+	current := strings.TrimSpace(presentation.Sanitize(progress.RuleID) + "  " + presentation.Sanitize(progress.Title))
 	if current == "" {
 		current = "점검 항목 준비 중"
 	}
@@ -825,7 +954,7 @@ func (m *Model) centerScanningContent(content string, contentWidth int) string {
 }
 
 func screenHeader(section string) string {
-	return titleStyle.Render(">_ OpenCIIP") + "  " + subtitleStyle.Render(section)
+	return titleStyle.Render(">_ OpenCIIP") + "  " + subtitleStyle.Render(presentation.Sanitize(section))
 }
 
 func statusSeparator() string {
@@ -850,30 +979,42 @@ func durationLabel(value time.Duration) string {
 }
 
 func resultSummary(counts map[model.Status]int) string {
-	values := []struct {
-		status model.Status
-		label  string
-	}{
-		{model.StatusFail, "FAIL"},
-		{model.StatusUnknown, "UNKNOWN"},
-		{model.StatusError, "ERROR"},
-		{model.StatusPass, "PASS"},
-		{model.StatusNotApplicable, "해당 없음"},
-		{model.StatusSkipped, "SKIPPED"},
+	values := []model.Status{
+		model.StatusFail,
+		model.StatusUnknown,
+		model.StatusError,
+		model.StatusPass,
+		model.StatusNotApplicable,
+		model.StatusSkipped,
 	}
 	parts := make([]string, 0, len(values))
-	for _, value := range values {
-		parts = append(parts, statusStyle.Copy().Foreground(statusColor(value.status)).Render(fmt.Sprintf("%s %d", value.label, counts[value.status])))
+	for _, status := range values {
+		parts = append(parts, statusStyle.Copy().Foreground(statusColor(status)).Render(fmt.Sprintf("%s %d", statusLabel(status), counts[status])))
 	}
 	return statusRuleStyle.Render("─ ") + strings.Join(parts, statusSeparator())
 }
 
 func statusBadge(status model.Status) string {
-	label := string(status)
-	if status == model.StatusNotApplicable {
-		label = "해당 없음"
+	return statusStyle.Copy().Foreground(statusColor(status)).Render(statusLabel(status))
+}
+
+func statusLabel(status model.Status) string {
+	switch status {
+	case model.StatusFail:
+		return "취약"
+	case model.StatusUnknown:
+		return "수동 확인 필요"
+	case model.StatusError:
+		return "확인 실패"
+	case model.StatusPass:
+		return "양호"
+	case model.StatusNotApplicable:
+		return "해당 없음"
+	case model.StatusSkipped:
+		return "점검하지 않음"
+	default:
+		return presentation.Sanitize(string(status))
 	}
-	return statusStyle.Copy().Foreground(statusColor(status)).Render(label)
 }
 
 func statusColor(status model.Status) color.Color {
@@ -1178,12 +1319,12 @@ func (m *Model) remediationAvailability() remediationAvailability {
 		return remediationAvailability{label: "사용 불가", reason: "내장 자동 조치 정의를 확인할 수 없습니다."}
 	}
 	if verified {
-		return remediationAvailability{enabled: true, label: "사용 가능", reason: "검증된 FAIL 항목의 변경 계획을 먼저 확인합니다."}
+		return remediationAvailability{enabled: true, label: "사용 가능", reason: "검증된 취약 항목의 변경 계획을 먼저 확인합니다."}
 	}
 	if pending {
 		return remediationAvailability{label: "지원되지 않음", reason: "현재 OS와 버전에서 자동 조치가 지원되지 않습니다."}
 	}
-	return remediationAvailability{label: "대상 없음", reason: "자동 조치 대상으로 확정된 FAIL 항목이 없습니다."}
+	return remediationAvailability{label: "대상 없음", reason: "자동 조치 대상으로 확정된 취약 항목이 없습니다."}
 }
 
 func builtInRemediationCandidates(run model.ScanRun, platform model.PlatformInfo) (bool, bool, error) {
@@ -1211,14 +1352,16 @@ func builtInRemediationCandidates(run model.ScanRun, platform model.PlatformInfo
 }
 
 func remediationAvailabilityView(availability remediationAvailability) string {
-	status := disabledStyle.Render(availability.label)
+	label := presentation.Sanitize(availability.label)
+	reason := presentation.Sanitize(availability.reason)
+	status := disabledStyle.Render(label)
 	marker := disabledStyle.Render("○")
 	if availability.enabled {
-		status = successStyle.Render(availability.label)
+		status = successStyle.Render(label)
 		marker = successStyle.Render("●")
 	}
 	return marker + "  " + labelStyle.Render("자동 조치") + "  " + status + "\n" +
-		"   " + helpStyle.Render(availability.reason)
+		"   " + helpStyle.Render(reason)
 }
 
 func (m *Model) hasUnusedRemediationPlan() bool {
@@ -1317,8 +1460,12 @@ func (m *Model) resize() {
 		viewportHeight = 8
 	}
 	m.list.SetSize(width, listHeight)
+	compactResults := m.height < 28
+	m.list.SetDelegate(newResultDelegate(!compactResults))
+	m.list.SetShowStatusBar(!compactResults)
 	m.viewport.SetWidth(width)
 	m.viewport.SetHeight(viewportHeight)
+	m.optionInput.SetWidth(m.optionContentWidth() - 6)
 }
 
 func (m *Model) updateItems() {
@@ -1332,22 +1479,129 @@ func (m *Model) updateItems() {
 	m.list.SetItems(items)
 }
 
-func detailContent(result model.CheckResult) string {
+func detailContent(result model.CheckResult, width int) string {
+	if width < 40 {
+		width = 40
+	}
 	var builder strings.Builder
-	fmt.Fprintf(&builder, "%s  %s\n%s\n\n", statusBadge(result.Status), codeStyle.Render(result.RuleID), detailTitleStyle.Render(result.Title))
-	fmt.Fprintf(&builder, "%s  %s    %s  %s\n\n", labelStyle.Render("중요도"), result.Severity, labelStyle.Render("분류"), result.Category)
-	fmt.Fprintf(&builder, "%s\n%s\n\n", labelStyle.Render("판정 이유"), result.Summary)
+	fmt.Fprintf(
+		&builder,
+		"%s  %s\n%s\n\n",
+		statusBadge(result.Status),
+		codeStyle.Render(presentation.Sanitize(result.RuleID)),
+		detailTitleStyle.Render(presentation.Sanitize(result.Title)),
+	)
+	fmt.Fprintf(
+		&builder,
+		"%s  %s    %s  %s\n\n",
+		labelStyle.Render("중요도"),
+		presentation.Sanitize(string(result.Severity)),
+		labelStyle.Render("분류"),
+		presentation.Sanitize(string(result.Category)),
+	)
+	fmt.Fprintf(&builder, "%s\n%s\n\n", labelStyle.Render("판정 이유"), wrapDetailText(result.Summary, width))
 	if result.Expected != "" {
-		fmt.Fprintf(&builder, "%s\n%s\n\n", labelStyle.Render("기준"), result.Expected)
+		fmt.Fprintf(&builder, "%s\n%s\n\n", labelStyle.Render("기준"), wrapDetailText(result.Expected, width))
 	}
 	if result.Observed != "" {
-		fmt.Fprintf(&builder, "%s\n%s\n\n", labelStyle.Render("확인 결과"), result.Observed)
+		fmt.Fprintf(&builder, "%s\n", labelStyle.Render("확인 결과"))
+		if len(result.DisplayDetails) > 0 {
+			builder.WriteString(resultDetailText(result.DisplayDetails, width, result.Status))
+		} else {
+			builder.WriteString(observedDetailText(result.Observed, width))
+		}
+		builder.WriteString("\n\n")
 	}
 	if result.UnknownReason != "" {
-		fmt.Fprintf(&builder, "%s  %s\n\n", labelStyle.Render("확정 불가 사유"), result.UnknownReason)
+		fmt.Fprintf(&builder, "%s  %s\n\n", labelStyle.Render("확정 불가 사유"), presentation.Sanitize(string(result.UnknownReason)))
 	}
-	fmt.Fprintf(&builder, "%s\n%s, %v쪽\n", labelStyle.Render("가이드 근거"), result.Reference.Section, result.Reference.Pages)
+	fmt.Fprintf(&builder, "%s\n%s, %v쪽\n", labelStyle.Render("가이드 근거"), presentation.Sanitize(result.Reference.Section), result.Reference.Pages)
 	return builder.String()
+}
+
+func resultDetailText(details []model.ResultDetail, width int, status model.Status) string {
+	sections := make([]string, 0, len(details))
+	for _, detail := range details {
+		var section strings.Builder
+		section.WriteString(keyStyle.Render(presentation.Sanitize(detail.Label)))
+		section.WriteByte('\n')
+		if detail.Expected != "" {
+			section.WriteByte('\n')
+			section.WriteString(detailValueLine("기준", detail.Expected, width, detailLineStyle(status, true)))
+		}
+		if detail.Current != "" {
+			section.WriteByte('\n')
+			section.WriteString(detailValueLine("현재", detail.Current, width, detailLineStyle(status, false)))
+		}
+		if detail.Source != "" {
+			section.WriteByte('\n')
+			section.WriteString(detailValueLine("위치", detail.Source, width, nil))
+		}
+		sections = append(sections, section.String())
+	}
+	return strings.Join(sections, "\n\n")
+}
+
+func detailLineStyle(status model.Status, expected bool) *lipgloss.Style {
+	if status != model.StatusFail {
+		return nil
+	}
+	style := errorStyle
+	if expected {
+		style = successStyle
+	}
+	return &style
+}
+
+func detailValueLine(label, value string, width int, emphasis *lipgloss.Style) string {
+	const labelWidth = 6
+	wrapped := semanticDetailText(value, width-labelWidth)
+	wrapped = strings.ReplaceAll(wrapped, "\n", "\n"+strings.Repeat(" ", labelWidth))
+	label = presentation.Sanitize(label)
+	labelText := labelStyle.Render(label)
+	if emphasis != nil {
+		labelText = emphasis.Copy().Bold(true).Render(label)
+		wrapped = emphasis.Render(wrapped)
+	}
+	return labelText + strings.Repeat(" ", labelWidth-lipgloss.Width(labelText)) + wrapped
+}
+
+func observedDetailText(value string, width int) string {
+	return semanticDetailText(value, width)
+}
+
+func semanticDetailText(value string, width int) string {
+	items := splitDetailItems(value)
+	if len(items) <= 1 {
+		return wrapDetailText(value, width)
+	}
+	lines := make([]string, 0, len(items))
+	for _, item := range items {
+		wrapped := wrapDetailText(item, width-2)
+		wrapped = strings.ReplaceAll(wrapped, "\n", "\n  ")
+		lines = append(lines, "- "+wrapped)
+	}
+	return strings.Join(lines, "\n")
+}
+
+func splitDetailItems(value string) []string {
+	lines := strings.Split(presentation.Sanitize(value), "\n")
+	items := make([]string, 0, len(lines))
+	for _, line := range lines {
+		for _, item := range strings.Split(line, "; ") {
+			if item = strings.TrimSpace(item); item != "" {
+				items = append(items, item)
+			}
+		}
+	}
+	return items
+}
+
+func wrapDetailText(value string, width int) string {
+	if width < 20 {
+		width = 20
+	}
+	return ansi.Wrap(strings.TrimSpace(presentation.Sanitize(value)), width, "")
 }
 
 func remediationPlanContent(planned workflow.PlanResult, approved bool) string {
@@ -1382,25 +1636,33 @@ func remediationPlanContent(planned workflow.PlanResult, approved bool) string {
 	} else {
 		builder.WriteString("\n승인 정보만 저널에 기록했으며 시스템 파일은 아직 변경하지 않았습니다.\n")
 	}
-	return builder.String()
+	return presentation.Sanitize(builder.String())
 }
 
 func remediationApprovalConfirmation(planned workflow.PlanResult) string {
 	if planned.Journal == nil {
 		return errorStyle.Render("승인할 계획이 없습니다.")
 	}
-	return titleStyle.Render("조치 계획 승인 확인") + "\n\n" +
-		fmt.Sprintf("변경 세트: %d개\n실패 정책: %s\nplan digest:\n%s\n\n이 승인은 digest에 고정된 dry-run과 예상 영향을 승인 저널에 기록합니다.\n아직 실제 변경은 수행하지 않습니다.",
-			len(planned.Journal.ChangeSets), planned.Journal.FailurePolicy, planned.Journal.PlanDigest)
+	details := fmt.Sprintf(
+		"변경 세트: %d개\n실패 정책: %s\nplan digest:\n%s\n\n이 승인은 digest에 고정된 dry-run과 예상 영향을 승인 저널에 기록합니다.\n아직 실제 변경은 수행하지 않습니다.",
+		len(planned.Journal.ChangeSets),
+		planned.Journal.FailurePolicy,
+		planned.Journal.PlanDigest,
+	)
+	return titleStyle.Render("조치 계획 승인 확인") + "\n\n" + presentation.Sanitize(details)
 }
 
 func remediationApplyConfirmation(planned workflow.PlanResult) string {
 	if planned.Journal == nil {
 		return errorStyle.Render("적용할 승인 계획이 없습니다.")
 	}
-	return titleStyle.Render("실제 조치 적용 확인") + "\n\n" +
-		fmt.Sprintf("실행 ID: %s\n변경 세트: %d개\n실패 정책: %s\n\n변경 직전에 현재 상태를 다시 확인하고 내구성 백업과 WAL intent를 기록합니다.\n각 변경 후 검증하며 실패 시 지정된 범위로 롤백합니다.",
-			planned.Journal.RunID, len(planned.Journal.ChangeSets), planned.Journal.FailurePolicy)
+	details := fmt.Sprintf(
+		"실행 ID: %s\n변경 세트: %d개\n실패 정책: %s\n\n변경 직전에 현재 상태를 다시 확인하고 내구성 백업과 WAL intent를 기록합니다.\n각 변경 후 검증하며 실패 시 지정된 범위로 롤백합니다.",
+		planned.Journal.RunID,
+		len(planned.Journal.ChangeSets),
+		planned.Journal.FailurePolicy,
+	)
+	return titleStyle.Render("실제 조치 적용 확인") + "\n\n" + presentation.Sanitize(details)
 }
 
 func remediationStatusContent(value *model.RemediationJournal, attempt model.RollbackAttempt, selected int) string {
@@ -1428,30 +1690,41 @@ func remediationStatusContent(value *model.RemediationJournal, attempt model.Rol
 	if attempt.ID != "" {
 		fmt.Fprintf(&builder, "\n최근 롤백 시도: %s\n범위: %s\n결과: %s\n확장 범위: %s\n", attempt.ID, attempt.Scope, attempt.Outcome, strings.Join(attempt.ExpandedChangeSets, ", "))
 	}
-	return builder.String()
+	return presentation.Sanitize(builder.String())
 }
 
-func remediationErrorContent(value *model.RemediationJournal, remediationErr error) string {
-	content := errorStyle.Render("조치 또는 롤백을 완료하지 못했습니다.") + "\n\n" + fmt.Sprint(remediationErr)
+func remediationErrorContent(value *model.RemediationJournal, remediationErr error, redactSensitive bool) string {
+	content := errorStyle.Render("조치 또는 롤백을 완료하지 못했습니다.") + "\n\n" + protectedDisplayText(fmt.Sprint(remediationErr), redactSensitive)
 	if value == nil {
 		return content
 	}
-	content += fmt.Sprintf("\n\n실행 ID: %s\n현재 상태: %s", value.RunID, value.State)
+	content += protectedDisplayText(fmt.Sprintf("\n\n실행 ID: %s\n현재 상태: %s", value.RunID, value.State), redactSensitive)
 	if value.State == model.RunPlanned || value.State == model.RunApproved || value.State == model.RunCancelFailed {
-		content += fmt.Sprintf("\n\n상태 확인: openciip remediate status %s\n계획 폐기 재시도: openciip remediate cancel %s --yes", value.RunID, value.RunID)
+		content += protectedDisplayText(fmt.Sprintf("\n\n상태 확인: openciip remediate status %s\n계획 폐기 재시도: openciip remediate cancel %s --yes", value.RunID, value.RunID), redactSensitive)
 	} else if value.State.NeedsOperatorAction() || value.State == model.RunApplying || value.State == model.RunVerifying || value.State == model.RunRollingBack || value.State == model.RunCanceling {
-		content += fmt.Sprintf("\n\n상태 확인: openciip remediate status %s\n복구 판정: openciip remediate recover %s --yes", value.RunID, value.RunID)
+		content += protectedDisplayText(fmt.Sprintf("\n\n상태 확인: openciip remediate status %s\n복구 판정: openciip remediate recover %s --yes", value.RunID, value.RunID), redactSensitive)
 	}
 	return content
+}
+
+func protectedDisplayText(value string, redactSensitive bool) string {
+	if redactSensitive {
+		value = redact.Text(value)
+	}
+	return presentation.Sanitize(value)
 }
 
 func remediationCancelConfirmation(value *model.RemediationJournal) string {
 	if value == nil {
 		return errorStyle.Render("폐기할 조치 계획이 없습니다.")
 	}
-	return titleStyle.Render("적용 전 조치 계획 폐기 확인") + "\n\n" +
-		fmt.Sprintf("실행 ID: %s\n현재 상태: %s\nplan digest: %s\n\n시스템 파일을 적용한 적이 없는 planned/approved 계획만 폐기합니다.\n저널은 canceled 증적으로 보존하고 미사용 desired payload만 내구성 있게 삭제합니다.",
-			value.RunID, value.State, value.PlanDigest)
+	details := fmt.Sprintf(
+		"실행 ID: %s\n현재 상태: %s\nplan digest: %s\n\n시스템 파일을 적용한 적이 없는 planned/approved 계획만 폐기합니다.\n저널은 canceled 증적으로 보존하고 미사용 desired payload만 내구성 있게 삭제합니다.",
+		value.RunID,
+		value.State,
+		value.PlanDigest,
+	)
+	return titleStyle.Render("적용 전 조치 계획 폐기 확인") + "\n\n" + presentation.Sanitize(details)
 }
 
 func remediationRollbackPreviewContent(value orchestrator.RollbackPreview, runScope bool) string {
@@ -1469,7 +1742,7 @@ func remediationRollbackPreviewContent(value orchestrator.RollbackPreview, runSc
 	writeTUIList(&builder, "실제 롤백 범위", value.ExpandedChangeSets, false)
 	writeTUIList(&builder, "롤백 실행 순서", value.ExecutionOrder, true)
 	builder.WriteString("\n이 화면은 읽기 전용 미리보기이며 아직 시스템을 변경하지 않았습니다.")
-	return builder.String()
+	return presentation.Sanitize(builder.String())
 }
 
 func remediationRollbackConfirmation(value orchestrator.RollbackPreview, runScope bool) string {
@@ -1480,9 +1753,15 @@ func remediationRollbackConfirmation(value orchestrator.RollbackPreview, runScop
 	if runScope {
 		scope = "실행 전체"
 	}
-	return titleStyle.Render(scope+" 롤백 승인 확인") + "\n\n" +
-		fmt.Sprintf("실행 ID: %s\nrevision: %d\n실제 범위: %d개\ncascade 필요: %t\npreview digest:\n%s\n\n현재 revision에서 범위와 순서를 다시 계산하여 digest가 일치할 때만 실행합니다. 범위가 달라지면 새 미리보기를 요구합니다.",
-			value.RunID, value.Revision, len(value.ExpandedChangeSets), value.CascadeRequired, value.PreviewDigest)
+	details := fmt.Sprintf(
+		"실행 ID: %s\nrevision: %d\n실제 범위: %d개\ncascade 필요: %t\npreview digest:\n%s\n\n현재 revision에서 범위와 순서를 다시 계산하여 digest가 일치할 때만 실행합니다. 범위가 달라지면 새 미리보기를 요구합니다.",
+		value.RunID,
+		value.Revision,
+		len(value.ExpandedChangeSets),
+		value.CascadeRequired,
+		value.PreviewDigest,
+	)
+	return titleStyle.Render(scope+" 롤백 승인 확인") + "\n\n" + presentation.Sanitize(details)
 }
 
 func writeTUIList(builder *strings.Builder, title string, values []string, ordered bool) {

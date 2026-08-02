@@ -13,13 +13,15 @@ import (
 
 	"github.com/yesidodo73/OpenCIIP/internal/exitcode"
 	"github.com/yesidodo73/OpenCIIP/internal/model"
+	"github.com/yesidodo73/OpenCIIP/internal/rules"
 )
 
 const maximumReportJSONSize int64 = 64 << 20
 
 var (
-	checkIDPattern       = regexp.MustCompile(`^U-[0-9]{2}$`)
+	checkIDPattern       = regexp.MustCompile(`^U-(0[1-9]|[1-5][0-9]|6[0-7])$`)
 	ruleSetDigestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+	sha256DigestPattern  = regexp.MustCompile(`^[0-9a-f]{64}$`)
 )
 
 func ReadScan(directory string) (model.ScanRun, error) {
@@ -157,6 +159,9 @@ func validateLoadedScan(run model.ScanRun) error {
 	if !canonicalIdentityString(metadata.ToolVersion) || !canonicalIdentityString(metadata.ToolCommit) {
 		return fmt.Errorf("점검 도구 identity가 비어 있거나 정규화되지 않았습니다")
 	}
+	if !sha256DigestPattern.MatchString(metadata.ToolExecutableSHA256) {
+		return fmt.Errorf("점검 실행 바이너리 무결성 값이 잘못되었습니다")
+	}
 	if !metadata.Complete || metadata.StartedAt.IsZero() || metadata.CompletedAt.IsZero() || metadata.CompletedAt.Before(metadata.StartedAt) {
 		return fmt.Errorf("완료되지 않았거나 시각 정보가 잘못된 점검 실행입니다")
 	}
@@ -173,6 +178,10 @@ func validateLoadedScan(run model.ScanRun) error {
 		return err
 	}
 	if err := validateReportSelection(metadata.Selection); err != nil {
+		return err
+	}
+	expectedRuleIDs, err := expectedReportRuleIDs(metadata.Selection)
+	if err != nil {
 		return err
 	}
 	if metadata.Redaction != true {
@@ -211,7 +220,18 @@ func validateLoadedScan(run model.ScanRun) error {
 		if err := validateResultContract(result); err != nil {
 			return fmt.Errorf("항목 %s: %w", result.RuleID, err)
 		}
+		if metadata.EvidenceMode == "all" && len(result.Evidence) == 0 {
+			return fmt.Errorf("모든 증적 저장을 요청한 보고서의 항목 %s에 증적이 없습니다", result.RuleID)
+		}
 		counts[result.Status]++
+	}
+	if len(seen) != len(expectedRuleIDs) {
+		return fmt.Errorf("점검 선택 항목 수와 결과 항목 수가 일치하지 않습니다")
+	}
+	for ruleID := range expectedRuleIDs {
+		if _, exists := seen[ruleID]; !exists {
+			return fmt.Errorf("점검 선택 항목 %s의 결과가 없습니다", ruleID)
+		}
 	}
 	for _, status := range orderedStatuses() {
 		if counts[status] != metadata.Counts[status] {
@@ -345,6 +365,78 @@ func validateReportSelection(selection model.Selection) error {
 		}
 	}
 	return nil
+}
+
+func expectedReportRuleIDs(selection model.Selection) (map[string]struct{}, error) {
+	bundle, err := rules.LoadDefaults()
+	if err != nil {
+		return nil, fmt.Errorf("내장 점검 항목을 불러오지 못했습니다: %w", err)
+	}
+
+	definitions := make(map[string]model.RuleDefinition, len(bundle.Catalog.Rules))
+	for _, rule := range bundle.Catalog.Rules {
+		definitions[rule.ID] = rule
+	}
+	profiles := make(map[string]model.Profile, len(bundle.Profiles.Profiles))
+	for _, profile := range bundle.Profiles.Profiles {
+		profiles[profile.ID] = profile
+	}
+
+	selected := make(map[string]struct{})
+	for _, profileID := range selection.Profiles {
+		profile, exists := profiles[profileID]
+		if !exists {
+			return nil, fmt.Errorf("알 수 없는 점검 프로필 %q가 선택되어 있습니다", profileID)
+		}
+		for _, ruleID := range profile.RuleIDs {
+			selected[ruleID] = struct{}{}
+		}
+	}
+	for _, ruleID := range selection.RuleIDs {
+		if _, exists := definitions[ruleID]; !exists {
+			return nil, fmt.Errorf("알 수 없는 점검 항목 %q가 선택되어 있습니다", ruleID)
+		}
+		selected[ruleID] = struct{}{}
+	}
+	if len(selected) == 0 {
+		return nil, fmt.Errorf("점검 선택 항목이 비어 있습니다")
+	}
+
+	for ruleID := range selected {
+		rule := definitions[ruleID]
+		if !reportSelectionContainsCategory(selection.Categories, rule.Category) ||
+			!reportSelectionContainsSeverity(selection.Severities, rule.Severity) {
+			delete(selected, ruleID)
+		}
+	}
+	if len(selected) == 0 {
+		return nil, fmt.Errorf("점검 선택 조건에 해당하는 항목이 없습니다")
+	}
+	return selected, nil
+}
+
+func reportSelectionContainsCategory(values []model.Category, wanted model.Category) bool {
+	if len(values) == 0 {
+		return true
+	}
+	for _, value := range values {
+		if value == wanted {
+			return true
+		}
+	}
+	return false
+}
+
+func reportSelectionContainsSeverity(values []model.Severity, wanted model.Severity) bool {
+	if len(values) == 0 {
+		return true
+	}
+	for _, value := range values {
+		if value == wanted {
+			return true
+		}
+	}
+	return false
 }
 
 func canonicalIdentityString(value string) bool {

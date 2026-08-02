@@ -93,7 +93,7 @@ func TestSelectingAllScopeClearsRedundantIndividualChecks(t *testing.T) {
 
 func TestTruncateStartKeepsPathOnOneLine(t *testing.T) {
 	t.Parallel()
-	path := "/home/rocky/reports/2026-07-12_052105_localhost.localdomain_c36638ed7494/reports"
+	path := "/srv/example/reports/2026-07-12_052105_host.example_c36638ed7494/reports"
 	got := truncateStart(path, 40)
 	if lipgloss.Width(got) > 40 {
 		t.Fatalf("display width = %d, want at most 40: %q", lipgloss.Width(got), got)
