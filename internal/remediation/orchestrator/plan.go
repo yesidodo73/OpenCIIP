@@ -40,18 +40,19 @@ type planChangeSet struct {
 }
 
 type planPayload struct {
-	SchemaVersion    int                            `json:"schema_version"`
-	RunID            string                         `json:"run_id"`
-	ScanRunID        string                         `json:"scan_run_id"`
-	ScanToolVersion  string                         `json:"scan_tool_version"`
-	ScanToolCommit   string                         `json:"scan_tool_commit"`
-	RuleSetVersion   string                         `json:"rule_set_version"`
-	Platform         model.PlatformInfo             `json:"platform"`
-	RemediationBuild model.RemediationBuildIdentity `json:"remediation_build"`
-	FailurePolicy    model.FailurePolicy            `json:"failure_policy"`
-	Host             model.HostIdentity             `json:"host"`
-	ChangeSets       []planChangeSet                `json:"change_sets"`
-	ConflictGraph    model.ConflictGraph            `json:"conflict_graph"`
+	SchemaVersion            int                            `json:"schema_version"`
+	RunID                    string                         `json:"run_id"`
+	ScanRunID                string                         `json:"scan_run_id"`
+	ScanToolVersion          string                         `json:"scan_tool_version"`
+	ScanToolCommit           string                         `json:"scan_tool_commit"`
+	ScanToolExecutableSHA256 string                         `json:"scan_tool_executable_sha256,omitempty"`
+	RuleSetVersion           string                         `json:"rule_set_version"`
+	Platform                 model.PlatformInfo             `json:"platform"`
+	RemediationBuild         model.RemediationBuildIdentity `json:"remediation_build"`
+	FailurePolicy            model.FailurePolicy            `json:"failure_policy"`
+	Host                     model.HostIdentity             `json:"host"`
+	ChangeSets               []planChangeSet                `json:"change_sets"`
+	ConflictGraph            model.ConflictGraph            `json:"conflict_graph"`
 }
 
 func (m *Manager) Plan(ctx context.Context, request PlanRequest) (*model.RemediationJournal, error) {
@@ -63,14 +64,8 @@ func (m *Manager) Plan(ctx context.Context, request PlanRequest) (*model.Remedia
 	if err := m.ensureNoOtherRecoverable(ctx, ""); err != nil {
 		return nil, err
 	}
-	if strings.TrimSpace(request.ScanRunID) == "" || strings.TrimSpace(request.ScanToolVersion) == "" || strings.TrimSpace(request.ScanToolCommit) == "" || strings.TrimSpace(request.RuleSetVersion) == "" || !request.FailurePolicy.Valid() || len(request.ChangeSets) == 0 {
-		return nil, &Error{Code: CodeInvalidInput, Operation: "plan", Err: fmt.Errorf("scan identity, versions, failure policy, and change sets are required")}
-	}
-	if request.Platform.ScanSupport != model.ScanSupportTested || request.Platform.RemediationSupport != model.RemediationSupportVerified {
-		return nil, &Error{Code: CodeUnsupportedOperation, Operation: "plan", Err: fmt.Errorf("only a verified platform can be bound to a remediation plan")}
-	}
-	if err := request.RemediationBuild.Validate(); err != nil {
-		return nil, &Error{Code: CodeInvalidInput, Operation: "plan", Err: err}
+	if err := validatePlanRequest(request); err != nil {
+		return nil, err
 	}
 	actualHost, err := m.collectHost(ctx)
 	if err != nil {
@@ -124,20 +119,21 @@ func (m *Manager) Plan(ctx context.Context, request PlanRequest) (*model.Remedia
 		return nil, &Error{Code: CodeInvalidInput, Operation: "digest plan", RunID: runID, Err: err}
 	}
 	value := &model.RemediationJournal{
-		SchemaVersion:    model.RemediationSchemaVersion,
-		RunID:            runID,
-		ScanRunID:        request.ScanRunID,
-		ScanToolVersion:  request.ScanToolVersion,
-		ScanToolCommit:   request.ScanToolCommit,
-		RuleSetVersion:   request.RuleSetVersion,
-		Platform:         request.Platform,
-		RemediationBuild: request.RemediationBuild,
-		State:            model.RunPlanned,
-		FailurePolicy:    request.FailurePolicy,
-		PlanDigest:       digest,
-		Host:             actualHost,
-		ChangeSets:       changeSets,
-		ConflictGraph:    graph,
+		SchemaVersion:            effectivePlanSchemaVersion(request.SchemaVersion),
+		RunID:                    runID,
+		ScanRunID:                request.ScanRunID,
+		ScanToolVersion:          request.ScanToolVersion,
+		ScanToolCommit:           request.ScanToolCommit,
+		ScanToolExecutableSHA256: request.ScanToolExecutableSHA256,
+		RuleSetVersion:           request.RuleSetVersion,
+		Platform:                 request.Platform,
+		RemediationBuild:         request.RemediationBuild,
+		State:                    model.RunPlanned,
+		FailurePolicy:            request.FailurePolicy,
+		PlanDigest:               digest,
+		Host:                     actualHost,
+		ChangeSets:               changeSets,
+		ConflictGraph:            graph,
 	}
 	if createErr := m.store.Create(ctx, value); createErr != nil {
 		cleanupContext, cancelCleanup := newApplyCleanupContext(ctx)
@@ -352,19 +348,71 @@ func digestPlan(runID string, request PlanRequest, host model.HostIdentity, chan
 		})
 	}
 	return journal.Digest(planPayload{
-		SchemaVersion:    model.RemediationSchemaVersion,
-		RunID:            runID,
-		ScanRunID:        request.ScanRunID,
-		ScanToolVersion:  request.ScanToolVersion,
-		ScanToolCommit:   request.ScanToolCommit,
-		RuleSetVersion:   request.RuleSetVersion,
-		Platform:         request.Platform,
-		RemediationBuild: request.RemediationBuild,
-		FailurePolicy:    request.FailurePolicy,
-		Host:             host,
-		ChangeSets:       planned,
-		ConflictGraph:    graph,
+		SchemaVersion:            effectivePlanSchemaVersion(request.SchemaVersion),
+		RunID:                    runID,
+		ScanRunID:                request.ScanRunID,
+		ScanToolVersion:          request.ScanToolVersion,
+		ScanToolCommit:           request.ScanToolCommit,
+		ScanToolExecutableSHA256: request.ScanToolExecutableSHA256,
+		RuleSetVersion:           request.RuleSetVersion,
+		Platform:                 request.Platform,
+		RemediationBuild:         request.RemediationBuild,
+		FailurePolicy:            request.FailurePolicy,
+		Host:                     host,
+		ChangeSets:               planned,
+		ConflictGraph:            graph,
 	})
+}
+
+func effectivePlanSchemaVersion(version int) int {
+	if version == 0 {
+		return model.RemediationSchemaVersion
+	}
+	return version
+}
+
+func validatePlanRequest(request PlanRequest) error {
+	if effectivePlanSchemaVersion(request.SchemaVersion) != model.RemediationSchemaVersion {
+		return &Error{Code: CodeUnsupportedOperation, Operation: "plan", Err: fmt.Errorf("new plans require remediation schema version %d", model.RemediationSchemaVersion)}
+	}
+	if strings.TrimSpace(request.ScanRunID) == "" ||
+		strings.TrimSpace(request.ScanToolVersion) == "" ||
+		strings.TrimSpace(request.ScanToolCommit) == "" ||
+		strings.TrimSpace(request.ScanToolExecutableSHA256) == "" ||
+		strings.TrimSpace(request.RuleSetVersion) == "" ||
+		!request.FailurePolicy.Valid() ||
+		len(request.ChangeSets) == 0 {
+		return &Error{Code: CodeInvalidInput, Operation: "plan", Err: fmt.Errorf("scan identity, versions, failure policy, and change sets are required")}
+	}
+	if request.Platform.ScanSupport != model.ScanSupportTested ||
+		request.Platform.RemediationSupport != model.RemediationSupportVerified {
+		return &Error{Code: CodeUnsupportedOperation, Operation: "plan", Err: fmt.Errorf("only a verified platform can be bound to a remediation plan")}
+	}
+	if err := request.RemediationBuild.Validate(); err != nil {
+		return &Error{Code: CodeInvalidInput, Operation: "plan", Err: err}
+	}
+	if request.ScanToolVersion != request.RemediationBuild.Version ||
+		request.ScanToolCommit != request.RemediationBuild.Commit ||
+		request.ScanToolExecutableSHA256 != request.RemediationBuild.ExecutableSHA256 {
+		return &Error{Code: CodeInvalidInput, Operation: "plan", Err: fmt.Errorf("scan and remediation build identities must match")}
+	}
+	return nil
+}
+
+func requireCurrentExecutableBoundPlan(value *model.RemediationJournal, operation string) error {
+	if value == nil {
+		return &Error{Code: CodeInvalidState, Operation: operation, Err: fmt.Errorf("remediation journal is missing")}
+	}
+	if value.SchemaVersion != model.RemediationSchemaVersion ||
+		value.ScanToolExecutableSHA256 == "" {
+		return &Error{
+			Code:      CodeUnsupportedOperation,
+			Operation: operation,
+			RunID:     value.RunID,
+			Err:       fmt.Errorf("legacy remediation plans cannot be approved or applied; create a new plan from a current scan"),
+		}
+	}
+	return nil
 }
 
 func (m *Manager) Approve(ctx context.Context, runID string, approval model.Approval) error {
@@ -380,6 +428,9 @@ func (m *Manager) Approve(ctx context.Context, runID string, approval model.Appr
 	if err != nil {
 		return err
 	}
+	if err := requireCurrentExecutableBoundPlan(value, "approve"); err != nil {
+		return err
+	}
 	if value.State != model.RunPlanned {
 		return &Error{Code: CodeInvalidState, Operation: "approve", RunID: runID, Err: fmt.Errorf("run is %s, not planned", value.State)}
 	}
@@ -387,6 +438,7 @@ func (m *Manager) Approve(ctx context.Context, runID string, approval model.Appr
 	if err := approval.Validate(value.PlanDigest); err != nil {
 		return &Error{Code: CodeInvalidInput, Operation: "approve", RunID: runID, Err: err}
 	}
+	approval.ApprovedAt = m.nextEventTime(value)
 	_, err = m.update(ctx, value, "persist approval", func(next *model.RemediationJournal) error {
 		next.State = model.RunApproved
 		for index := range next.ChangeSets {

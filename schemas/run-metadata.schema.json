@@ -10,6 +10,7 @@
     "run_id",
     "tool_version",
     "tool_commit",
+    "tool_executable_sha256",
     "guide_year",
     "rule_set_version",
     "started_at",
@@ -26,7 +27,7 @@
   "properties": {
     "schema_version": {
       "type": "integer",
-      "const": 2
+      "const": 3
     },
     "run_id": {
       "type": "string"
@@ -36,6 +37,10 @@
     },
     "tool_commit": {
       "type": "string"
+    },
+    "tool_executable_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
     },
     "guide_year": {
       "type": "integer",

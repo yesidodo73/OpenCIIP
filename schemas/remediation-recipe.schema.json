@@ -25,6 +25,11 @@
       "pattern": "^(?:|\\S(?:[\\s\\S]*\\S)?)$",
       "not": {"pattern": "\\u0000"}
     },
+    "exactSelectorString": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._+-]{0,127}$",
+      "not": {"pattern": "[\\r\\n]"}
+    },
     "sha256": {
       "type": "string",
       "pattern": "^[0-9a-f]{64}$"
@@ -37,13 +42,14 @@
     "selector": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "version"],
+      "required": ["id", "version", "architecture"],
       "properties": {
-        "os": {"$ref": "#/$defs/canonicalString"},
-        "family": {"$ref": "#/$defs/canonicalString"},
-        "id": {"$ref": "#/$defs/canonicalNonBlankString"},
-        "version": {"$ref": "#/$defs/canonicalNonBlankString"},
-        "architecture": {"$ref": "#/$defs/canonicalString"}
+        "os": {"const": ""},
+        "family": {"const": ""},
+        "id": {"$ref": "#/$defs/exactSelectorString"},
+        "version": {"$ref": "#/$defs/exactSelectorString"},
+        "version_major": {"const": ""},
+        "architecture": {"$ref": "#/$defs/exactSelectorString"}
       }
     },
     "operation": {
@@ -119,6 +125,7 @@
         "operations": {
           "type": "array",
           "minItems": 1,
+          "maxItems": 1,
           "items": {"$ref": "#/$defs/operation"}
         }
       }

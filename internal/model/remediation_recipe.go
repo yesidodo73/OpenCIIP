@@ -13,6 +13,7 @@ const RemediationRecipeSchemaVersion = 1
 const RecipePreserveContentFileMetadata = "preserve_content_file_metadata"
 
 var recipeIdentifierPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,127}$`)
+var exactRemediationSelectorTokenPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._+-]{0,127}$`)
 
 type RemediationRecipeCatalog struct {
 	SchemaVersion int                 `json:"schema_version" yaml:"schema_version"`
@@ -151,8 +152,8 @@ func (r RemediationRecipe) Validate() error {
 	if err := r.Verification.Validate(); err != nil {
 		return fmt.Errorf("remediation recipe %s: %w", r.ID, err)
 	}
-	if len(r.Operations) == 0 {
-		return fmt.Errorf("remediation recipe %s has no operations", r.ID)
+	if len(r.Operations) != 1 {
+		return fmt.Errorf("remediation recipe %s must contain exactly one operation", r.ID)
 	}
 	paths := make(map[string]struct{}, len(r.Operations))
 	for index, operation := range r.Operations {
@@ -168,18 +169,15 @@ func (r RemediationRecipe) Validate() error {
 }
 
 func (r RemediationRecipe) MatchKey() string {
+	// OS and family are optional compatibility constraints, not separate
+	// remediation authorities. One rule may have only one recipe for an exact
+	// distribution ID, version, and architecture.
 	selector := r.Selector
 	values := []string{
 		r.RuleID,
-		selector.OS,
-		selector.Family,
 		selector.ID,
 		selector.Version,
-		selector.VersionMajor,
 		selector.Architecture,
-	}
-	for index := range values {
-		values[index] = strings.ToLower(values[index])
 	}
 	return strings.Join(values, "\x00")
 }
@@ -194,8 +192,13 @@ func validateExactRemediationSelector(selector PlatformSelector) error {
 	if selector.VersionMajor != "" {
 		return fmt.Errorf("selector must not use version_major; remediation requires an exact version")
 	}
-	if selector.ID == "" || selector.Version == "" {
-		return fmt.Errorf("selector must bind an OS id and exact version")
+	if selector.OS != "" || selector.Family != "" {
+		return fmt.Errorf("selector must use only id, version, and architecture")
+	}
+	if !exactRemediationSelectorTokenPattern.MatchString(selector.ID) ||
+		!exactRemediationSelectorTokenPattern.MatchString(selector.Version) ||
+		!exactRemediationSelectorTokenPattern.MatchString(selector.Architecture) {
+		return fmt.Errorf("selector must bind canonical lowercase ASCII id, exact version, and architecture tokens")
 	}
 	return nil
 }

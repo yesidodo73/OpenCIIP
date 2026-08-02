@@ -1,6 +1,9 @@
 package model
 
 import (
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -184,9 +187,89 @@ func TestRemediationRecipeValidateRequiresVerification(t *testing.T) {
 		t.Fatalf("valid recipe was rejected: %v", err)
 	}
 
+	withoutArchitecture := recipe
+	withoutArchitecture.Selector.Architecture = ""
+	if err := withoutArchitecture.Validate(); err == nil {
+		t.Fatal("recipe without an exact architecture was accepted")
+	}
+	nonCanonicalSelectors := []PlatformSelector{
+		{ID: "Rocky", Version: "9.8", Architecture: "amd64"},
+		{ID: "Σ", Version: "9.8", Architecture: "amd64"},
+		{ID: "rocky", Version: "９.８", Architecture: "amd64"},
+		{ID: "rocky", Version: "9.8", Architecture: "AMD64"},
+		{OS: "linux", ID: "rocky", Version: "9.8", Architecture: "amd64"},
+		{Family: "rhel", ID: "rocky", Version: "9.8", Architecture: "amd64"},
+	}
+	for _, selector := range nonCanonicalSelectors {
+		candidate := recipe
+		candidate.Selector = selector
+		if err := candidate.Validate(); err == nil {
+			t.Errorf("recipe accepted non-canonical exact selector %#v", selector)
+		}
+	}
+
+	multipleOperations := recipe
+	multipleOperations.Operations = append(
+		append([]FileMetadataRecipeEntry(nil), recipe.Operations...),
+		FileMetadataRecipeEntry{
+			Type:             RecipePreserveContentFileMetadata,
+			Path:             "/etc/services",
+			AllowedOwners:    []string{"root"},
+			RemediationOwner: "root",
+			MaximumMode:      "0644",
+		},
+	)
+	if err := multipleOperations.Validate(); err == nil {
+		t.Fatal("recipe with multiple operations was accepted")
+	}
+
 	recipe.Verification = RemediationRecipeVerification{}
 	if err := recipe.Validate(); err == nil {
 		t.Fatal("recipe without verification metadata was accepted")
+	}
+}
+
+func TestRemediationRecipeSchemaUsesRuntimeExactSelectorPattern(t *testing.T) {
+	t.Parallel()
+
+	data, err := os.ReadFile(filepath.Join("..", "..", "schemas", "remediation-recipe.schema.json"))
+	if err != nil {
+		t.Fatalf("ReadFile(remediation schema) error = %v", err)
+	}
+	var schema map[string]any
+	if err := json.Unmarshal(data, &schema); err != nil {
+		t.Fatalf("Unmarshal(remediation schema) error = %v", err)
+	}
+	defs := schema["$defs"].(map[string]any)
+	exact := defs["exactSelectorString"].(map[string]any)
+	if exact["pattern"] != exactRemediationSelectorTokenPattern.String() {
+		t.Fatalf(
+			"schema exact selector pattern = %q, want %q",
+			exact["pattern"],
+			exactRemediationSelectorTokenPattern.String(),
+		)
+	}
+	exclusion, ok := exact["not"].(map[string]any)
+	if !ok || exclusion["pattern"] != `[\r\n]` {
+		t.Fatalf("schema exact selector line terminator exclusion = %#v", exact["not"])
+	}
+	selector := defs["selector"].(map[string]any)
+	properties := selector["properties"].(map[string]any)
+	for _, field := range []string{"id", "version", "architecture"} {
+		property := properties[field].(map[string]any)
+		if property["$ref"] != "#/$defs/exactSelectorString" {
+			t.Fatalf("schema selector %s ref = %q, want exactSelectorString", field, property["$ref"])
+		}
+	}
+	versionMajor := properties["version_major"].(map[string]any)
+	if versionMajor["const"] != "" {
+		t.Fatalf("schema version_major constraint = %#v, want empty string only", versionMajor)
+	}
+	for _, field := range []string{"os", "family"} {
+		property := properties[field].(map[string]any)
+		if property["const"] != "" {
+			t.Fatalf("schema selector %s constraint = %#v, want empty string only", field, property)
+		}
 	}
 }
 
@@ -196,8 +279,9 @@ func validRemediationRecipeForVerificationTest() RemediationRecipe {
 		GuideYear: 2026,
 		RuleID:    "U-19",
 		Selector: PlatformSelector{
-			ID:      "rocky",
-			Version: "9.8",
+			ID:           "rocky",
+			Version:      "9.8",
+			Architecture: "amd64",
 		},
 		Verification: RemediationRecipeVerification{
 			State:        RemediationRecipeVerificationPending,

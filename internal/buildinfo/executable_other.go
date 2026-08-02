@@ -11,11 +11,11 @@ import (
 func runningExecutablePath() (string, error) {
 	path, err := os.Executable()
 	if err != nil {
-		return "", fmt.Errorf("locate remediation executable: %w", err)
+		return "", fmt.Errorf("locate OpenCIIP executable: %w", err)
 	}
 	path, err = filepath.EvalSymlinks(path)
 	if err != nil {
-		return "", fmt.Errorf("resolve remediation executable: %w", err)
+		return "", fmt.Errorf("resolve OpenCIIP executable: %w", err)
 	}
 	return path, nil
 }

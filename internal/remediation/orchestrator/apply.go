@@ -90,14 +90,26 @@ func journalErrorMatches(actual *model.JournalError, expected model.JournalError
 	return actual.Resource == nil || *actual.Resource == *expected.Resource
 }
 
-func (m *Manager) ApplyWithVerifier(ctx context.Context, runID string, guard ApplyGuard, verifier ApplyVerifier) error {
-	if guard == nil || verifier == nil {
-		return &Error{Code: CodeInvalidInput, Operation: "apply with verifier", RunID: runID, Err: fmt.Errorf("guard and verifier are required")}
+func (m *Manager) ApplyWithVerifier(
+	ctx context.Context,
+	runID string,
+	runGuard ApplyRunGuard,
+	effectGuard ApplyEffectGuard,
+	verifier ApplyVerifier,
+) error {
+	if runGuard == nil || effectGuard == nil || verifier == nil {
+		return &Error{Code: CodeInvalidInput, Operation: "apply with verifier", RunID: runID, Err: fmt.Errorf("run guard, effect guard, and verifier are required")}
 	}
-	return m.apply(ctx, runID, guard, verifier)
+	return m.apply(ctx, runID, runGuard, effectGuard, verifier)
 }
 
-func (m *Manager) apply(ctx context.Context, runID string, guard ApplyGuard, verifier ApplyVerifier) error {
+func (m *Manager) apply(
+	ctx context.Context,
+	runID string,
+	runGuard ApplyRunGuard,
+	effectGuard ApplyEffectGuard,
+	verifier ApplyVerifier,
+) error {
 	lock, err := m.acquire(ctx, "apply")
 	if err != nil {
 		return err
@@ -108,6 +120,9 @@ func (m *Manager) apply(ctx context.Context, runID string, guard ApplyGuard, ver
 	}
 	value, err := m.loadAndVerifyReadOnly(ctx, runID)
 	if err != nil {
+		return err
+	}
+	if err := requireCurrentExecutableBoundPlan(value, "apply"); err != nil {
 		return err
 	}
 	if value.State != model.RunApproved {
@@ -126,7 +141,7 @@ func (m *Manager) apply(ctx context.Context, runID string, guard ApplyGuard, ver
 			}
 		}
 	}
-	if err := guard(ctx, value); err != nil {
+	if err := runGuard(ctx, value); err != nil {
 		return &Error{Code: CodePreconditionFailed, Operation: "apply execution gate", RunID: runID, Err: err}
 	}
 	handler, err := m.fileHandler(runID)
@@ -151,7 +166,7 @@ func (m *Manager) apply(ctx context.Context, runID string, guard ApplyGuard, ver
 				return err
 			}
 			cleanupContext, cancelCleanup := newApplyCleanupContext(ctx)
-			failureErr := m.failBeforeSideEffect(cleanupContext, value, changeSetID, err)
+			failureErr := m.failBeforeSideEffect(cleanupContext, value, handler, changeSetID, err)
 			cancelCleanup()
 			return failureErr
 		}
@@ -167,7 +182,7 @@ func (m *Manager) apply(ctx context.Context, runID string, guard ApplyGuard, ver
 		if err != nil {
 			if CodeOf(err) == CodeLockUnavailable {
 				cleanupContext, cancelCleanup := newApplyCleanupContext(ctx)
-				failureErr := m.failBeforeSideEffect(cleanupContext, prepared, changeSetID, err)
+				failureErr := m.failBeforeSideEffect(cleanupContext, prepared, handler, changeSetID, err)
 				cancelCleanup()
 				return failureErr
 			}
@@ -176,7 +191,7 @@ func (m *Manager) apply(ctx context.Context, runID string, guard ApplyGuard, ver
 		operationIDs := orderedOperationIDs(value, changeSetID, false)
 		for _, operationID := range operationIDs {
 			var applyFailure error
-			value, applyFailure = m.applyOperation(ctx, value, handler, changeSetID, operationID)
+			value, applyFailure = m.applyOperation(ctx, value, handler, effectGuard, changeSetID, operationID)
 			if applyFailure != nil {
 				if value == nil || applyJournalReloadRequired(applyFailure) {
 					value, err = m.reloadApplyJournal(ctx, runID, "reload after apply operation failure", applyFailure)
@@ -189,7 +204,7 @@ func (m *Manager) apply(ctx context.Context, runID string, guard ApplyGuard, ver
 				}
 				if !hasRollbackWork(value, changeSetID) {
 					cleanupContext, cancelCleanup := newApplyCleanupContext(ctx)
-					failureErr := m.failBeforeSideEffect(cleanupContext, value, changeSetID, applyFailure)
+					failureErr := m.failBeforeSideEffect(cleanupContext, value, handler, changeSetID, applyFailure)
 					cancelCleanup()
 					return failureErr
 				}
@@ -347,6 +362,12 @@ func (m *Manager) apply(ctx context.Context, runID string, guard ApplyGuard, ver
 		}
 		return &Error{Code: CodeVerificationFailed, Operation: "platform evaluator verification", RunID: runID, Committed: true, Err: fmt.Errorf("automatic rollback completed: %w", verificationErr)}
 	}
+	postEvaluatorContext, cancelPostEvaluator := newApplyCleanupContext(ctx)
+	value, err = m.verifyRunFinal(postEvaluatorContext, value, handler)
+	cancelPostEvaluator()
+	if err != nil {
+		return err
+	}
 	completionContext, cancelCompletion := newApplyCleanupContext(ctx)
 	_, err = m.update(completionContext, value, "complete run", func(next *model.RemediationJournal) error {
 		for _, changeSet := range next.ChangeSets {
@@ -371,6 +392,30 @@ func (m *Manager) apply(ctx context.Context, runID string, guard ApplyGuard, ver
 	}
 	if latest.State != model.RunVerifying {
 		return &Error{Code: CodeRecoveryRequired, Operation: "resume run completion", RunID: runID, Err: fmt.Errorf("run is %s after completion persistence failure", latest.State)}
+	}
+	revalidationContext, cancelRevalidation := newApplyCleanupContext(ctx)
+	latest, err = m.verifyRunFinal(revalidationContext, latest, handler)
+	cancelRevalidation()
+	if err != nil {
+		return err
+	}
+	evaluatorContext, cancelEvaluator := newApplyCleanupContext(ctx)
+	failedChangeSets, verificationErr = verifier(evaluatorContext, latest, changeSetIDs)
+	cancelEvaluator()
+	if verificationErr != nil {
+		rollbackContext, cancelRollback := newApplyCleanupContext(ctx)
+		rollbackErr := m.rollbackVerificationFailureLocked(rollbackContext, latest, failedChangeSets, verificationErr, false)
+		cancelRollback()
+		if rollbackErr != nil {
+			return &Error{Code: CodeVerificationFailed, Operation: "platform evaluator revalidation and rollback", RunID: runID, Committed: true, Err: fmt.Errorf("verification error: %v; rollback error: %w", verificationErr, rollbackErr)}
+		}
+		return &Error{Code: CodeVerificationFailed, Operation: "platform evaluator revalidation", RunID: runID, Committed: true, Err: fmt.Errorf("automatic rollback completed: %w", verificationErr)}
+	}
+	postRetryEvaluatorContext, cancelPostRetryEvaluator := newApplyCleanupContext(ctx)
+	latest, err = m.verifyRunFinal(postRetryEvaluatorContext, latest, handler)
+	cancelPostRetryEvaluator()
+	if err != nil {
+		return err
 	}
 	retryContext, cancelRetry := newApplyCleanupContext(ctx)
 	_, retryErr := m.update(retryContext, latest, "retry complete run", func(next *model.RemediationJournal) error {
@@ -491,7 +536,7 @@ func (m *Manager) prepareChangeSet(ctx context.Context, value *model.Remediation
 		}
 		orderedBefore = append(orderedBefore, snapshot)
 	}
-	now := m.nowUTC()
+	now := m.nextEventTime(value)
 	next, updateErr := m.update(ctx, value, "persist prepared change set", func(journal *model.RemediationJournal) error {
 		target, _, findErr := findChangeSet(journal, changeSetID)
 		if findErr != nil {
@@ -517,7 +562,17 @@ func (m *Manager) prepareChangeSet(ctx context.Context, value *model.Remediation
 	return next, nil
 }
 
-func (m *Manager) applyOperation(ctx context.Context, value *model.RemediationJournal, handler fileRuntime, changeSetID, operationID string) (*model.RemediationJournal, error) {
+func (m *Manager) applyOperation(
+	ctx context.Context,
+	value *model.RemediationJournal,
+	handler fileRuntime,
+	effectGuard ApplyEffectGuard,
+	changeSetID,
+	operationID string,
+) (*model.RemediationJournal, error) {
+	if effectGuard == nil {
+		return value, &Error{Code: CodeInvalidInput, Operation: "apply operation", RunID: value.RunID, ChangeSetID: changeSetID, OperationID: operationID, Err: fmt.Errorf("effect guard is required")}
+	}
 	operation, _, _, err := findOperation(value, changeSetID, operationID)
 	if err != nil {
 		return value, &Error{Code: CodeInvalidState, Operation: "apply operation", RunID: value.RunID, ChangeSetID: changeSetID, OperationID: operationID, Err: err}
@@ -535,7 +590,10 @@ func (m *Manager) applyOperation(ctx context.Context, value *model.RemediationJo
 	if err := handler.VerifyBackup(ctx, *operation.Backup); err != nil {
 		return value, wrapDependency("verify backup before apply", value.RunID, changeSetID, operationID, err)
 	}
-	now := m.nowUTC()
+	if err := effectGuard(ctx, value, changeSetID, operationID); err != nil {
+		return value, &Error{Code: CodePreconditionFailed, Operation: "apply effect gate", RunID: value.RunID, ChangeSetID: changeSetID, OperationID: operationID, Err: err}
+	}
+	now := m.nextEventTime(value)
 	next, updateErr := m.update(ctx, value, "persist apply intent", func(next *model.RemediationJournal) error {
 		target, _, _, findErr := findOperation(next, changeSetID, operationID)
 		if findErr != nil {
@@ -574,7 +632,7 @@ func (m *Manager) applyOperation(ctx context.Context, value *model.RemediationJo
 	before := exactEqual(operation.Before, observed)
 	switch {
 	case desired:
-		appliedAt := m.nowUTC()
+		appliedAt := m.nextEventTime(value)
 		next, updateErr := m.update(persistContext, value, "persist applied operation", func(next *model.RemediationJournal) error {
 			target, _, _, findErr := findOperation(next, changeSetID, operationID)
 			if findErr != nil {
@@ -584,7 +642,7 @@ func (m *Manager) applyOperation(ctx context.Context, value *model.RemediationJo
 			target.AppliedAt = &appliedAt
 			target.State = model.OperationApplied
 			if applyErr != nil {
-				journalError := m.makeJournalError("apply", changeSetID, operationID, target, &Error{Code: CodeApplyFailed, Err: applyErr})
+				journalError := m.makeJournalError(next, "apply", changeSetID, operationID, target, &Error{Code: CodeApplyFailed, Err: applyErr})
 				target.Error = &journalError
 			}
 			return nil
@@ -623,7 +681,7 @@ func (m *Manager) markOperationNoEffect(ctx context.Context, value *model.Remedi
 		observedCopy := observed
 		target.State = model.OperationFailed
 		target.ObservedAfter = &observedCopy
-		journalError := m.makeJournalError("apply", changeSetID, operationID, target, cause)
+		journalError := m.makeJournalError(journal, "apply", changeSetID, operationID, target, cause)
 		target.Error = &journalError
 		return nil
 	})
@@ -640,7 +698,7 @@ func (m *Manager) markOperationAmbiguous(ctx context.Context, value *model.Remed
 			return findErr
 		}
 		target.State = model.OperationAmbiguous
-		journalError := m.makeJournalError("apply", changeSetID, operationID, target, cause)
+		journalError := m.makeJournalError(journal, "apply", changeSetID, operationID, target, cause)
 		target.Error = &journalError
 		changeSet, _, findErr := findChangeSet(journal, changeSetID)
 		if findErr != nil {
@@ -675,7 +733,7 @@ func (m *Manager) finishChangeSet(ctx context.Context, value *model.RemediationJ
 	for _, resource := range changeSet.Resources {
 		orderedAfter = append(orderedAfter, afterByResource[resource.Key])
 	}
-	appliedAt := m.nowUTC()
+	appliedAt := m.nextEventTime(value)
 	next, updateErr := m.update(ctx, value, "persist applied change set", func(next *model.RemediationJournal) error {
 		target, _, findErr := findChangeSet(next, changeSetID)
 		if findErr != nil {
@@ -735,7 +793,7 @@ func (m *Manager) completeChangeSetVerification(ctx context.Context, value *mode
 			return value, &Error{Code: CodeInvalidState, Operation: "complete change-set verification", RunID: value.RunID, ChangeSetID: changeSetID, OperationID: operation.ID, Err: fmt.Errorf("operation has no verified resource-level after state")}
 		}
 	}
-	verifiedAt := m.nowUTC()
+	verifiedAt := m.nextEventTime(value)
 	next, err := m.update(ctx, value, "persist evaluator-verified change set", func(journal *model.RemediationJournal) error {
 		target, _, findErr := findChangeSet(journal, changeSetID)
 		if findErr != nil {
@@ -760,7 +818,7 @@ func (m *Manager) markVerificationAmbiguous(ctx context.Context, value *model.Re
 		if findErr != nil {
 			return findErr
 		}
-		journalError := m.makeJournalError("verification", changeSetID, operationID, operation, &Error{Code: CodeRecoveryRequired, Err: cause})
+		journalError := m.makeJournalError(journal, "verification", changeSetID, operationID, operation, &Error{Code: CodeRecoveryRequired, Err: cause})
 		changeSet, _, findErr := findChangeSet(journal, changeSetID)
 		if findErr != nil {
 			return findErr

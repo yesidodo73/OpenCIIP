@@ -1,0 +1,21 @@
+schema_version: 1
+recipes:
+  - id: u19-hosts-permissions-example-1.0-amd64
+    guide_year: 2026
+    rule_id: U-19
+    selector:
+      id: example
+      version: "1.0"
+      architecture: amd64
+    verification:
+      state: pending
+      environments:
+        - Example Linux 1.0 amd64
+    risk: CAUTION
+    expected_impact: "/etc/hosts의 내용과 복구에 필요한 메타데이터를 보존하고, 검증한 소유자와 최대 권한 범위 안에서만 변경합니다."
+    operations:
+      - type: preserve_content_file_metadata
+        path: /etc/hosts
+        allowed_owners: [root]
+        remediation_owner: root
+        maximum_mode: "0644"

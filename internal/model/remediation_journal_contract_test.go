@@ -223,7 +223,7 @@ func TestRemediationJournalTerminalInvariantTable(t *testing.T) {
 				journal.RollbackAttempts = nil
 				return journal
 			},
-			wantError: "no completed successful rollback attempt",
+			wantError: "rollback intent is not within a covering rollback attempt",
 		},
 		{
 			name: "canceled accepts untouched work",
@@ -374,6 +374,7 @@ func TestRemediationJournalIncompleteRollbackAttemptContract(t *testing.T) {
 			journal: func() RemediationJournal {
 				journal := journalContractRecoveryIntent()
 				journal.RollbackAttempts = []RollbackAttempt{journalContractIncompleteAttempt("attempt-1")}
+				journal.UpdatedAt = journal.LatestEventTime()
 				return journal
 			},
 		},
@@ -382,7 +383,10 @@ func TestRemediationJournalIncompleteRollbackAttemptContract(t *testing.T) {
 			journal: func() RemediationJournal {
 				journal := journalContractRecoveryIntent()
 				completed := journalContractCompletedAttempt("attempt-1", RollbackFailed)
-				journal.RollbackAttempts = []RollbackAttempt{completed, journalContractIncompleteAttempt("attempt-2")}
+				incomplete := journalContractIncompleteAttempt("attempt-2")
+				incomplete.StartedAt = completed.CompletedAt.Add(time.Nanosecond)
+				journal.RollbackAttempts = []RollbackAttempt{completed, incomplete}
+				journal.UpdatedAt = journal.LatestEventTime()
 				return journal
 			},
 		},
@@ -823,6 +827,16 @@ func TestRemediationJournalSchemaStateContract(t *testing.T) {
 		want any
 	}{
 		{
+			name: "schema requires scan executable identity",
+			want: map[string]any{
+				"required": []any{"scan_tool_executable_sha256"},
+				"properties": map[string]any{
+					"schema_version":              map[string]any{"const": float64(RemediationSchemaVersion)},
+					"scan_tool_executable_sha256": map[string]any{"$ref": "#/$defs/sha256"},
+				},
+			},
+		},
+		{
 			name: "normal terminals reject unresolved ids and incomplete attempts",
 			want: map[string]any{
 				"if": map[string]any{"properties": map[string]any{"state": map[string]any{"enum": []any{"completed", "rolled_back", "completed_with_rollbacks", "canceled", "failed"}}}},
@@ -906,6 +920,69 @@ func TestRemediationJournalSchemaStateContract(t *testing.T) {
 	}
 }
 
+func TestRemediationJournalRequiresMatchingScanExecutableIdentity(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*RemediationJournal)
+	}{
+		{
+			name: "missing digest",
+			mutate: func(journal *RemediationJournal) {
+				journal.ScanToolExecutableSHA256 = ""
+			},
+		},
+		{
+			name: "noncanonical digest",
+			mutate: func(journal *RemediationJournal) {
+				journal.ScanToolExecutableSHA256 = strings.Repeat("A", 64)
+			},
+		},
+		{
+			name: "different remediation executable",
+			mutate: func(journal *RemediationJournal) {
+				journal.ScanToolExecutableSHA256 = journalContractDigest("9")
+			},
+		},
+		{
+			name: "different version",
+			mutate: func(journal *RemediationJournal) {
+				journal.ScanToolVersion = "1.0.1"
+			},
+		},
+		{
+			name: "different commit",
+			mutate: func(journal *RemediationJournal) {
+				journal.ScanToolCommit = "different-commit"
+			},
+		},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			journal := journalContractBase()
+			test.mutate(&journal)
+			if err := journal.Validate(); err == nil {
+				t.Fatal("Validate() error = nil, want scan executable identity rejection")
+			}
+		})
+	}
+}
+
+func TestRemediationJournalAllowsLegacySchemaForRecovery(t *testing.T) {
+	journal := journalContractBase()
+	journal.SchemaVersion = legacyRemediationSchemaVersion
+	journal.ScanToolExecutableSHA256 = ""
+	if err := journal.Validate(); err != nil {
+		t.Fatalf("legacy journal Validate() error = %v", err)
+	}
+
+	journal.ScanToolExecutableSHA256 = journal.RemediationBuild.ExecutableSHA256
+	if err := journal.Validate(); err == nil {
+		t.Fatal("hybrid v2 journal Validate() error = nil, want v3 field rejection")
+	}
+}
+
 func journalContractBase() RemediationJournal {
 	startedAt := journalContractTime()
 	resource := journalContractResource()
@@ -913,13 +990,14 @@ func journalContractBase() RemediationJournal {
 	desired := journalContractDesired()
 
 	return RemediationJournal{
-		SchemaVersion:   RemediationSchemaVersion,
-		Revision:        1,
-		RunID:           "run-contract-1",
-		ScanRunID:       "scan-contract-1",
-		ScanToolVersion: "1.0.0",
-		ScanToolCommit:  "commit-1",
-		RuleSetVersion:  "sha256:" + journalContractDigest("5"),
+		SchemaVersion:            RemediationSchemaVersion,
+		Revision:                 1,
+		RunID:                    "run-contract-1",
+		ScanRunID:                "scan-contract-1",
+		ScanToolVersion:          "1.0.0",
+		ScanToolCommit:           "commit-1",
+		ScanToolExecutableSHA256: journalContractDigest("6"),
+		RuleSetVersion:           "sha256:" + journalContractDigest("5"),
 		Platform: PlatformInfo{
 			OS:                 "linux",
 			Family:             "rhel",
@@ -1003,6 +1081,7 @@ func journalContractBase() RemediationJournal {
 
 func journalContractCompleted() RemediationJournal {
 	journal := journalContractBase()
+	approvedAt := journal.StartedAt.Add(30 * time.Second)
 	preparedAt := journal.StartedAt.Add(time.Minute)
 	appliedAt := preparedAt.Add(time.Minute)
 	verifiedAt := appliedAt.Add(time.Minute)
@@ -1013,6 +1092,7 @@ func journalContractCompleted() RemediationJournal {
 	changeSet.PreparedAt = &preparedAt
 	changeSet.AppliedAt = &appliedAt
 	changeSet.VerifiedAt = &verifiedAt
+	changeSet.Approval = &Approval{Source: "contract-test", PlanDigest: journal.PlanDigest, ApprovedAt: approvedAt}
 	changeSet.Operations[0] = journalContractAppliedOperation(OperationVerified)
 	journal.State = RunCompleted
 	journal.UpdatedAt = verifiedAt
@@ -1021,12 +1101,16 @@ func journalContractCompleted() RemediationJournal {
 
 func journalContractRolledBack() RemediationJournal {
 	journal := journalContractBase()
+	approvedAt := journal.StartedAt.Add(30 * time.Second)
+	preparedAt := journal.StartedAt.Add(45 * time.Second)
 	applyIntentAt := journal.StartedAt.Add(time.Minute)
 	rollbackIntentAt := applyIntentAt.Add(time.Minute)
 	rolledBackAt := rollbackIntentAt.Add(time.Minute)
 	changeSet := &journal.ChangeSets[0]
 	changeSet.State = ChangeRolledBack
 	changeSet.Before = []ResourceSnapshot{journalContractBefore()}
+	changeSet.Approval = &Approval{Source: "contract-test", PlanDigest: journal.PlanDigest, ApprovedAt: approvedAt}
+	changeSet.PreparedAt = &preparedAt
 	changeSet.RolledBackAt = &rolledBackAt
 	operation := &changeSet.Operations[0]
 	operation.State = OperationRolledBack
@@ -1045,10 +1129,14 @@ func journalContractRolledBack() RemediationJournal {
 
 func journalContractNoEffectFailure() RemediationJournal {
 	journal := journalContractBase()
+	approvedAt := journal.StartedAt.Add(30 * time.Second)
+	preparedAt := journal.StartedAt.Add(45 * time.Second)
 	applyIntentAt := journal.StartedAt.Add(time.Minute)
 	failedAt := applyIntentAt.Add(time.Minute)
 	changeSet := &journal.ChangeSets[0]
 	changeSet.State = ChangeApplyFailed
+	changeSet.Approval = &Approval{Source: "contract-test", PlanDigest: journal.PlanDigest, ApprovedAt: approvedAt}
+	changeSet.PreparedAt = &preparedAt
 	operation := &changeSet.Operations[0]
 	operation.State = OperationFailed
 	operation.Before = journalContractBefore()
@@ -1066,10 +1154,14 @@ func journalContractNoEffectFailure() RemediationJournal {
 
 func journalContractRecoveryIntent() RemediationJournal {
 	journal := journalContractBase()
+	approvedAt := journal.StartedAt.Add(30 * time.Second)
+	preparedAt := journal.StartedAt.Add(45 * time.Second)
 	intentAt := journal.StartedAt.Add(time.Minute)
 	changeSet := &journal.ChangeSets[0]
 	changeSet.State = ChangeRecoveryRequired
 	changeSet.Before = []ResourceSnapshot{journalContractBefore()}
+	changeSet.Approval = &Approval{Source: "contract-test", PlanDigest: journal.PlanDigest, ApprovedAt: approvedAt}
+	changeSet.PreparedAt = &preparedAt
 	changeSet.Operations[0] = journalContractIntentOperation()
 	journal.State = RunRecoveryRequired
 	journal.UpdatedAt = intentAt
@@ -1099,14 +1191,24 @@ func journalContractAppliedOperation(state OperationState) OperationRecord {
 }
 
 func journalContractIncompleteAttempt(id string) RollbackAttempt {
+	observer := journalContractRollbackExecutor()
 	return RollbackAttempt{
 		ID:                  id,
 		Scope:               RollbackItem,
 		Trigger:             RollbackCrashRecovery,
+		ObservedByBuild:     &observer,
 		RequestedChangeSets: []string{"change-1"},
 		ExpandedChangeSets:  []string{"change-1"},
 		CascadeApproved:     true,
 		StartedAt:           journalContractTime().Add(2 * time.Minute),
+	}
+}
+
+func journalContractRollbackExecutor() RemediationBuildIdentity {
+	return RemediationBuildIdentity{
+		Version:          "1.0.0",
+		Commit:           strings.Repeat("a", 40),
+		ExecutableSHA256: journalContractDigest("b"),
 	}
 }
 

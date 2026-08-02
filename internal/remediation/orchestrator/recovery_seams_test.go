@@ -369,7 +369,7 @@ func TestRecoverOperationChainsSkipsDurableNoEffectWriter(t *testing.T) {
 	}
 	assessment := RecoveryAssessment{}
 
-	got, err := (&Manager{}).recoverOperationChains(context.Background(), value, runtime, &assessment)
+	got, err := (&Manager{}).recoverOperationChains(context.Background(), value, runtime, &assessment, nil, faultRecoveryObserverBuild())
 	if err != nil {
 		t.Fatalf("recoverOperationChains() error = %v", err)
 	}

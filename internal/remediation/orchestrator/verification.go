@@ -37,7 +37,7 @@ func (m *Manager) rollbackVerificationFailureLocked(ctx context.Context, value *
 		}
 	}
 
-	journalError := m.makeJournalError("evaluator_verification", "", "", nil, &Error{Code: CodeVerificationFailed, Err: cause})
+	journalError := m.makeJournalError(value, "evaluator_verification", "", "", nil, &Error{Code: CodeVerificationFailed, Err: cause})
 	mutateFailure := func(journal *model.RemediationJournal) error {
 		for _, id := range requested {
 			changeSet, _, findErr := findChangeSet(journal, id)
@@ -104,6 +104,6 @@ func (m *Manager) rollbackVerificationFailureLocked(ctx context.Context, value *
 	if len(targets) == 0 {
 		return &Error{Code: CodeInvalidState, Operation: "rollback evaluator verification failure", RunID: runID, Err: fmt.Errorf("no rollback-eligible changes remain: %w", cause)}
 	}
-	_, err = m.executeRollback(ctx, value, scope, model.RollbackVerifyFailure, requested, targets, true)
+	_, err = m.executeRollback(ctx, value, scope, model.RollbackVerifyFailure, requested, targets, true, value.RemediationBuild)
 	return err
 }

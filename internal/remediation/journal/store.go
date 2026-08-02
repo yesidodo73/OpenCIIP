@@ -337,9 +337,9 @@ func (s *Store) Update(
 		return nil, wrap(CodeInvalidTransition, "update journal", runID, fmt.Errorf("mutation callback cannot change revision"))
 	}
 	next.Revision++
-	now := s.now().UTC()
-	if !now.After(loaded.journal.UpdatedAt) {
-		now = loaded.journal.UpdatedAt.Add(time.Nanosecond)
+	now, err := updatedAtAfterJournalEvents(s.now().UTC(), next)
+	if err != nil {
+		return nil, wrap(CodeInvalidInput, "update journal", runID, err)
 	}
 	next.UpdatedAt = now
 	if err := ValidateTransition(&loaded.journal, next); err != nil {
@@ -378,6 +378,21 @@ func (s *Store) Update(
 		}
 	}
 	return cloneJournal(next)
+}
+
+func updatedAtAfterJournalEvents(now time.Time, journal *model.RemediationJournal) (time.Time, error) {
+	if journal == nil {
+		return time.Time{}, fmt.Errorf("journal is required")
+	}
+	latestEvent := journal.LatestEventTime()
+	if now.After(latestEvent) {
+		return now, nil
+	}
+	next := latestEvent.Add(time.Nanosecond)
+	if !next.After(latestEvent) {
+		return time.Time{}, fmt.Errorf("journal event timestamp is exhausted")
+	}
+	return next, nil
 }
 
 func (s *Store) ListRecoverable(ctx context.Context) ([]model.RemediationJournal, error) {
@@ -542,7 +557,8 @@ func decodeAndValidateRecord(line []byte, runID string, previous WALRecord, inde
 	if !bytes.Equal(line, canonicalRecord) {
 		return WALRecord{}, wrap(CodeCorruptWAL, "validate WAL encoding", runID, fmt.Errorf("WAL record is not canonical JSON"))
 	}
-	if record.SchemaVersion != model.RemediationSchemaVersion || record.Journal.SchemaVersion != model.RemediationSchemaVersion {
+	if record.SchemaVersion != record.Journal.SchemaVersion ||
+		!model.IsSupportedRemediationSchemaVersion(record.SchemaVersion) {
 		return WALRecord{}, wrap(CodeUnsupportedSchema, "validate WAL record", runID, fmt.Errorf("unsupported schema version"))
 	}
 	if record.RunID != runID || record.Journal.RunID != runID {
@@ -586,7 +602,7 @@ func decodeAndValidateRecord(line []byte, runID string, previous WALRecord, inde
 
 func makeRecord(journal model.RemediationJournal, previousDigest string) (WALRecord, error) {
 	record := WALRecord{
-		SchemaVersion:  model.RemediationSchemaVersion,
+		SchemaVersion:  journal.SchemaVersion,
 		RunID:          journal.RunID,
 		Revision:       journal.Revision,
 		PreviousDigest: previousDigest,

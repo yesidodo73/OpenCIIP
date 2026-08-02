@@ -2,10 +2,12 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/yesidodo73/OpenCIIP/internal/exitcode"
@@ -275,8 +277,16 @@ func newRemediationRollbackCommand(stdout io.Writer, resultCode *int, parent *re
 			attempt, rollbackErr := service.RollbackItem(command.Context(), arguments[0], arguments[1], itemCascade, itemPreviewDigest)
 			outputErr := writeRollbackAttempt(stdout, attempt)
 			if rollbackErr != nil {
-				if outputErr != nil {
-					return remediationFailure("항목 롤백과 결과 출력에 실패했습니다", fmt.Errorf("%v; 출력 오류: %w", rollbackErr, outputErr))
+				statusContext, cancelStatus := context.WithTimeout(context.WithoutCancel(command.Context()), 10*time.Second)
+				inspection, loadErr := service.Inspect(statusContext, arguments[0])
+				cancelStatus()
+				current := inspection.Journal
+				if loadErr == nil && inspection.IncompleteWALTail {
+					loadErr = fmt.Errorf("journal has an incomplete WAL tail")
+				}
+				statusErr := writeRollbackFailureStatus(stdout, arguments[0], rollbackErr, current, loadErr)
+				if combinedOutputErr := errors.Join(outputErr, statusErr); combinedOutputErr != nil {
+					return remediationFailure("항목 롤백과 결과 출력에 실패했습니다", fmt.Errorf("%v; 출력 오류: %w", rollbackErr, combinedOutputErr))
 				}
 				return remediationFailure("항목 롤백을 완료하지 못했습니다", rollbackErr)
 			}
@@ -308,8 +318,16 @@ func newRemediationRollbackCommand(stdout io.Writer, resultCode *int, parent *re
 			attempt, rollbackErr := service.RollbackRun(command.Context(), arguments[0], runPreviewDigest)
 			outputErr := writeRollbackAttempt(stdout, attempt)
 			if rollbackErr != nil {
-				if outputErr != nil {
-					return remediationFailure("실행 전체 롤백과 결과 출력에 실패했습니다", fmt.Errorf("%v; 출력 오류: %w", rollbackErr, outputErr))
+				statusContext, cancelStatus := context.WithTimeout(context.WithoutCancel(command.Context()), 10*time.Second)
+				inspection, loadErr := service.Inspect(statusContext, arguments[0])
+				cancelStatus()
+				current := inspection.Journal
+				if loadErr == nil && inspection.IncompleteWALTail {
+					loadErr = fmt.Errorf("journal has an incomplete WAL tail")
+				}
+				statusErr := writeRollbackFailureStatus(stdout, arguments[0], rollbackErr, current, loadErr)
+				if combinedOutputErr := errors.Join(outputErr, statusErr); combinedOutputErr != nil {
+					return remediationFailure("실행 전체 롤백과 결과 출력에 실패했습니다", fmt.Errorf("%v; 출력 오류: %w", rollbackErr, combinedOutputErr))
 				}
 				return remediationFailure("실행 전체 롤백을 완료하지 못했습니다", rollbackErr)
 			}
@@ -451,6 +469,112 @@ func writeRollbackAttempt(output io.Writer, attempt model.RollbackAttempt) error
 		}
 	}
 	return nil
+}
+
+func writeRollbackFailureStatus(
+	output io.Writer,
+	runID string,
+	rollbackErr error,
+	current *model.RemediationJournal,
+	loadErr error,
+) error {
+	switch {
+	case current == nil:
+		if _, err := fmt.Fprintln(output, "현재 저널 상태: 확인 실패"); err != nil {
+			return err
+		}
+	default:
+		if _, err := fmt.Fprintf(output, "현재 저널 상태: %s\n현재 revision: %d\n", current.State, current.Revision); err != nil {
+			return err
+		}
+	}
+	if rollbackPreviewCanBeRefreshed(rollbackErr, current, loadErr) {
+		return writeRollbackPreviewStaleStatus(output, runID, rollbackErr)
+	}
+	if rollbackJournalFinalized(current, loadErr) {
+		_, err := fmt.Fprintln(output, "최종 저널 상태가 이미 영속화되었습니다. 동일한 롤백 명령을 다시 실행하지 마세요.")
+		return err
+	}
+	if !rollbackRecoveryGuidanceRequired(rollbackErr, current, loadErr) {
+		return nil
+	}
+	reason := "롤백 실행이 복구 또는 재시도가 필요한 상태입니다."
+	if rollbackEffectUncertain(rollbackErr, current, loadErr) {
+		reason = "이 롤백의 실제 변경 여부를 현재 결과만으로 확정할 수 없습니다."
+	}
+	if _, err := fmt.Fprintln(output, reason); err != nil {
+		return err
+	}
+	_, err := fmt.Fprintf(
+		output,
+		"다음 명령으로 저널과 실제 파일 상태를 먼저 정합화하세요.\n"+
+			"openciip remediate recover %s --yes\n"+
+			"recover는 새 롤백을 실행하지 않습니다. 복구 결과를 확인한 뒤 필요한 롤백을 다시 미리보기하고 승인하세요.\n",
+		runID,
+	)
+	return err
+}
+
+func writeRollbackPreviewStaleStatus(output io.Writer, runID string, rollbackErr error) error {
+	if _, err := fmt.Fprintln(output, "승인한 롤백 미리보기가 현재 revision과 일치하지 않습니다. 새 미리보기에서 preview digest를 다시 생성하세요."); err != nil {
+		return err
+	}
+	var structured *orchestrator.Error
+	if errors.As(rollbackErr, &structured) && structured.ChangeSetID != "" {
+		_, err := fmt.Fprintf(output, "openciip remediate rollback preview item %s %s\n", runID, structured.ChangeSetID)
+		return err
+	}
+	_, err := fmt.Fprintf(output, "openciip remediate rollback preview run %s\n", runID)
+	return err
+}
+
+func rollbackPreviewCanBeRefreshed(rollbackErr error, current *model.RemediationJournal, loadErr error) bool {
+	if orchestrator.CodeOf(rollbackErr) != orchestrator.CodeRollbackPreviewStale ||
+		loadErr != nil ||
+		current == nil {
+		return false
+	}
+	switch current.State {
+	case model.RunCompleted, model.RunCompletedWithRollbacks, model.RunFailed:
+		return true
+	default:
+		return false
+	}
+}
+
+func rollbackRecoveryGuidanceRequired(rollbackErr error, current *model.RemediationJournal, loadErr error) bool {
+	if rollbackJournalFinalized(current, loadErr) {
+		return false
+	}
+	if loadErr != nil || current == nil {
+		return true
+	}
+	if current.State == model.RunRollingBack || current.State.NeedsOperatorAction() {
+		return true
+	}
+	return rollbackEffectUncertain(rollbackErr, current, loadErr)
+}
+
+func rollbackEffectUncertain(rollbackErr error, current *model.RemediationJournal, loadErr error) bool {
+	if rollbackJournalFinalized(current, loadErr) {
+		return false
+	}
+	if loadErr != nil || current == nil ||
+		current.State == model.RunRollingBack ||
+		current.State == model.RunPartiallyRolledBack ||
+		current.State == model.RunRecoveryRequired {
+		return true
+	}
+	var orchestrationError *orchestrator.Error
+	return orchestrator.CodeOf(rollbackErr) == orchestrator.CodeRecoveryRequired ||
+		(errors.As(rollbackErr, &orchestrationError) && orchestrationError.Committed)
+}
+
+func rollbackJournalFinalized(current *model.RemediationJournal, loadErr error) bool {
+	return loadErr == nil &&
+		current != nil &&
+		current.State.Terminal() &&
+		!current.State.NeedsOperatorAction()
 }
 
 func writeStringList(output io.Writer, title string, values []string) error {

@@ -1,9 +1,11 @@
 package orchestrator
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -13,6 +15,285 @@ import (
 	journalpkg "github.com/yesidodo73/OpenCIIP/internal/remediation/journal"
 	"github.com/yesidodo73/OpenCIIP/internal/remediation/regularfile"
 )
+
+func TestValidatePlanRequestRequiresMatchingScanExecutableIdentity(t *testing.T) {
+	t.Parallel()
+
+	digest := strings.Repeat("6", 64)
+	base := PlanRequest{
+		ScanRunID:                "scan-plan-contract",
+		ScanToolVersion:          "0.1.0-alpha.36",
+		ScanToolCommit:           "commit-plan-contract",
+		ScanToolExecutableSHA256: digest,
+		RuleSetVersion:           "sha256:" + strings.Repeat("5", 64),
+		Platform: model.PlatformInfo{
+			ScanSupport:        model.ScanSupportTested,
+			RemediationSupport: model.RemediationSupportVerified,
+		},
+		RemediationBuild: model.RemediationBuildIdentity{
+			Version:          "0.1.0-alpha.36",
+			Commit:           "commit-plan-contract",
+			ExecutableSHA256: digest,
+		},
+		FailurePolicy: model.FailureRollbackItem,
+		ChangeSets:    []model.ChangeSet{{ID: "change-plan-contract"}},
+	}
+	if err := validatePlanRequest(base); err != nil {
+		t.Fatalf("validatePlanRequest() error = %v", err)
+	}
+
+	tests := []struct {
+		name   string
+		mutate func(*PlanRequest)
+	}{
+		{
+			name: "legacy schema",
+			mutate: func(request *PlanRequest) {
+				request.SchemaVersion = 2
+			},
+		},
+		{
+			name: "missing digest",
+			mutate: func(request *PlanRequest) {
+				request.ScanToolExecutableSHA256 = ""
+			},
+		},
+		{
+			name: "different digest",
+			mutate: func(request *PlanRequest) {
+				request.ScanToolExecutableSHA256 = strings.Repeat("9", 64)
+			},
+		},
+		{
+			name: "different version",
+			mutate: func(request *PlanRequest) {
+				request.ScanToolVersion = "0.1.0-alpha.35"
+			},
+		},
+		{
+			name: "different commit",
+			mutate: func(request *PlanRequest) {
+				request.ScanToolCommit = "different-commit"
+			},
+		},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			request := base
+			test.mutate(&request)
+			if err := validatePlanRequest(request); err == nil {
+				t.Fatal("validatePlanRequest() error = nil, want rejection")
+			}
+		})
+	}
+}
+
+func TestPlanDigestBindsScanExecutableIdentityAndPreservesLegacyShape(t *testing.T) {
+	t.Parallel()
+
+	value := faultJournalSkeleton(1, false)
+	request := PlanRequest{
+		ScanRunID:                value.ScanRunID,
+		ScanToolVersion:          value.ScanToolVersion,
+		ScanToolCommit:           value.ScanToolCommit,
+		ScanToolExecutableSHA256: value.ScanToolExecutableSHA256,
+		RuleSetVersion:           value.RuleSetVersion,
+		Platform:                 value.Platform,
+		RemediationBuild:         value.RemediationBuild,
+		FailurePolicy:            value.FailurePolicy,
+	}
+	first, err := digestPlan(value.RunID, request, value.Host, value.ChangeSets, value.ConflictGraph)
+	if err != nil {
+		t.Fatalf("digestPlan() error = %v", err)
+	}
+	request.ScanToolExecutableSHA256 = strings.Repeat("9", 64)
+	request.RemediationBuild.ExecutableSHA256 = strings.Repeat("9", 64)
+	second, err := digestPlan(value.RunID, request, value.Host, value.ChangeSets, value.ConflictGraph)
+	if err != nil {
+		t.Fatalf("digestPlan(changed identity) error = %v", err)
+	}
+	if first == second {
+		t.Fatal("plan digest did not bind the scan executable identity")
+	}
+
+	legacyRequest := PlanRequest{
+		SchemaVersion:    2,
+		ScanRunID:        value.ScanRunID,
+		ScanToolVersion:  value.ScanToolVersion,
+		ScanToolCommit:   value.ScanToolCommit,
+		RuleSetVersion:   value.RuleSetVersion,
+		Platform:         value.Platform,
+		RemediationBuild: value.RemediationBuild,
+		FailurePolicy:    value.FailurePolicy,
+	}
+	legacyDigest, err := digestPlan(value.RunID, legacyRequest, value.Host, nil, model.ConflictGraph{})
+	if err != nil {
+		t.Fatalf("digestPlan(legacy) error = %v", err)
+	}
+	legacyExpected, err := journalpkg.Digest(struct {
+		SchemaVersion    int                            `json:"schema_version"`
+		RunID            string                         `json:"run_id"`
+		ScanRunID        string                         `json:"scan_run_id"`
+		ScanToolVersion  string                         `json:"scan_tool_version"`
+		ScanToolCommit   string                         `json:"scan_tool_commit"`
+		RuleSetVersion   string                         `json:"rule_set_version"`
+		Platform         model.PlatformInfo             `json:"platform"`
+		RemediationBuild model.RemediationBuildIdentity `json:"remediation_build"`
+		FailurePolicy    model.FailurePolicy            `json:"failure_policy"`
+		Host             model.HostIdentity             `json:"host"`
+		ChangeSets       []planChangeSet                `json:"change_sets"`
+		ConflictGraph    model.ConflictGraph            `json:"conflict_graph"`
+	}{
+		SchemaVersion:    2,
+		RunID:            value.RunID,
+		ScanRunID:        value.ScanRunID,
+		ScanToolVersion:  value.ScanToolVersion,
+		ScanToolCommit:   value.ScanToolCommit,
+		RuleSetVersion:   value.RuleSetVersion,
+		Platform:         value.Platform,
+		RemediationBuild: value.RemediationBuild,
+		FailurePolicy:    value.FailurePolicy,
+		Host:             value.Host,
+		ChangeSets:       []planChangeSet{},
+		ConflictGraph:    model.ConflictGraph{},
+	})
+	if err != nil {
+		t.Fatalf("Digest(legacy shape) error = %v", err)
+	}
+	if legacyDigest != legacyExpected {
+		t.Fatalf("legacy digest = %q, want old-shape digest %q", legacyDigest, legacyExpected)
+	}
+
+	legacyPayload, err := journalpkg.CanonicalJSON(planPayload{
+		SchemaVersion:   2,
+		RunID:           value.RunID,
+		ScanRunID:       value.ScanRunID,
+		ScanToolVersion: value.ScanToolVersion,
+		ScanToolCommit:  value.ScanToolCommit,
+	})
+	if err != nil {
+		t.Fatalf("CanonicalJSON(legacy payload) error = %v", err)
+	}
+	if bytes.Contains(legacyPayload, []byte("scan_tool_executable_sha256")) {
+		t.Fatalf("legacy payload unexpectedly contains the v3 field: %s", legacyPayload)
+	}
+}
+
+func TestLegacyPlanCanLoadAndCancelButCannotBeApproved(t *testing.T) {
+	value := faultJournalSkeleton(1, false)
+	value.SchemaVersion = 2
+	value.ScanToolExecutableSHA256 = ""
+	faultSealJournal(t, value)
+	harness := newFaultStoreHarness(t, value)
+	content := &faultContentStore{}
+	manager := newFaultManagerWithContent(t, harness, nil, content, nil)
+
+	if _, err := manager.loadAndVerifyReadOnly(context.Background(), value.RunID); err != nil {
+		t.Fatalf("loadAndVerifyReadOnly(legacy) error = %v", err)
+	}
+	approval := model.Approval{
+		Source:     "legacy-contract-test",
+		PlanDigest: value.PlanDigest,
+		ApprovedAt: faultBaseTime().Add(time.Minute),
+	}
+	if err := manager.Approve(context.Background(), value.RunID, approval); CodeOf(err) != CodeUnsupportedOperation {
+		t.Fatalf("Approve(legacy) error = %v, want %s", err, CodeUnsupportedOperation)
+	}
+	if err := manager.Cancel(context.Background(), value.RunID); err != nil {
+		t.Fatalf("Cancel(legacy) error = %v", err)
+	}
+	if harness.state.State != model.RunCanceled || harness.state.SchemaVersion != 2 {
+		t.Fatalf("legacy cancellation state = %s schema=%d, want canceled schema 2", harness.state.State, harness.state.SchemaVersion)
+	}
+	if !reflect.DeepEqual(content.deleted, []string{value.RunID}) {
+		t.Fatalf("deleted content runs = %v, want [%s]", content.deleted, value.RunID)
+	}
+}
+
+func TestLegacyApprovedPlanCannotBypassApplyGuard(t *testing.T) {
+	value := faultJournalSkeleton(1, false)
+	value.SchemaVersion = 2
+	value.ScanToolExecutableSHA256 = ""
+	faultSealJournal(t, value)
+	value.State = model.RunApproved
+	approval := model.Approval{
+		Source:     "legacy-contract-test",
+		PlanDigest: value.PlanDigest,
+		ApprovedAt: faultBaseTime().Add(time.Minute),
+	}
+	for index := range value.ChangeSets {
+		copy := approval
+		value.ChangeSets[index].Approval = &copy
+	}
+	if err := value.Validate(); err != nil {
+		t.Fatalf("legacy approved journal Validate() error = %v", err)
+	}
+	harness := newFaultStoreHarness(t, value)
+	manager := newFaultManager(t, harness, nil, nil)
+	runGuardCalled := false
+	effectGuardCalled := false
+	err := manager.ApplyWithVerifier(
+		context.Background(),
+		value.RunID,
+		func(context.Context, *model.RemediationJournal) error {
+			runGuardCalled = true
+			return nil
+		},
+		func(context.Context, *model.RemediationJournal, string, string) error {
+			effectGuardCalled = true
+			return nil
+		},
+		func(context.Context, *model.RemediationJournal, []string) ([]string, error) {
+			t.Fatal("verifier was called for a legacy plan")
+			return nil, nil
+		},
+	)
+	if CodeOf(err) != CodeUnsupportedOperation {
+		t.Fatalf("ApplyWithVerifier(legacy) error = %v, want %s", err, CodeUnsupportedOperation)
+	}
+	if runGuardCalled || effectGuardCalled {
+		t.Fatal("caller guards were invoked before the manager rejected a legacy plan")
+	}
+	if faultUpdateCallCount(harness.storeCalls) != 0 {
+		t.Fatalf("legacy apply wrote journal state: %v", harness.storeCalls)
+	}
+}
+
+func TestApplyWithVerifierRequiresRunEffectAndVerificationCallbacks(t *testing.T) {
+	t.Parallel()
+
+	runGuard := func(context.Context, *model.RemediationJournal) error { return nil }
+	effectGuard := func(context.Context, *model.RemediationJournal, string, string) error { return nil }
+	verifier := func(context.Context, *model.RemediationJournal, []string) ([]string, error) { return nil, nil }
+	tests := []struct {
+		name        string
+		runGuard    ApplyRunGuard
+		effectGuard ApplyEffectGuard
+		verifier    ApplyVerifier
+	}{
+		{name: "missing run guard", effectGuard: effectGuard, verifier: verifier},
+		{name: "missing effect guard", runGuard: runGuard, verifier: verifier},
+		{name: "missing verifier", runGuard: runGuard, effectGuard: effectGuard},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			err := (&Manager{}).ApplyWithVerifier(
+				context.Background(),
+				"run-callback-contract",
+				test.runGuard,
+				test.effectGuard,
+				test.verifier,
+			)
+			if CodeOf(err) != CodeInvalidInput {
+				t.Fatalf("ApplyWithVerifier() error = %v, want %s", err, CodeInvalidInput)
+			}
+		})
+	}
+}
 
 func TestApplyOperationPersistsVerifiedBackupAndIntentBeforeSideEffect(t *testing.T) {
 	value := faultPlannedJournal(t)
@@ -55,7 +336,17 @@ func TestApplyOperationPersistsVerifiedBackupAndIntentBeforeSideEffect(t *testin
 	if err != nil {
 		t.Fatalf("start change-set apply Update() error = %v", err)
 	}
-	applied, err := manager.applyOperation(context.Background(), applying, runtime, "change-a", "operation-a")
+	applied, err := manager.applyOperation(
+		context.Background(),
+		applying,
+		runtime,
+		func(_ context.Context, _ *model.RemediationJournal, changeSetID, operationID string) error {
+			harness.events = append(harness.events, "guard:"+changeSetID+"/"+operationID)
+			return nil
+		},
+		"change-a",
+		"operation-a",
+	)
 	if err != nil {
 		t.Fatalf("applyOperation() error = %v", err)
 	}
@@ -79,6 +370,7 @@ func TestApplyOperationPersistsVerifiedBackupAndIntentBeforeSideEffect(t *testin
 		"store:update:change_applying",
 		"runtime:capture",
 		"runtime:verify_backup",
+		"guard:change-a/operation-a",
 		"store:update:apply_intent",
 		"runtime:apply",
 		"runtime:capture",
@@ -120,7 +412,17 @@ func TestApplyOperationDoesNotMutateWhenIntentUpdateFails(t *testing.T) {
 	manager := newFaultManager(t, harness, runtime, nil)
 
 	current := harness.state
-	next, err := manager.applyOperation(context.Background(), current, runtime, "change-a", "operation-a")
+	next, err := manager.applyOperation(
+		context.Background(),
+		current,
+		runtime,
+		func(context.Context, *model.RemediationJournal, string, string) error {
+			harness.events = append(harness.events, "guard:effect")
+			return nil
+		},
+		"change-a",
+		"operation-a",
+	)
 	if CodeOf(err) != CodePersistFailed {
 		t.Fatalf("applyOperation() error = %v, want %s", err, CodePersistFailed)
 	}
@@ -137,7 +439,64 @@ func TestApplyOperationDoesNotMutateWhenIntentUpdateFails(t *testing.T) {
 	if operation.State != model.OperationPlanned || operation.ApplyIntentAt != nil {
 		t.Fatalf("durable state changed after rejected intent update: %#v", operation)
 	}
-	if want := []string{"runtime:capture", "runtime:verify_backup", "store:update:apply_intent"}; !reflect.DeepEqual(harness.events, want) {
+	if want := []string{"runtime:capture", "runtime:verify_backup", "guard:effect", "store:update:apply_intent"}; !reflect.DeepEqual(harness.events, want) {
+		t.Fatalf("events = %v, want %v", harness.events, want)
+	}
+}
+
+func TestApplyOperationDoesNotPersistIntentOrMutateWhenEffectGuardFails(t *testing.T) {
+	value := faultPreparedJournal(t)
+	harness := newFaultStoreHarness(t, value)
+	before := value.ChangeSets[0].Operations[0].Before
+	runtime := &scriptedFileRuntime{
+		capture: func(context.Context, model.CanonicalResource) (model.ResourceSnapshot, error) {
+			harness.events = append(harness.events, "runtime:capture")
+			return before, nil
+		},
+		verifyBackup: func(context.Context, model.BackupArtifact) error {
+			harness.events = append(harness.events, "runtime:verify_backup")
+			return nil
+		},
+		applyMetadata: func(context.Context, model.CanonicalResource, model.ResourceSnapshot, model.ResourceSnapshot) (model.ResourceSnapshot, error) {
+			t.Fatal("ApplyMetadata() was called after the fresh effect guard failed")
+			return model.ResourceSnapshot{}, nil
+		},
+	}
+	manager := newFaultManager(t, harness, runtime, nil)
+	guardErr := errors.New("fresh evaluator is no longer FAIL")
+
+	current := harness.state
+	next, err := manager.applyOperation(
+		context.Background(),
+		current,
+		runtime,
+		func(_ context.Context, journal *model.RemediationJournal, changeSetID, operationID string) error {
+			harness.events = append(harness.events, "guard:"+changeSetID+"/"+operationID)
+			operation, _, _, findErr := findOperation(journal, changeSetID, operationID)
+			if findErr != nil {
+				return findErr
+			}
+			if operation.ApplyIntentAt != nil || operation.Backup == nil || operation.Before.IsZero() {
+				return fmt.Errorf("effect guard did not observe a prepared pre-intent operation")
+			}
+			return guardErr
+		},
+		"change-a",
+		"operation-a",
+	)
+	if CodeOf(err) != CodePreconditionFailed || !errors.Is(err, guardErr) {
+		t.Fatalf("applyOperation() error = %v, want %s wrapping guard failure", err, CodePreconditionFailed)
+	}
+	if next != current {
+		t.Fatal("applyOperation() replaced the caller's journal after a rejected effect gate")
+	}
+	if len(runtime.mutationCalls) != 0 {
+		t.Fatalf("mutation calls = %v, want none", runtime.mutationCalls)
+	}
+	if len(harness.storeCalls) != 0 {
+		t.Fatalf("journal writes = %v, want none after effect guard failure", harness.storeCalls)
+	}
+	if want := []string{"runtime:capture", "runtime:verify_backup", "guard:change-a/operation-a"}; !reflect.DeepEqual(harness.events, want) {
 		t.Fatalf("events = %v, want %v", harness.events, want)
 	}
 }
@@ -177,7 +536,17 @@ func TestCommittedApplyErrorWithAmbiguousObservationRequiresRecovery(t *testing.
 	}
 	manager := newFaultManager(t, harness, runtime, nil)
 
-	next, err := manager.applyOperation(context.Background(), harness.state, runtime, "change-a", "operation-a")
+	next, err := manager.applyOperation(
+		context.Background(),
+		harness.state,
+		runtime,
+		func(context.Context, *model.RemediationJournal, string, string) error {
+			harness.events = append(harness.events, "guard:effect")
+			return nil
+		},
+		"change-a",
+		"operation-a",
+	)
 	if CodeOf(err) != CodeRecoveryRequired {
 		t.Fatalf("applyOperation() error = %v, want %s", err, CodeRecoveryRequired)
 	}
@@ -207,6 +576,7 @@ func TestCommittedApplyErrorWithAmbiguousObservationRequiresRecovery(t *testing.
 	if want := []string{
 		"runtime:capture",
 		"runtime:verify_backup",
+		"guard:effect",
 		"store:update:apply_intent",
 		"runtime:apply",
 		"runtime:capture",
@@ -317,7 +687,7 @@ func TestRollbackItemRejectsStaleDigestAndUnapprovedCascadeBeforeRestore(t *test
 		}
 		manager := newFaultManager(t, harness, runtime, nil)
 
-		_, err := manager.RollbackItem(context.Background(), value.RunID, "change-a", false, strings.Repeat("0", 64))
+		_, err := manager.RollbackItem(context.Background(), value.RunID, "change-a", false, strings.Repeat("0", 64), faultUserRollbackBuild())
 		if CodeOf(err) != CodeRollbackPreviewStale {
 			t.Fatalf("RollbackItem() error = %v, want %s", err, CodeRollbackPreviewStale)
 		}
@@ -344,7 +714,7 @@ func TestRollbackItemRejectsStaleDigestAndUnapprovedCascadeBeforeRestore(t *test
 			t.Fatalf("cascade preview = required:%t expanded:%v", preview.CascadeRequired, preview.ExpandedChangeSets)
 		}
 
-		_, err = manager.RollbackItem(context.Background(), value.RunID, "change-a", false, preview.PreviewDigest)
+		_, err = manager.RollbackItem(context.Background(), value.RunID, "change-a", false, preview.PreviewDigest, faultUserRollbackBuild())
 		if CodeOf(err) != CodeCascadeRequired {
 			t.Fatalf("RollbackItem() error = %v, want %s", err, CodeCascadeRequired)
 		}
@@ -363,6 +733,19 @@ type faultStoreHarness struct {
 	rejectUpdate      func(string, *model.RemediationJournal) error
 	lastCandidate     *model.RemediationJournal
 	rejectedCandidate *model.RemediationJournal
+}
+
+type faultContentStore struct {
+	deleted []string
+}
+
+func (*faultContentStore) Content(context.Context, string, string, string) ([]byte, error) {
+	return nil, nil
+}
+
+func (store *faultContentStore) DeleteRunContent(_ context.Context, runID string) error {
+	store.deleted = append(store.deleted, runID)
+	return nil
 }
 
 func newFaultStoreHarness(t *testing.T, value *model.RemediationJournal) *faultStoreHarness {
@@ -405,7 +788,12 @@ func newFaultStoreHarness(t *testing.T, value *model.RemediationJournal) *faultS
 			return nil, err
 		}
 		candidate.Revision = harness.state.Revision + 1
-		candidate.UpdatedAt = harness.state.UpdatedAt.Add(time.Second)
+		updatedAt := harness.state.UpdatedAt.Add(time.Second)
+		latestEvent := candidate.LatestEventTime()
+		if !updatedAt.After(latestEvent) {
+			updatedAt = latestEvent.Add(time.Nanosecond)
+		}
+		candidate.UpdatedAt = updatedAt
 		label := faultUpdateLabel(harness.state, candidate)
 		harness.storeCalls = append(harness.storeCalls, "update:"+label)
 		harness.events = append(harness.events, "store:update:"+label)
@@ -426,6 +814,16 @@ func newFaultStoreHarness(t *testing.T, value *model.RemediationJournal) *faultS
 }
 
 func newFaultManager(t *testing.T, harness *faultStoreHarness, runtime fileRuntime, idValues []string) *Manager {
+	return newFaultManagerWithContent(t, harness, runtime, nil, idValues)
+}
+
+func newFaultManagerWithContent(
+	t *testing.T,
+	harness *faultStoreHarness,
+	runtime fileRuntime,
+	content FileContentSource,
+	idValues []string,
+) *Manager {
 	t.Helper()
 	if len(idValues) == 0 {
 		idValues = []string{"unused"}
@@ -434,7 +832,7 @@ func newFaultManager(t *testing.T, harness *faultStoreHarness, runtime fileRunti
 	manager, err := newWithDependencies(
 		harness.store,
 		t.TempDir(),
-		nil,
+		content,
 		managerDependencies{
 			fileFactory: func(string, string) (fileRuntime, error) { return runtime, nil },
 			host:        scriptedHostCollector{identity: harness.state.Host},
@@ -452,6 +850,16 @@ func newFaultManager(t *testing.T, harness *faultStoreHarness, runtime fileRunti
 func faultUpdateLabel(previous, next *model.RemediationJournal) string {
 	if len(next.RollbackAttempts) > len(previous.RollbackAttempts) {
 		return "rollback_attempt"
+	}
+	if len(next.RollbackAttempts) > 0 &&
+		len(next.RollbackAttempts) == len(previous.RollbackAttempts) {
+		previousAttempt := previous.RollbackAttempts[len(previous.RollbackAttempts)-1]
+		nextAttempt := next.RollbackAttempts[len(next.RollbackAttempts)-1]
+		if previousAttempt.ID == nextAttempt.ID &&
+			previousAttempt.ObservedByBuild == nil &&
+			nextAttempt.ObservedByBuild != nil {
+			return "recovery_observer_claim"
+		}
 	}
 	for _, nextChangeSet := range next.ChangeSets {
 		previousChangeSet, _, err := findChangeSet(previous, nextChangeSet.ID)
@@ -550,13 +958,14 @@ func faultVerifiedJournal(t *testing.T, count int, cascade bool, policy model.Fa
 func faultJournalSkeleton(count int, cascade bool) *model.RemediationJournal {
 	startedAt := faultBaseTime()
 	value := &model.RemediationJournal{
-		SchemaVersion:   model.RemediationSchemaVersion,
-		Revision:        7,
-		RunID:           "run-fault-injection",
-		ScanRunID:       "scan-fault-injection",
-		ScanToolVersion: "1.0.0",
-		ScanToolCommit:  "commit-fault-injection",
-		RuleSetVersion:  "sha256:" + strings.Repeat("5", 64),
+		SchemaVersion:            model.RemediationSchemaVersion,
+		Revision:                 7,
+		RunID:                    "run-fault-injection",
+		ScanRunID:                "scan-fault-injection",
+		ScanToolVersion:          "1.0.0",
+		ScanToolCommit:           "commit-fault-injection",
+		ScanToolExecutableSHA256: strings.Repeat("6", 64),
+		RuleSetVersion:           "sha256:" + strings.Repeat("5", 64),
 		Platform: model.PlatformInfo{
 			OS:                 "linux",
 			Family:             "rhel",
@@ -665,14 +1074,35 @@ func faultPlannedChangeSet(index int) model.ChangeSet {
 
 func faultSealJournal(t *testing.T, value *model.RemediationJournal) {
 	t.Helper()
+	if value.SchemaVersion == model.RemediationSchemaVersion {
+		for index := range value.RollbackAttempts {
+			attempt := &value.RollbackAttempts[index]
+			if attempt.Trigger == model.RollbackCrashRecovery {
+				if attempt.ObservedByBuild == nil {
+					observer := faultRecoveryObserverBuild()
+					attempt.ObservedByBuild = &observer
+				}
+				continue
+			}
+			if attempt.ExecutorBuild == nil {
+				executor := value.RemediationBuild
+				if attempt.Trigger == model.RollbackUserRequest {
+					executor = faultUserRollbackBuild()
+				}
+				attempt.ExecutorBuild = &executor
+			}
+		}
+	}
 	digest, err := digestPlan(value.RunID, PlanRequest{
-		ScanRunID:        value.ScanRunID,
-		ScanToolVersion:  value.ScanToolVersion,
-		ScanToolCommit:   value.ScanToolCommit,
-		RuleSetVersion:   value.RuleSetVersion,
-		Platform:         value.Platform,
-		RemediationBuild: value.RemediationBuild,
-		FailurePolicy:    value.FailurePolicy,
+		SchemaVersion:            value.SchemaVersion,
+		ScanRunID:                value.ScanRunID,
+		ScanToolVersion:          value.ScanToolVersion,
+		ScanToolCommit:           value.ScanToolCommit,
+		ScanToolExecutableSHA256: value.ScanToolExecutableSHA256,
+		RuleSetVersion:           value.RuleSetVersion,
+		Platform:                 value.Platform,
+		RemediationBuild:         value.RemediationBuild,
+		FailurePolicy:            value.FailurePolicy,
 	}, value.Host, value.ChangeSets, value.ConflictGraph)
 	if err != nil {
 		t.Fatalf("digestPlan() error = %v", err)
@@ -761,4 +1191,21 @@ func faultUpdateCallCount(calls []string) int {
 
 func faultBaseTime() time.Time {
 	return time.Date(2026, time.July, 11, 10, 0, 0, 0, time.UTC)
+}
+
+func faultUserRollbackBuild() model.RemediationBuildIdentity {
+	return model.RemediationBuildIdentity{
+		Version:          "1.0.0",
+		Commit:           strings.Repeat("a", 40),
+		ExecutableSHA256: strings.Repeat("b", 64),
+	}
+}
+
+func faultRecoveryObserverBuild() model.RemediationBuildIdentity {
+	return model.RemediationBuildIdentity{
+		Version:          "0.1.0-alpha.39",
+		Commit:           "recovery-observer-fixture",
+		ExecutableSHA256: strings.Repeat("c", 64),
+		Modified:         true,
+	}
 }

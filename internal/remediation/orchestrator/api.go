@@ -93,16 +93,18 @@ func CodeOf(err error) ErrorCode {
 }
 
 type PlanRequest struct {
-	RunID            string
-	ScanRunID        string
-	ScanToolVersion  string
-	ScanToolCommit   string
-	RuleSetVersion   string
-	Platform         model.PlatformInfo
-	RemediationBuild model.RemediationBuildIdentity
-	FailurePolicy    model.FailurePolicy
-	Host             model.HostIdentity
-	ChangeSets       []model.ChangeSet
+	SchemaVersion            int
+	RunID                    string
+	ScanRunID                string
+	ScanToolVersion          string
+	ScanToolCommit           string
+	ScanToolExecutableSHA256 string
+	RuleSetVersion           string
+	Platform                 model.PlatformInfo
+	RemediationBuild         model.RemediationBuildIdentity
+	FailurePolicy            model.FailurePolicy
+	Host                     model.HostIdentity
+	ChangeSets               []model.ChangeSet
 }
 
 type RecoveryAssessment struct {
@@ -127,7 +129,8 @@ type RollbackPreview struct {
 	PreviewDigest       string
 }
 
-type ApplyGuard func(ctx context.Context, journal *model.RemediationJournal) error
+type ApplyRunGuard func(ctx context.Context, journal *model.RemediationJournal) error
+type ApplyEffectGuard func(ctx context.Context, journal *model.RemediationJournal, changeSetID, operationID string) error
 type ApplyVerifier func(ctx context.Context, journal *model.RemediationJournal, changeSetIDs []string) (failedChangeSets []string, err error)
 
 type FileContentSource interface {
@@ -161,12 +164,12 @@ type RemediationManager interface {
 	Plan(ctx context.Context, request PlanRequest) (*model.RemediationJournal, error)
 	Approve(ctx context.Context, runID string, approval model.Approval) error
 	Cancel(ctx context.Context, runID string) error
-	ApplyWithVerifier(ctx context.Context, runID string, guard ApplyGuard, verifier ApplyVerifier) error
+	ApplyWithVerifier(ctx context.Context, runID string, runGuard ApplyRunGuard, effectGuard ApplyEffectGuard, verifier ApplyVerifier) error
 	PreviewRollbackItem(ctx context.Context, runID, changeSetID string) (RollbackPreview, error)
-	RollbackItem(ctx context.Context, runID, changeSetID string, cascadeApproved bool, previewDigest string) (model.RollbackAttempt, error)
+	RollbackItem(ctx context.Context, runID, changeSetID string, cascadeApproved bool, previewDigest string, executorBuild model.RemediationBuildIdentity) (model.RollbackAttempt, error)
 	PreviewRollbackRun(ctx context.Context, runID string) (RollbackPreview, error)
-	RollbackRun(ctx context.Context, runID, previewDigest string) (model.RollbackAttempt, error)
-	Recover(ctx context.Context, runID string) (RecoveryAssessment, error)
+	RollbackRun(ctx context.Context, runID, previewDigest string, executorBuild model.RemediationBuildIdentity) (model.RollbackAttempt, error)
+	Recover(ctx context.Context, runID string, observedByBuild model.RemediationBuildIdentity) (RecoveryAssessment, error)
 }
 
 type Manager struct {
@@ -245,4 +248,16 @@ func newWithDependencies(store JournalStore, systemRoot string, content FileCont
 
 func (m *Manager) nowUTC() time.Time {
 	return m.now().UTC()
+}
+
+func (m *Manager) nextEventTime(value *model.RemediationJournal) time.Time {
+	now := m.nowUTC()
+	if value == nil {
+		return now
+	}
+	latest := value.LatestEventTime()
+	if now.After(latest) {
+		return now
+	}
+	return latest.Add(time.Nanosecond)
 }

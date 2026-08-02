@@ -71,6 +71,31 @@ func TestDestructiveCommandsRequireExplicitConfirmationBeforeOpeningState(t *tes
 	}
 }
 
+func TestExecuteProtectsFinalErrorOutput(t *testing.T) {
+	t.Parallel()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Execute(
+		context.Background(),
+		[]string{"password=cli-secret\x1b[2J\u202e"},
+		strings.NewReader(""),
+		&stdout,
+		&stderr,
+	)
+	if code != exitcode.Usage {
+		t.Fatalf("Execute() code = %d, want %d", code, exitcode.Usage)
+	}
+	output := stderr.String()
+	if strings.Contains(output, "cli-secret") ||
+		strings.ContainsAny(output, "\x1b\u202e") {
+		t.Fatalf("final error output retained sensitive/control content: %q", output)
+	}
+	if !strings.Contains(output, "[REDACTED]") {
+		t.Fatalf("final error output = %q, want redaction marker", output)
+	}
+}
+
 func TestParseSelectionNormalizesSupportedFilters(t *testing.T) {
 	t.Parallel()
 

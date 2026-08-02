@@ -110,8 +110,12 @@ func readMountInfo() ([]mountRecord, error) {
 	}
 	defer file.Close()
 
+	return parseMountInfo(file)
+}
+
+func parseMountInfo(reader io.Reader) ([]mountRecord, error) {
 	var records []mountRecord
-	scanner := bufio.NewScanner(file)
+	scanner := bufio.NewScanner(reader)
 	scanner.Buffer(make([]byte, 64*1024), maxMountInfoLine)
 	for scanner.Scan() {
 		fields := strings.Fields(scanner.Text())
@@ -137,8 +141,11 @@ func readMountInfo() ([]mountRecord, error) {
 		if err != nil {
 			return nil, fmt.Errorf("decode mount source: %w", err)
 		}
-		if !filepath.IsAbs(root) || !filepath.IsAbs(mountPoint) {
-			return nil, errors.New("mountinfo contains a non-absolute root or mount point")
+		if !filepath.IsAbs(mountPoint) {
+			return nil, errors.New("mountinfo contains a non-absolute mount point")
+		}
+		if !filepath.IsAbs(root) && !validOpaqueMountRoot(fields[separator+1], source, root) {
+			return nil, errors.New("mountinfo contains an invalid non-path root")
 		}
 		deviceMajor, deviceMinor, err := parseDeviceNumber(fields[2])
 		if err != nil {
@@ -160,6 +167,40 @@ func readMountInfo() ([]mountRecord, error) {
 		return nil, errors.New("/proc/self/mountinfo is empty")
 	}
 	return records, nil
+}
+
+func validOpaqueMountRoot(fsType, source, root string) bool {
+	if fsType != "nsfs" || source != "nsfs" {
+		return false
+	}
+	separator := strings.IndexByte(root, ':')
+	if separator <= 0 || !supportedNSFSNamespace(root[:separator]) {
+		return false
+	}
+	value := root[separator+1:]
+	if len(value) < 3 || value[0] != '[' || value[len(value)-1] != ']' {
+		return false
+	}
+	inode := value[1 : len(value)-1]
+	if inode == "" || inode[0] == '0' {
+		return false
+	}
+	for index := range inode {
+		if inode[index] < '0' || inode[index] > '9' {
+			return false
+		}
+	}
+	number, err := strconv.ParseUint(inode, 10, 64)
+	return err == nil && number != 0
+}
+
+func supportedNSFSNamespace(name string) bool {
+	switch name {
+	case "cgroup", "ipc", "mnt", "net", "pid", "time", "user", "uts":
+		return true
+	default:
+		return false
+	}
 }
 
 func mountForPath(records []mountRecord, path string) (mountRecord, error) {
@@ -186,6 +227,9 @@ func mountForPath(records []mountRecord, path string) (mountRecord, error) {
 	}
 	if ambiguous {
 		return mountRecord{}, errors.New("multiple stacked mounts cover the path")
+	}
+	if !filepath.IsAbs(selected.root) {
+		return mountRecord{}, errors.New("covering mount has a non-path root")
 	}
 	return selected, nil
 }

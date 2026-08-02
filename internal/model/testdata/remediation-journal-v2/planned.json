@@ -1,0 +1,182 @@
+{
+  "schema_version": 2,
+  "revision": 7,
+  "run_id": "run-fault-injection",
+  "scan_run_id": "scan-fault-injection",
+  "scan_tool_version": "1.0.0",
+  "scan_tool_commit": "commit-fault-injection",
+  "rule_set_version": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+  "platform": {
+    "hostname": "",
+    "os": "linux",
+    "id": "rocky",
+    "name": "",
+    "version_id": "9.8",
+    "family": "rhel",
+    "architecture": "amd64",
+    "kernel_release": "",
+    "init_system": "",
+    "package_manager": "",
+    "privilege": "",
+    "scan_support": "tested",
+    "remediation_support": "verified"
+  },
+  "remediation_build": {
+    "version": "1.0.0",
+    "commit": "commit-fault-injection",
+    "executable_sha256": "6666666666666666666666666666666666666666666666666666666666666666",
+    "modified": false
+  },
+  "state": "planned",
+  "failure_policy": "rollback_item",
+  "plan_digest": "31e46b6df27aeb98777cebe3b28c086db45d40fd46715f624696c2c0f52a55d9",
+  "host": {
+    "machine_id_hash": "7777777777777777777777777777777777777777777777777777777777777777",
+    "system_root": "/",
+    "root_device": 11,
+    "root_inode": 2,
+    "boot_id": "12345678-1234-1234-1234-123456789abc"
+  },
+  "started_at": "2026-07-11T10:00:00Z",
+  "updated_at": "2026-07-11T10:10:00Z",
+  "change_sets": [
+    {
+      "id": "change-a",
+      "rule_id": "U-19",
+      "rule_identity": {
+        "id": "U-19",
+        "title": "fault injection file metadata rule",
+        "category": "file_directory",
+        "severity": "high",
+        "evaluator": "unix.file.metadata_fault_fixture",
+        "verification": {
+          "state": "verified",
+          "environments": [
+            "Rocky Linux 9.8 amd64 fault fixture"
+          ],
+          "verified_at": "2026-07-11T00:00:00Z"
+        },
+        "binding_sources": [
+          "linux-common",
+          "rocky-linux-9.8-amd64"
+        ],
+        "reference": {
+          "guide": "2026 Unix fault fixture",
+          "section": "",
+          "item": "U-19",
+          "pages": [
+            1
+          ]
+        }
+      },
+      "recipe_identity": {
+        "id": "rocky-u19-file-metadata",
+        "selector": {
+          "id": "rocky",
+          "version": "9.8",
+          "architecture": "amd64"
+        },
+        "definition_sha256": "8888888888888888888888888888888888888888888888888888888888888888"
+      },
+      "sequence": 1,
+      "risk": "SAFE",
+      "state": "planned",
+      "resources": [
+        {
+          "reference": {
+            "kind": "file",
+            "id": "/etc/open-ciip-a"
+          },
+          "key": "file:/etc/open-ciip-a"
+        }
+      ],
+      "operations": [
+        {
+          "id": "operation-a",
+          "sequence": 1,
+          "rollback_sequence": 1,
+          "kind": "file_metadata",
+          "recovery_mode": "state_inferable",
+          "state": "planned",
+          "resource": {
+            "reference": {
+              "kind": "file",
+              "id": "/etc/open-ciip-a"
+            },
+            "key": "file:/etc/open-ciip-a"
+          },
+          "expected_before": {
+            "reference": {
+              "reference": {
+                "kind": "file",
+                "id": "/etc/open-ciip-a"
+              },
+              "key": "file:/etc/open-ciip-a"
+            },
+            "fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "file": {
+              "path": "/etc/open-ciip-a",
+              "exists": true,
+              "file_type": "regular",
+              "mode": 420,
+              "uid": 0,
+              "gid": 0,
+              "size": 16,
+              "sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+              "device": 11,
+              "inode": 38,
+              "nlink": 1,
+              "parent_device": 11,
+              "parent_inode": 2,
+              "captured_at": "2026-07-11T10:00:00Z"
+            }
+          },
+          "before": {
+            "reference": {
+              "reference": {
+                "kind": "",
+                "id": ""
+              },
+              "key": ""
+            },
+            "fingerprint": ""
+          },
+          "desired": {
+            "reference": {
+              "reference": {
+                "kind": "file",
+                "id": "/etc/open-ciip-a"
+              },
+              "key": "file:/etc/open-ciip-a"
+            },
+            "fingerprint": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "file": {
+              "path": "/etc/open-ciip-a",
+              "exists": true,
+              "file_type": "regular",
+              "mode": 384,
+              "uid": 0,
+              "gid": 0,
+              "size": 16,
+              "sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+              "device": 11,
+              "inode": 38,
+              "nlink": 1,
+              "parent_device": 11,
+              "parent_inode": 2,
+              "captured_at": "2026-07-11T10:01:00Z"
+            }
+          }
+        }
+      ],
+      "dry_run": "regular-file metadata would be changed",
+      "expected_impact": "only approved metadata fields change"
+    }
+  ],
+  "conflict_graph": {
+    "nodes": [
+      "change-a"
+    ],
+    "edges": null
+  }
+}

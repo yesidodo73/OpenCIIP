@@ -145,6 +145,73 @@ func TestValidateTransitionAllowsApprovalWithoutPlanMutation(t *testing.T) {
 	}
 }
 
+func TestValidateTransitionRejectsApprovalInitializationOutsideApprovalTransition(t *testing.T) {
+	t.Parallel()
+
+	initial := testInitialJournal(t)
+	tests := []struct {
+		name  string
+		state model.RunState
+	}{
+		{name: "planned state is unchanged", state: model.RunPlanned},
+		{name: "run starts canceling", state: model.RunCanceling},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			next, err := cloneJournal(&initial)
+			if err != nil {
+				t.Fatalf("cloneJournal() error = %v", err)
+			}
+			approvedAt := initial.UpdatedAt.Add(time.Minute)
+			next.Revision = initial.Revision + 1
+			next.State = test.state
+			next.UpdatedAt = approvedAt
+			next.ChangeSets[0].Approval = &model.Approval{
+				Source:     "contract-test",
+				PlanDigest: next.PlanDigest,
+				ApprovedAt: approvedAt,
+			}
+			if err := next.Validate(); err != nil {
+				t.Fatalf("test fixture became invalid before transition validation: %v", err)
+			}
+
+			err = ValidateTransition(&initial, next)
+			if CodeOf(err) != CodeInvalidTransition {
+				t.Fatalf("ValidateTransition() error = %v, want %s", err, CodeInvalidTransition)
+			}
+		})
+	}
+}
+
+func TestLegacyWALRecordRemainsReadableForRecovery(t *testing.T) {
+	t.Parallel()
+
+	value := testInitialJournal(t)
+	value.SchemaVersion = 2
+	value.ScanToolExecutableSHA256 = ""
+	record, err := makeRecord(value, "")
+	if err != nil {
+		t.Fatalf("makeRecord() error = %v", err)
+	}
+	if record.SchemaVersion != 2 {
+		t.Fatalf("record schema = %d, want 2", record.SchemaVersion)
+	}
+	line, err := CanonicalJSON(record)
+	if err != nil {
+		t.Fatalf("CanonicalJSON() error = %v", err)
+	}
+	decoded, err := decodeAndValidateRecord(line, value.RunID, WALRecord{}, 0)
+	if err != nil {
+		t.Fatalf("decodeAndValidateRecord() error = %v", err)
+	}
+	if decoded.Journal.ScanToolExecutableSHA256 != "" {
+		t.Fatalf("legacy scan executable digest = %q, want empty", decoded.Journal.ScanToolExecutableSHA256)
+	}
+}
+
 func TestValidateTransitionRejectsUnsafeOrNonMonotonicChanges(t *testing.T) {
 	t.Parallel()
 
@@ -163,6 +230,7 @@ func TestValidateTransitionRejectsUnsafeOrNonMonotonicChanges(t *testing.T) {
 			name: "timestamp does not advance",
 			mutate: func(next *model.RemediationJournal) {
 				next.UpdatedAt = initial.UpdatedAt
+				next.ChangeSets[0].Approval.ApprovedAt = initial.UpdatedAt
 			},
 		},
 		{
@@ -175,6 +243,13 @@ func TestValidateTransitionRejectsUnsafeOrNonMonotonicChanges(t *testing.T) {
 			name: "platform identity changes",
 			mutate: func(next *model.RemediationJournal) {
 				next.Platform.VersionID = "9.9"
+			},
+		},
+		{
+			name: "scan executable identity changes",
+			mutate: func(next *model.RemediationJournal) {
+				next.ScanToolExecutableSHA256 = strings.Repeat("9", 64)
+				next.RemediationBuild.ExecutableSHA256 = strings.Repeat("9", 64)
 			},
 		},
 		{
@@ -261,13 +336,14 @@ func testInitialJournal(t *testing.T) model.RemediationJournal {
 	}
 	planDigest := strings.Repeat("4", 64)
 	journal := model.RemediationJournal{
-		SchemaVersion:   model.RemediationSchemaVersion,
-		Revision:        1,
-		RunID:           "run-contract-1",
-		ScanRunID:       "scan-contract-1",
-		ScanToolVersion: "1.0.0",
-		ScanToolCommit:  "commit-1",
-		RuleSetVersion:  "sha256:" + strings.Repeat("5", 64),
+		SchemaVersion:            model.RemediationSchemaVersion,
+		Revision:                 1,
+		RunID:                    "run-contract-1",
+		ScanRunID:                "scan-contract-1",
+		ScanToolVersion:          "1.0.0",
+		ScanToolCommit:           "commit-1",
+		ScanToolExecutableSHA256: strings.Repeat("6", 64),
+		RuleSetVersion:           "sha256:" + strings.Repeat("5", 64),
 		Platform: model.PlatformInfo{
 			OS:                 "linux",
 			Family:             "rhel",

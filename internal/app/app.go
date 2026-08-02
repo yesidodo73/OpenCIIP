@@ -116,10 +116,13 @@ func (a *Application) Scan(ctx context.Context, options engine.Options) (model.S
 
 func scanCommandAllowlist() []string {
 	return []string{
+		"apt-get",
 		"authselect",
+		"busctl",
 		"chage",
 		"chronyc",
 		"dnf",
+		"dpkg-query",
 		"exportfs",
 		"find",
 		"findmnt",
@@ -145,6 +148,7 @@ func scanCommandAllowlist() []string {
 		"ss",
 		"sshd",
 		"systemd-analyze",
+		"systemd-path",
 		"systemctl",
 		"testparm",
 		"timedatectl",

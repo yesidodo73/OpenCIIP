@@ -4,12 +4,20 @@ import (
 	"encoding/hex"
 	"fmt"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
 )
 
-const RemediationSchemaVersion = 2
+const (
+	legacyRemediationSchemaVersion = 2
+	RemediationSchemaVersion       = 3
+)
+
+func IsSupportedRemediationSchemaVersion(version int) bool {
+	return version == legacyRemediationSchemaVersion || version == RemediationSchemaVersion
+}
 
 type RemediationRisk string
 
@@ -797,6 +805,9 @@ func validateOperationMarkers(operation OperationRecord) error {
 		if operation.RollbackIntentAt.Before(*operation.ApplyIntentAt) {
 			return fmt.Errorf("rollback intent precedes the durable apply intent")
 		}
+		if operation.AppliedAt != nil && operation.RollbackIntentAt.Before(*operation.AppliedAt) {
+			return fmt.Errorf("rollback intent precedes apply completion")
+		}
 	}
 	if operation.ObservedRollback != nil || operation.RolledBackAt != nil {
 		if operation.RollbackIntentAt == nil {
@@ -1103,9 +1114,77 @@ func (c ChangeSet) Validate(planDigest string) error {
 	if c.State == ChangeVerified && (c.VerifiedAt == nil || c.VerifiedAt.IsZero()) {
 		return fmt.Errorf("verified change set %s has no verification completion time", c.ID)
 	}
+	if err := validateChangeSetTimeline(c); err != nil {
+		return err
+	}
 	if c.Error != nil {
 		if err := c.Error.Validate(); err != nil {
 			return fmt.Errorf("change set %s: %w", c.ID, err)
+		}
+	}
+	return nil
+}
+
+func validateChangeSetTimeline(changeSet ChangeSet) error {
+	for _, marker := range []struct {
+		name  string
+		value *time.Time
+	}{
+		{name: "preparation", value: changeSet.PreparedAt},
+		{name: "apply completion", value: changeSet.AppliedAt},
+		{name: "verification completion", value: changeSet.VerifiedAt},
+		{name: "rollback completion", value: changeSet.RolledBackAt},
+	} {
+		if marker.value != nil && marker.value.IsZero() {
+			return fmt.Errorf("change set %s %s time is zero", changeSet.ID, marker.name)
+		}
+	}
+	if changeSet.PreparedAt != nil {
+		if changeSet.Approval == nil {
+			return fmt.Errorf("change set %s preparation requires approval", changeSet.ID)
+		}
+		if changeSet.PreparedAt.Before(changeSet.Approval.ApprovedAt) {
+			return fmt.Errorf("change set %s preparation precedes approval", changeSet.ID)
+		}
+	}
+	if (changeSet.State == ChangePrepared || changeSet.State == ChangeApplying) && changeSet.PreparedAt == nil {
+		return fmt.Errorf("change set %s in state %s has no preparation time", changeSet.ID, changeSet.State)
+	}
+	for _, operation := range changeSet.Operations {
+		if operation.ApplyIntentAt != nil {
+			if changeSet.PreparedAt == nil {
+				return fmt.Errorf("change set %s operation %s apply intent requires preparation", changeSet.ID, operation.ID)
+			}
+			if operation.ApplyIntentAt.Before(*changeSet.PreparedAt) {
+				return fmt.Errorf("change set %s operation %s apply intent precedes preparation", changeSet.ID, operation.ID)
+			}
+		}
+		if changeSet.AppliedAt != nil {
+			if operation.AppliedAt == nil {
+				return fmt.Errorf("change set %s apply completion precedes operation %s completion", changeSet.ID, operation.ID)
+			}
+			if changeSet.AppliedAt.Before(*operation.AppliedAt) {
+				return fmt.Errorf("change set %s apply completion precedes operation %s completion", changeSet.ID, operation.ID)
+			}
+		}
+		if changeSet.RolledBackAt != nil && operation.RolledBackAt != nil && changeSet.RolledBackAt.Before(*operation.RolledBackAt) {
+			return fmt.Errorf("change set %s rollback completion precedes operation %s completion", changeSet.ID, operation.ID)
+		}
+	}
+	if changeSet.AppliedAt != nil {
+		if changeSet.PreparedAt == nil {
+			return fmt.Errorf("change set %s apply completion requires preparation", changeSet.ID)
+		}
+		if changeSet.AppliedAt.Before(*changeSet.PreparedAt) {
+			return fmt.Errorf("change set %s apply completion precedes preparation", changeSet.ID)
+		}
+	}
+	if changeSet.VerifiedAt != nil {
+		if changeSet.AppliedAt == nil {
+			return fmt.Errorf("change set %s verification completion requires apply completion", changeSet.ID)
+		}
+		if changeSet.VerifiedAt.Before(*changeSet.AppliedAt) {
+			return fmt.Errorf("change set %s verification completion precedes apply completion", changeSet.ID)
 		}
 	}
 	return nil
@@ -1232,24 +1311,32 @@ func (o RollbackOutcome) Valid() bool {
 }
 
 type RollbackAttempt struct {
-	ID                  string          `json:"id"`
-	Scope               RollbackScope   `json:"scope"`
-	Trigger             RollbackTrigger `json:"trigger"`
-	RequestedChangeSets []string        `json:"requested_change_sets,omitempty"`
-	ExpandedChangeSets  []string        `json:"expanded_change_sets"`
-	CascadeApproved     bool            `json:"cascade_approved"`
-	Outcome             RollbackOutcome `json:"outcome,omitempty"`
-	StartedAt           time.Time       `json:"started_at"`
-	CompletedAt         *time.Time      `json:"completed_at,omitempty"`
-	Errors              []JournalError  `json:"errors,omitempty"`
+	ID                  string                    `json:"id"`
+	Scope               RollbackScope             `json:"scope"`
+	Trigger             RollbackTrigger           `json:"trigger"`
+	ExecutorBuild       *RemediationBuildIdentity `json:"executor_build,omitempty"`
+	ObservedByBuild     *RemediationBuildIdentity `json:"observed_by_build,omitempty"`
+	RequestedChangeSets []string                  `json:"requested_change_sets,omitempty"`
+	ExpandedChangeSets  []string                  `json:"expanded_change_sets"`
+	CascadeApproved     bool                      `json:"cascade_approved"`
+	Outcome             RollbackOutcome           `json:"outcome,omitempty"`
+	StartedAt           time.Time                 `json:"started_at"`
+	CompletedAt         *time.Time                `json:"completed_at,omitempty"`
+	Errors              []JournalError            `json:"errors,omitempty"`
 }
 
 func (a RollbackAttempt) Validate() error {
 	if strings.TrimSpace(a.ID) == "" || !a.Scope.Valid() || !a.Trigger.Valid() || !a.Outcome.Valid() || a.StartedAt.IsZero() {
 		return fmt.Errorf("rollback attempt %s has invalid metadata", a.ID)
 	}
+	if a.CompletedAt != nil && a.CompletedAt.IsZero() {
+		return fmt.Errorf("rollback attempt %s completion time is zero", a.ID)
+	}
 	if a.CompletedAt != nil && a.Outcome == "" {
 		return fmt.Errorf("rollback attempt %s completed without an outcome", a.ID)
+	}
+	if a.CompletedAt != nil && a.CompletedAt.Before(a.StartedAt) {
+		return fmt.Errorf("rollback attempt %s completion precedes start", a.ID)
 	}
 	if len(a.ExpandedChangeSets) == 0 {
 		return fmt.Errorf("rollback attempt %s has no expanded change set", a.ID)
@@ -1272,6 +1359,19 @@ func (a RollbackAttempt) Validate() error {
 	for _, journalError := range a.Errors {
 		if err := journalError.Validate(); err != nil {
 			return fmt.Errorf("rollback attempt %s: %w", a.ID, err)
+		}
+		if a.CompletedAt != nil && journalError.OccurredAt.After(*a.CompletedAt) {
+			return fmt.Errorf("rollback attempt %s error occurs after completion", a.ID)
+		}
+	}
+	for label, build := range map[string]*RemediationBuildIdentity{
+		"executor": a.ExecutorBuild,
+		"observer": a.ObservedByBuild,
+	} {
+		if build != nil {
+			if err := build.Validate(); err != nil {
+				return fmt.Errorf("rollback attempt %s has invalid %s build identity: %w", a.ID, label, err)
+			}
 		}
 	}
 	return nil
@@ -1379,12 +1479,84 @@ type RemediationBuildIdentity struct {
 	Modified         bool   `json:"modified"`
 }
 
+var (
+	stableRemediationVersionPattern   = regexp.MustCompile(`^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$`)
+	canonicalRemediationCommitPattern = regexp.MustCompile(`^([0-9a-f]{40}|[0-9a-f]{64})$`)
+)
+
 func (i RemediationBuildIdentity) Validate() error {
 	if strings.TrimSpace(i.Version) == "" || i.Version != strings.TrimSpace(i.Version) || strings.TrimSpace(i.Commit) == "" || i.Commit != strings.TrimSpace(i.Commit) {
 		return fmt.Errorf("remediation build version and commit are required")
 	}
 	if !validSHA256(i.ExecutableSHA256) {
 		return fmt.Errorf("remediation executable digest is invalid")
+	}
+	return nil
+}
+
+func (i RemediationBuildIdentity) ValidateRollbackExecutor() error {
+	if err := i.Validate(); err != nil {
+		return err
+	}
+	if !stableRemediationVersionPattern.MatchString(i.Version) {
+		return fmt.Errorf("rollback executor version is not a stable Semantic Version")
+	}
+	if !canonicalRemediationCommitPattern.MatchString(i.Commit) || strings.Trim(i.Commit, "0") == "" {
+		return fmt.Errorf("rollback executor commit is not a non-null canonical Git revision")
+	}
+	if i.Modified {
+		return fmt.Errorf("rollback executor build is modified")
+	}
+	return nil
+}
+
+func validateRollbackAttemptProvenance(schemaVersion int, journalBuild RemediationBuildIdentity, attempt RollbackAttempt) error {
+	if schemaVersion == legacyRemediationSchemaVersion {
+		if attempt.ExecutorBuild != nil || attempt.ObservedByBuild != nil {
+			return fmt.Errorf("legacy rollback attempt %s cannot contain build provenance", attempt.ID)
+		}
+		return nil
+	}
+	if schemaVersion != RemediationSchemaVersion {
+		return fmt.Errorf("rollback attempt %s has unsupported schema provenance", attempt.ID)
+	}
+	if attempt.Trigger == RollbackCrashRecovery {
+		if attempt.ExecutorBuild != nil {
+			return fmt.Errorf("crash recovery rollback attempt %s cannot have an executor build", attempt.ID)
+		}
+		if attempt.ObservedByBuild == nil {
+			return fmt.Errorf("crash recovery rollback attempt %s has no observer build", attempt.ID)
+		}
+		return nil
+	}
+	if attempt.ExecutorBuild == nil {
+		return fmt.Errorf("rollback attempt %s has no executor build", attempt.ID)
+	}
+	switch attempt.Trigger {
+	case RollbackApplyFailure, RollbackVerifyFailure:
+		if *attempt.ExecutorBuild != journalBuild {
+			return fmt.Errorf("automatic rollback attempt %s executor differs from the remediation build", attempt.ID)
+		}
+	case RollbackUserRequest:
+		if err := attempt.ExecutorBuild.ValidateRollbackExecutor(); err != nil {
+			return fmt.Errorf("user rollback attempt %s: %w", attempt.ID, err)
+		}
+		if attempt.Scope == RollbackItem {
+			if len(attempt.RequestedChangeSets) == 0 {
+				return fmt.Errorf("user item rollback attempt %s has no requested change set", attempt.ID)
+			}
+			expanded := make(map[string]struct{}, len(attempt.ExpandedChangeSets))
+			for _, changeSetID := range attempt.ExpandedChangeSets {
+				expanded[changeSetID] = struct{}{}
+			}
+			for _, changeSetID := range attempt.RequestedChangeSets {
+				if _, exists := expanded[changeSetID]; !exists {
+					return fmt.Errorf("user item rollback attempt %s requests change set %s outside its expanded scope", attempt.ID, changeSetID)
+				}
+			}
+		} else if len(attempt.RequestedChangeSets) != 0 {
+			return fmt.Errorf("user run rollback attempt %s cannot contain requested change sets", attempt.ID)
+		}
 	}
 	return nil
 }
@@ -1448,31 +1620,32 @@ func validCanonicalUUID(value string) bool {
 }
 
 type RemediationJournal struct {
-	SchemaVersion        int                      `json:"schema_version"`
-	Revision             uint64                   `json:"revision"`
-	RunID                string                   `json:"run_id"`
-	ScanRunID            string                   `json:"scan_run_id"`
-	ScanToolVersion      string                   `json:"scan_tool_version"`
-	ScanToolCommit       string                   `json:"scan_tool_commit"`
-	RuleSetVersion       string                   `json:"rule_set_version"`
-	Platform             PlatformInfo             `json:"platform"`
-	RemediationBuild     RemediationBuildIdentity `json:"remediation_build"`
-	State                RunState                 `json:"state"`
-	FailurePolicy        FailurePolicy            `json:"failure_policy"`
-	PlanDigest           string                   `json:"plan_digest"`
-	Host                 HostIdentity             `json:"host"`
-	StartedAt            time.Time                `json:"started_at"`
-	UpdatedAt            time.Time                `json:"updated_at"`
-	ChangeSets           []ChangeSet              `json:"change_sets"`
-	ConflictGraph        ConflictGraph            `json:"conflict_graph"`
-	RollbackAttempts     []RollbackAttempt        `json:"rollback_attempts,omitempty"`
-	UnresolvedChangeSets []string                 `json:"unresolved_change_sets,omitempty"`
-	Warnings             []string                 `json:"warnings,omitempty"`
-	Error                *JournalError            `json:"error,omitempty"`
+	SchemaVersion            int                      `json:"schema_version"`
+	Revision                 uint64                   `json:"revision"`
+	RunID                    string                   `json:"run_id"`
+	ScanRunID                string                   `json:"scan_run_id"`
+	ScanToolVersion          string                   `json:"scan_tool_version"`
+	ScanToolCommit           string                   `json:"scan_tool_commit"`
+	ScanToolExecutableSHA256 string                   `json:"scan_tool_executable_sha256,omitempty"`
+	RuleSetVersion           string                   `json:"rule_set_version"`
+	Platform                 PlatformInfo             `json:"platform"`
+	RemediationBuild         RemediationBuildIdentity `json:"remediation_build"`
+	State                    RunState                 `json:"state"`
+	FailurePolicy            FailurePolicy            `json:"failure_policy"`
+	PlanDigest               string                   `json:"plan_digest"`
+	Host                     HostIdentity             `json:"host"`
+	StartedAt                time.Time                `json:"started_at"`
+	UpdatedAt                time.Time                `json:"updated_at"`
+	ChangeSets               []ChangeSet              `json:"change_sets"`
+	ConflictGraph            ConflictGraph            `json:"conflict_graph"`
+	RollbackAttempts         []RollbackAttempt        `json:"rollback_attempts,omitempty"`
+	UnresolvedChangeSets     []string                 `json:"unresolved_change_sets,omitempty"`
+	Warnings                 []string                 `json:"warnings,omitempty"`
+	Error                    *JournalError            `json:"error,omitempty"`
 }
 
 func (j RemediationJournal) Validate() error {
-	if j.SchemaVersion != RemediationSchemaVersion {
+	if !IsSupportedRemediationSchemaVersion(j.SchemaVersion) {
 		return fmt.Errorf("unsupported remediation schema version %d", j.SchemaVersion)
 	}
 	if strings.TrimSpace(j.RunID) == "" || strings.TrimSpace(j.ScanRunID) == "" {
@@ -1484,11 +1657,27 @@ func (j RemediationJournal) Validate() error {
 	if strings.TrimSpace(j.ScanToolVersion) == "" || strings.TrimSpace(j.ScanToolCommit) == "" || strings.TrimSpace(j.RuleSetVersion) == "" {
 		return fmt.Errorf("scan tool identity and rule set version are required")
 	}
+	if j.SchemaVersion == RemediationSchemaVersion && !validSHA256(j.ScanToolExecutableSHA256) {
+		return fmt.Errorf("scan executable digest is invalid")
+	}
+	if j.SchemaVersion == legacyRemediationSchemaVersion && j.ScanToolExecutableSHA256 != "" {
+		return fmt.Errorf("legacy remediation journals cannot contain a scan executable digest")
+	}
 	if err := validateRemediationPlatform(j.Platform); err != nil {
 		return err
 	}
 	if err := j.RemediationBuild.Validate(); err != nil {
 		return err
+	}
+	if j.SchemaVersion == RemediationSchemaVersion &&
+		(j.ScanToolVersion != j.RemediationBuild.Version ||
+			j.ScanToolCommit != j.RemediationBuild.Commit) {
+		return fmt.Errorf("scan and remediation build version or commit do not match")
+	}
+	if j.ScanToolExecutableSHA256 != "" &&
+		(!validSHA256(j.ScanToolExecutableSHA256) ||
+			j.ScanToolExecutableSHA256 != j.RemediationBuild.ExecutableSHA256) {
+		return fmt.Errorf("scan and remediation executable digests do not match")
 	}
 	if !j.State.Valid() || !j.FailurePolicy.Valid() || !validSHA256(j.PlanDigest) {
 		return fmt.Errorf("journal state, failure policy, or plan digest is invalid")
@@ -1511,6 +1700,9 @@ func (j RemediationJournal) Validate() error {
 	for _, changeSet := range j.ChangeSets {
 		if err := changeSet.Validate(j.PlanDigest); err != nil {
 			return err
+		}
+		if j.State == RunApproved && changeSet.Approval == nil {
+			return fmt.Errorf("approved journal change set %s has no approval", changeSet.ID)
 		}
 		if _, exists := changeSetIDs[changeSet.ID]; exists {
 			return fmt.Errorf("journal repeats change set %s", changeSet.ID)
@@ -1545,6 +1737,15 @@ func (j RemediationJournal) Validate() error {
 		if err := attempt.Validate(); err != nil {
 			return err
 		}
+		if err := validateRollbackAttemptProvenance(j.SchemaVersion, j.RemediationBuild, attempt); err != nil {
+			return err
+		}
+		if index > 0 {
+			previous := j.RollbackAttempts[index-1]
+			if previous.CompletedAt != nil && attempt.StartedAt.Before(*previous.CompletedAt) {
+				return fmt.Errorf("rollback attempt %s overlaps previous rollback attempt %s", attempt.ID, previous.ID)
+			}
+		}
 		if attempt.CompletedAt == nil {
 			if attempt.Outcome != "" {
 				return fmt.Errorf("rollback attempt %s has an outcome before completion", attempt.ID)
@@ -1563,6 +1764,14 @@ func (j RemediationJournal) Validate() error {
 				return fmt.Errorf("rollback attempt %s contains unknown change set %s", attempt.ID, id)
 			}
 		}
+	}
+	if j.Error != nil {
+		if err := j.Error.Validate(); err != nil {
+			return err
+		}
+	}
+	if err := validateRemediationTimeline(j); err != nil {
+		return err
 	}
 	seenUnresolved := make(map[string]struct{}, len(j.UnresolvedChangeSets))
 	for _, id := range j.UnresolvedChangeSets {
@@ -1666,12 +1875,243 @@ func (j RemediationJournal) Validate() error {
 			}
 		}
 	}
-	if j.Error != nil {
-		if err := j.Error.Validate(); err != nil {
+	if j.UpdatedAt.Before(j.LatestEventTime()) {
+		return fmt.Errorf("journal updated_at precedes a durable event")
+	}
+	return nil
+}
+
+func validateRemediationTimeline(journal RemediationJournal) error {
+	for _, changeSet := range journal.ChangeSets {
+		if changeSet.Approval != nil && changeSet.Approval.ApprovedAt.Before(journal.StartedAt) {
+			return fmt.Errorf("change set %s approval precedes journal start", changeSet.ID)
+		}
+		for _, operation := range changeSet.Operations {
+			if operation.RollbackIntentAt == nil {
+				continue
+			}
+			covered := false
+			for _, attempt := range journal.RollbackAttempts {
+				if !rollbackAttemptTargets(attempt, changeSet.ID) || attempt.StartedAt.After(*operation.RollbackIntentAt) {
+					continue
+				}
+				if attempt.CompletedAt != nil && attempt.CompletedAt.Before(*operation.RollbackIntentAt) {
+					continue
+				}
+				if operation.RolledBackAt != nil && attempt.CompletedAt != nil && attempt.CompletedAt.Before(*operation.RolledBackAt) {
+					continue
+				}
+				covered = true
+				break
+			}
+			if !covered {
+				return fmt.Errorf("change set %s operation %s rollback intent is not within a covering rollback attempt", changeSet.ID, operation.ID)
+			}
+		}
+		if changeSet.Error != nil {
+			operation, err := changeSetOperationForError(changeSet, *changeSet.Error)
+			if err != nil {
+				return err
+			}
+			if err := validateJournalErrorTimeline(journal.StartedAt, *changeSet.Error, operation, nil); err != nil {
+				return fmt.Errorf("change set %s: %w", changeSet.ID, err)
+			}
+		}
+		for _, operation := range changeSet.Operations {
+			if operation.Error == nil {
+				continue
+			}
+			if err := validateOperationErrorScope(changeSet, operation, *operation.Error); err != nil {
+				return err
+			}
+			if err := validateJournalErrorTimeline(journal.StartedAt, *operation.Error, &operation, nil); err != nil {
+				return fmt.Errorf("change set %s operation %s: %w", changeSet.ID, operation.ID, err)
+			}
+		}
+	}
+	for _, attempt := range journal.RollbackAttempts {
+		if attempt.StartedAt.Before(journal.StartedAt) {
+			return fmt.Errorf("rollback attempt %s starts before journal", attempt.ID)
+		}
+		for _, journalError := range attempt.Errors {
+			operation, err := journalOperationForError(journal, journalError)
+			if err != nil {
+				return fmt.Errorf("rollback attempt %s: %w", attempt.ID, err)
+			}
+			if journalError.ChangeSetID != "" && !rollbackAttemptTargets(attempt, journalError.ChangeSetID) {
+				return fmt.Errorf("rollback attempt %s error references change set %s outside its scope", attempt.ID, journalError.ChangeSetID)
+			}
+			if err := validateJournalErrorTimeline(journal.StartedAt, journalError, operation, &attempt); err != nil {
+				return fmt.Errorf("rollback attempt %s: %w", attempt.ID, err)
+			}
+		}
+	}
+	if journal.Error != nil {
+		operation, err := journalOperationForError(journal, *journal.Error)
+		if err != nil {
+			return err
+		}
+		if err := validateJournalErrorTimeline(journal.StartedAt, *journal.Error, operation, nil); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func validateJournalErrorTimeline(
+	startedAt time.Time,
+	journalError JournalError,
+	operation *OperationRecord,
+	attempt *RollbackAttempt,
+) error {
+	if journalError.OccurredAt.Before(startedAt) {
+		return fmt.Errorf("journal error %s precedes journal start", journalError.Phase)
+	}
+	if operation != nil && operation.ApplyIntentAt != nil && journalError.OccurredAt.Before(*operation.ApplyIntentAt) {
+		return fmt.Errorf("journal error %s precedes operation apply intent", journalError.Phase)
+	}
+	if operation != nil && operation.RollbackIntentAt != nil &&
+		journalErrorRequiresRollbackIntent(journalError.Phase) &&
+		journalError.OccurredAt.Before(*operation.RollbackIntentAt) {
+		return fmt.Errorf("journal error %s precedes operation rollback intent", journalError.Phase)
+	}
+	if attempt != nil && journalErrorRequiresRollbackIntent(journalError.Phase) &&
+		journalError.OccurredAt.Before(attempt.StartedAt) {
+		return fmt.Errorf("journal error %s precedes rollback attempt", journalError.Phase)
+	}
+	return nil
+}
+
+func journalErrorRequiresRollbackIntent(phase string) bool {
+	phase = strings.ToLower(strings.TrimSpace(phase))
+	return phase == "recovery" || strings.Contains(phase, "rollback")
+}
+
+func changeSetOperationForError(changeSet ChangeSet, journalError JournalError) (*OperationRecord, error) {
+	if journalError.ChangeSetID != "" && journalError.ChangeSetID != changeSet.ID {
+		return nil, fmt.Errorf("change set %s error references different change set %s", changeSet.ID, journalError.ChangeSetID)
+	}
+	if journalError.OperationID == "" {
+		return nil, nil
+	}
+	for index := range changeSet.Operations {
+		if changeSet.Operations[index].ID == journalError.OperationID {
+			return &changeSet.Operations[index], nil
+		}
+	}
+	return nil, fmt.Errorf("change set %s error references unknown operation %s", changeSet.ID, journalError.OperationID)
+}
+
+func validateOperationErrorScope(changeSet ChangeSet, operation OperationRecord, journalError JournalError) error {
+	if journalError.ChangeSetID != "" && journalError.ChangeSetID != changeSet.ID {
+		return fmt.Errorf(
+			"change set %s operation %s error references different change set %s",
+			changeSet.ID,
+			operation.ID,
+			journalError.ChangeSetID,
+		)
+	}
+	if journalError.OperationID != "" && journalError.OperationID != operation.ID {
+		return fmt.Errorf(
+			"change set %s operation %s error references different operation %s",
+			changeSet.ID,
+			operation.ID,
+			journalError.OperationID,
+		)
+	}
+	return nil
+}
+
+func journalOperationForError(journal RemediationJournal, journalError JournalError) (*OperationRecord, error) {
+	if journalError.ChangeSetID == "" {
+		if journalError.OperationID != "" {
+			return nil, fmt.Errorf("journal error %s references an operation without a change set", journalError.Phase)
+		}
+		return nil, nil
+	}
+	for _, changeSet := range journal.ChangeSets {
+		if changeSet.ID != journalError.ChangeSetID {
+			continue
+		}
+		if journalError.OperationID == "" {
+			return nil, nil
+		}
+		operation, err := changeSetOperationForError(changeSet, journalError)
+		if err != nil {
+			return nil, err
+		}
+		return operation, nil
+	}
+	return nil, fmt.Errorf("journal error %s references unknown change set %s", journalError.Phase, journalError.ChangeSetID)
+}
+
+func rollbackAttemptTargets(attempt RollbackAttempt, changeSetID string) bool {
+	for _, candidate := range attempt.ExpandedChangeSets {
+		if candidate == changeSetID {
+			return true
+		}
+	}
+	return false
+}
+
+// LatestEventTime returns the greatest durable remediation event timestamp.
+// Resource snapshot capture times are observations rather than journal events
+// and therefore do not participate in the logical event clock.
+func (j RemediationJournal) LatestEventTime() time.Time {
+	latest := time.Time{}
+	consider := func(candidate time.Time) {
+		if candidate.After(latest) {
+			latest = candidate
+		}
+	}
+	consider(j.StartedAt)
+	consider(j.UpdatedAt)
+	if j.Error != nil {
+		consider(j.Error.OccurredAt)
+	}
+	for _, changeSet := range j.ChangeSets {
+		if changeSet.Approval != nil {
+			consider(changeSet.Approval.ApprovedAt)
+		}
+		if changeSet.Error != nil {
+			consider(changeSet.Error.OccurredAt)
+		}
+		for _, marker := range []*time.Time{
+			changeSet.PreparedAt,
+			changeSet.AppliedAt,
+			changeSet.VerifiedAt,
+			changeSet.RolledBackAt,
+		} {
+			if marker != nil {
+				consider(*marker)
+			}
+		}
+		for _, operation := range changeSet.Operations {
+			if operation.Error != nil {
+				consider(operation.Error.OccurredAt)
+			}
+			for _, marker := range []*time.Time{
+				operation.ApplyIntentAt,
+				operation.AppliedAt,
+				operation.RollbackIntentAt,
+				operation.RolledBackAt,
+			} {
+				if marker != nil {
+					consider(*marker)
+				}
+			}
+		}
+	}
+	for _, attempt := range j.RollbackAttempts {
+		consider(attempt.StartedAt)
+		if attempt.CompletedAt != nil {
+			consider(*attempt.CompletedAt)
+		}
+		for _, journalError := range attempt.Errors {
+			consider(journalError.OccurredAt)
+		}
+	}
+	return latest
 }
 
 func validSHA256(value string) bool {

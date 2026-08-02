@@ -52,7 +52,7 @@ func (m *Manager) cancelLoaded(ctx context.Context, value *model.RemediationJour
 	}
 	if err := deleter.DeleteRunContent(ctx, value.RunID); err != nil {
 		failure := &Error{Code: CodeCancelFailed, Operation: "delete unused desired content", RunID: value.RunID, Err: err}
-		journalError := m.makeJournalError("cancel", "", "", nil, failure)
+		journalError := m.makeJournalError(value, "cancel", "", "", nil, failure)
 		persistContext, cancelPersist := newApplyCleanupContext(ctx)
 		defer cancelPersist()
 		next, persistErr := m.update(persistContext, value, "persist cancellation failure", func(journal *model.RemediationJournal) error {

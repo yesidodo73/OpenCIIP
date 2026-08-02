@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://raw.githubusercontent.com/yesidodo73/OpenCIIP/main/schemas/remediation-journal.schema.json",
   "title": "OpenCIIP Remediation Journal",
-  "description": "OpenCIIP 자동 조치 실행 저널 형식입니다. 스키마 버전 2는 승인된 계획, 실행 상태, 복구 및 롤백 기록을 함께 보존합니다.",
+  "description": "OpenCIIP 자동 조치 실행 저널 형식입니다. 스키마 버전 3은 점검 실행 바이너리 식별값, 승인된 계획, 실행 상태, 복구 및 롤백 기록을 함께 보존합니다.",
   "$comment": "계획 digest 일치, 배열 간 ID 참조, 순서의 단조 증가, 시간 마커의 선후 관계, 스냅샷 fingerprint 및 file_metadata 전후 값의 동일성은 표준 JSON Schema로 표현할 수 없어 Go 검증기가 추가로 확인합니다.",
   "type": "object",
   "additionalProperties": false,
@@ -13,6 +13,7 @@
     "scan_run_id",
     "scan_tool_version",
     "scan_tool_commit",
+    "scan_tool_executable_sha256",
     "rule_set_version",
     "platform",
     "remediation_build",
@@ -28,7 +29,7 @@
   "properties": {
     "schema_version": {
       "type": "integer",
-      "const": 2
+      "const": 3
     },
     "revision": {
       "type": "integer",
@@ -46,6 +47,9 @@
     },
     "scan_tool_commit": {
       "$ref": "#/$defs/nonBlankString"
+    },
+    "scan_tool_executable_sha256": {
+      "$ref": "#/$defs/sha256"
     },
     "rule_set_version": {
       "$ref": "#/$defs/nonBlankString"
@@ -108,6 +112,30 @@
     }
   },
   "allOf": [
+    {
+      "$comment": "approved 실행은 모든 변경 세트의 승인 기록을 포함해야 합니다.",
+      "if": {
+        "properties": {
+          "state": {
+            "const": "approved"
+          }
+        },
+        "required": [
+          "state"
+        ]
+      },
+      "then": {
+        "properties": {
+          "change_sets": {
+            "items": {
+              "required": [
+                "approval"
+              ]
+            }
+          }
+        }
+      }
+    },
     {
       "if": {
         "properties": {
@@ -1913,6 +1941,98 @@
       },
       "allOf": [
         {
+          "$comment": "prepared와 applying 변경 세트는 영속 preparation marker를 가져야 합니다. marker 간 실제 시간 순서는 Go 검증기가 확인합니다.",
+          "if": {
+            "properties": {
+              "state": {
+                "enum": [
+                  "prepared",
+                  "applying"
+                ]
+              }
+            },
+            "required": [
+              "state"
+            ]
+          },
+          "then": {
+            "required": [
+              "prepared_at"
+            ]
+          }
+        },
+        {
+          "$comment": "preparation marker는 승인 기록 없이 존재할 수 없습니다.",
+          "if": {
+            "required": [
+              "prepared_at"
+            ]
+          },
+          "then": {
+            "required": [
+              "approval"
+            ]
+          }
+        },
+        {
+          "$comment": "작업 하나라도 durable apply intent를 가지면 변경 세트의 preparation marker가 먼저 존재해야 합니다.",
+          "if": {
+            "properties": {
+              "operations": {
+                "contains": {
+                  "required": [
+                    "apply_intent_at"
+                  ]
+                },
+                "minContains": 1
+              }
+            },
+            "required": [
+              "operations"
+            ]
+          },
+          "then": {
+            "required": [
+              "prepared_at"
+            ]
+          }
+        },
+        {
+          "$comment": "변경 세트 apply completion marker는 preparation marker와 모든 작업의 apply completion marker를 함께 보존해야 합니다.",
+          "if": {
+            "required": [
+              "applied_at"
+            ]
+          },
+          "then": {
+            "required": [
+              "prepared_at"
+            ],
+            "properties": {
+              "operations": {
+                "items": {
+                  "required": [
+                    "applied_at"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        {
+          "$comment": "변경 세트 verification marker는 apply completion marker 없이 존재할 수 없습니다.",
+          "if": {
+            "required": [
+              "verified_at"
+            ]
+          },
+          "then": {
+            "required": [
+              "applied_at"
+            ]
+          }
+        },
+        {
           "if": {
             "properties": {
               "state": {
@@ -2275,6 +2395,12 @@
             "crash_recovery"
           ]
         },
+        "executor_build": {
+          "$ref": "#/$defs/remediationBuildIdentity"
+        },
+        "observed_by_build": {
+          "$ref": "#/$defs/remediationBuildIdentity"
+        },
         "requested_change_sets": {
           "type": "array",
           "uniqueItems": true,
@@ -2337,6 +2463,96 @@
           "then": {
             "required": [
               "completed_at"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "trigger": {
+                "const": "crash_recovery"
+              }
+            },
+            "required": [
+              "trigger"
+            ]
+          },
+          "then": {
+            "required": [
+              "observed_by_build"
+            ],
+            "not": {
+              "required": [
+                "executor_build"
+              ]
+            }
+          },
+          "else": {
+            "required": [
+              "executor_build"
+            ]
+          }
+        },
+        {
+          "$comment": "사용자 요청 롤백은 현재 clean stable 실행 파일을 기록합니다. item requested 집합이 expanded 집합에 포함되는지는 Go 검증기가 확인합니다.",
+          "if": {
+            "properties": {
+              "trigger": {
+                "const": "user_request"
+              }
+            },
+            "required": [
+              "trigger"
+            ]
+          },
+          "then": {
+            "properties": {
+              "executor_build": {
+                "$ref": "#/$defs/stableRemediationBuildIdentity"
+              }
+            },
+            "allOf": [
+              {
+                "if": {
+                  "properties": {
+                    "scope": {
+                      "const": "item"
+                    }
+                  },
+                  "required": [
+                    "scope"
+                  ]
+                },
+                "then": {
+                  "required": [
+                    "requested_change_sets"
+                  ],
+                  "properties": {
+                    "requested_change_sets": {
+                      "minItems": 1
+                    }
+                  }
+                }
+              },
+              {
+                "if": {
+                  "properties": {
+                    "scope": {
+                      "const": "run"
+                    }
+                  },
+                  "required": [
+                    "scope"
+                  ]
+                },
+                "then": {
+                  "properties": {
+                    "requested_change_sets": {
+                      "maxItems": 0
+                    }
+                  }
+                }
+              }
             ]
           }
         }
@@ -2483,6 +2699,26 @@
           "type": "boolean"
         }
       }
+    },
+    "stableRemediationBuildIdentity": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/remediationBuildIdentity"
+        },
+        {
+          "properties": {
+            "version": {
+              "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"
+            },
+            "commit": {
+              "pattern": "^(?!(?:0{40}|0{64})$)(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+            },
+            "modified": {
+              "const": false
+            }
+          }
+        }
+      ]
     },
     "hostIdentity": {
       "type": "object",

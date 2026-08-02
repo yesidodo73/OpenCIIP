@@ -1,0 +1,68 @@
+schema_version: 1
+recipes:
+  - id: u19-hosts-permissions-ubuntu-24.04-amd64
+    guide_year: 2026
+    rule_id: U-19
+    selector:
+      id: ubuntu
+      version: "24.04"
+      architecture: amd64
+    verification:
+      state: verified
+      environments:
+        - Ubuntu 24.04 LTS amd64
+      verified_at: "2026-08-02T14:58:30.339056Z"
+      evidence_sha256:
+        - 7dcc43ec0fd59cc5471234d0a55693bcbad6f8a6b5330661c56b7c4a419de96b
+    risk: CAUTION
+    expected_impact: "/etc/hosts의 내용, inode, GID와 이미 더 엄격한 권한을 보존하고, 필요한 경우에만 소유자를 root로 바꾸고 0644에서 허용하지 않는 권한 비트를 제거합니다. POSIX ACL 또는 지원하지 않는 확장 속성이 있으면 계획에서 제외합니다."
+    operations:
+      - type: preserve_content_file_metadata
+        path: /etc/hosts
+        allowed_owners: [root]
+        remediation_owner: root
+        maximum_mode: "0644"
+  - id: u22-services-permissions-ubuntu-24.04-amd64
+    guide_year: 2026
+    rule_id: U-22
+    selector:
+      id: ubuntu
+      version: "24.04"
+      architecture: amd64
+    verification:
+      state: verified
+      environments:
+        - Ubuntu 24.04 LTS amd64
+      verified_at: "2026-08-02T14:58:30.339056Z"
+      evidence_sha256:
+        - 7dcc43ec0fd59cc5471234d0a55693bcbad6f8a6b5330661c56b7c4a419de96b
+    risk: CAUTION
+    expected_impact: "/etc/services의 내용, inode, GID와 이미 더 엄격한 권한을 보존하고, 필요한 경우에만 소유자를 root로 바꾸고 0644에서 허용하지 않는 권한 비트를 제거합니다. POSIX ACL 또는 지원하지 않는 확장 속성이 있으면 계획에서 제외합니다."
+    operations:
+      - type: preserve_content_file_metadata
+        path: /etc/services
+        allowed_owners: [root, bin, sys]
+        remediation_owner: root
+        maximum_mode: "0644"
+  - id: u29-hosts-lpd-permissions-ubuntu-24.04-amd64
+    guide_year: 2026
+    rule_id: U-29
+    selector:
+      id: ubuntu
+      version: "24.04"
+      architecture: amd64
+    verification:
+      state: verified
+      environments:
+        - Ubuntu 24.04 LTS amd64
+      verified_at: "2026-08-02T14:58:30.339056Z"
+      evidence_sha256:
+        - 7dcc43ec0fd59cc5471234d0a55693bcbad6f8a6b5330661c56b7c4a419de96b
+    risk: CAUTION
+    expected_impact: "/etc/hosts.lpd의 내용, inode, GID와 이미 더 엄격한 권한을 보존하고, 필요한 경우에만 소유자를 root로 바꾸고 0600에서 허용하지 않는 권한 비트를 제거합니다. POSIX ACL 또는 지원하지 않는 확장 속성이 있으면 계획에서 제외합니다."
+    operations:
+      - type: preserve_content_file_metadata
+        path: /etc/hosts.lpd
+        allowed_owners: [root]
+        remediation_owner: root
+        maximum_mode: "0600"

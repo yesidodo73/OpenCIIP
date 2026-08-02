@@ -29,7 +29,17 @@ import (
 	"github.com/yesidodo73/OpenCIIP/internal/system"
 )
 
-var ruleIDPattern = regexp.MustCompile(`^U-[0-9]{2}$`)
+var (
+	ruleIDPattern = regexp.MustCompile(`^U-[0-9]{2}$`)
+
+	strictSemanticVersionPattern = regexp.MustCompile(
+		`^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-((0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(\.(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*))?(\+([0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*))?$`,
+	)
+	stableSemanticVersionPattern = regexp.MustCompile(
+		`^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$`,
+	)
+	canonicalGitCommitPattern = regexp.MustCompile(`^([0-9a-f]{40}|[0-9a-f]{64})$`)
+)
 
 type Workflow struct {
 	stateRoot  string
@@ -41,7 +51,8 @@ type Workflow struct {
 	store      *journal.Store
 	recipes    *recipe.Registry
 	rules      rules.Bundle
-	manager    *orchestrator.Manager
+	manager    orchestrator.RemediationManager
+	buildID    func(context.Context, bool) (model.RemediationBuildIdentity, error)
 	now        func() time.Time
 }
 
@@ -63,6 +74,13 @@ type gateSnapshot struct {
 	build    model.RemediationBuildIdentity
 }
 
+type executionGateScope struct {
+	current      gateSnapshot
+	resolvedByID map[string]model.ResolvedRule
+	changeSets   []model.ChangeSet
+	ruleIDs      []string
+}
+
 func currentBuildIdentity(ctx context.Context, requireRelease bool) (model.RemediationBuildIdentity, error) {
 	executableDigest, err := buildinfo.ExecutableSHA256(ctx)
 	if err != nil {
@@ -75,13 +93,51 @@ func currentBuildIdentity(ctx context.Context, requireRelease bool) (model.Remed
 		ExecutableSHA256: executableDigest,
 		Modified:         currentBuild.Modified,
 	}
-	if err := build.Validate(); err != nil {
-		return model.RemediationBuildIdentity{}, fmt.Errorf("현재 조치 빌드 identity가 유효하지 않습니다: %w", err)
-	}
-	if requireRelease && (strings.EqualFold(build.Version, "dev") || strings.EqualFold(build.Version, "unknown") || strings.EqualFold(build.Commit, "unknown") || build.Modified || buildinfo.IsPrerelease(build.Version)) {
-		return model.RemediationBuildIdentity{}, fmt.Errorf("dev, unknown, 사전 릴리스 또는 수정된 빌드에서는 실제 조치나 롤백을 수행할 수 없습니다")
+	if err := validateExecutionBuildIdentity(build, currentBuild.VCS, requireRelease); err != nil {
+		return model.RemediationBuildIdentity{}, err
 	}
 	return build, nil
+}
+
+func (w *Workflow) currentBuildIdentity(ctx context.Context, requireRelease bool) (model.RemediationBuildIdentity, error) {
+	if w != nil && w.buildID != nil {
+		return w.buildID(ctx, requireRelease)
+	}
+	return currentBuildIdentity(ctx, requireRelease)
+}
+
+func validateExecutionBuildIdentity(build model.RemediationBuildIdentity, provenance buildinfo.VCSProvenance, requireRelease bool) error {
+	if err := build.Validate(); err != nil {
+		return fmt.Errorf("현재 조치 빌드 identity가 유효하지 않습니다: %w", err)
+	}
+	if !requireRelease {
+		return nil
+	}
+	if !strictSemanticVersionPattern.MatchString(build.Version) {
+		return fmt.Errorf("실제 조치나 롤백에는 Semantic Versioning 형식의 정식 버전이 필요합니다")
+	}
+	if !stableSemanticVersionPattern.MatchString(build.Version) {
+		return fmt.Errorf("사전 릴리스 또는 build metadata가 포함된 빌드에서는 실제 조치나 롤백을 수행할 수 없습니다")
+	}
+	if !canonicalGitCommitPattern.MatchString(build.Commit) {
+		return fmt.Errorf("실제 조치나 롤백에는 전체 길이의 canonical Git commit이 필요합니다")
+	}
+	if strings.Trim(build.Commit, "0") == "" {
+		return fmt.Errorf("null Git commit으로는 실제 조치나 롤백을 수행할 수 없습니다")
+	}
+	if build.Modified {
+		return fmt.Errorf("수정된 빌드에서는 실제 조치나 롤백을 수행할 수 없습니다")
+	}
+	if !provenance.RevisionPresent || !provenance.ModifiedPresent {
+		return fmt.Errorf("Go VCS provenance가 없는 빌드에서는 실제 조치나 롤백을 수행할 수 없습니다")
+	}
+	if provenance.Revision != build.Commit {
+		return fmt.Errorf("Go VCS revision과 조치 빌드 commit이 일치하지 않습니다")
+	}
+	if provenance.Modified != "false" {
+		return fmt.Errorf("Go VCS provenance가 명시적으로 clean인 빌드에서만 실제 조치나 롤백을 수행할 수 있습니다")
+	}
+	return nil
 }
 
 func New(ctx context.Context, stateRoot, systemRoot string) (*Workflow, error) {
@@ -232,7 +288,7 @@ func (w *Workflow) currentGateSnapshot(ctx context.Context, requireRelease bool)
 	if err != nil {
 		return gateSnapshot{}, fmt.Errorf("현재 내장 조치 정의를 다시 불러오지 못했습니다: %w", err)
 	}
-	build, err := currentBuildIdentity(ctx, requireRelease)
+	build, err := w.currentBuildIdentity(ctx, requireRelease)
 	if err != nil {
 		return gateSnapshot{}, err
 	}
@@ -255,74 +311,182 @@ func (w *Workflow) verifyJournalExecutionGate(ctx context.Context, runID string,
 }
 
 func (w *Workflow) verifyJournalExecutionState(ctx context.Context, journalValue *model.RemediationJournal, requireRelease bool) (*model.RemediationJournal, error) {
-	if journalValue == nil {
-		return nil, fmt.Errorf("조치 저널이 없습니다")
-	}
-	current, err := w.currentGateSnapshot(ctx, requireRelease)
+	scope, err := w.verifyJournalExecutionIdentities(ctx, journalValue, requireRelease, nil)
 	if err != nil {
 		return nil, err
 	}
+	freshResults, err := w.scanCurrentRules(ctx, scope.ruleIDs, scope.resolvedByID, scope.current)
+	if err != nil {
+		return nil, err
+	}
+	if err := requireFreshFail(scope.changeSets, freshResults); err != nil {
+		return nil, err
+	}
+	return journalValue, nil
+}
+
+func (w *Workflow) verifyJournalEffectExecutionState(
+	ctx context.Context,
+	journalValue *model.RemediationJournal,
+	changeSetID,
+	operationID string,
+	requireRelease bool,
+) (*model.RemediationJournal, error) {
+	if strings.TrimSpace(changeSetID) == "" || strings.TrimSpace(operationID) == "" {
+		return nil, fmt.Errorf("변경 세트와 작업 식별자가 필요합니다")
+	}
+	scope, err := w.verifyJournalExecutionIdentities(ctx, journalValue, requireRelease, []string{changeSetID})
+	if err != nil {
+		return nil, err
+	}
+	changeSet := scope.changeSets[0]
+	if changeSet.Approval == nil {
+		return nil, fmt.Errorf("%s 변경 세트에 승인 identity가 없습니다", changeSet.ID)
+	}
+	if err := changeSet.Approval.Validate(journalValue.PlanDigest); err != nil {
+		return nil, fmt.Errorf("%s 변경 세트의 승인 identity가 현재 계획과 다릅니다: %w", changeSet.ID, err)
+	}
+	foundOperation := false
+	for _, operation := range changeSet.Operations {
+		if operation.ID == operationID {
+			foundOperation = true
+			break
+		}
+	}
+	if !foundOperation {
+		return nil, fmt.Errorf("%s 변경 세트에 %s 작업이 없습니다", changeSet.ID, operationID)
+	}
+	freshResults, err := w.scanCurrentRules(ctx, scope.ruleIDs, scope.resolvedByID, scope.current)
+	if err != nil {
+		return nil, err
+	}
+	if err := requireFreshFail(scope.changeSets, freshResults); err != nil {
+		return nil, err
+	}
+	return journalValue, nil
+}
+
+func (w *Workflow) verifyJournalExecutionIdentities(
+	ctx context.Context,
+	journalValue *model.RemediationJournal,
+	requireRelease bool,
+	changeSetIDs []string,
+) (executionGateScope, error) {
+	if journalValue == nil {
+		return executionGateScope{}, fmt.Errorf("조치 저널이 없습니다")
+	}
+	if journalValue.SchemaVersion != model.RemediationSchemaVersion ||
+		journalValue.ScanToolExecutableSHA256 == "" {
+		return executionGateScope{}, fmt.Errorf("이전 형식의 조치 계획은 새로 승인하거나 적용할 수 없습니다. 다시 점검한 뒤 새 계획을 만들어야 합니다")
+	}
+	current, err := w.currentGateSnapshot(ctx, requireRelease)
+	if err != nil {
+		return executionGateScope{}, err
+	}
 	if !model.SameRemediationPlatformIdentity(journalValue.Platform, current.platform) {
-		return nil, fmt.Errorf("계획에 바인딩된 플랫폼과 현재 플랫폼이 정확히 일치하지 않습니다")
+		return executionGateScope{}, fmt.Errorf("계획에 바인딩된 플랫폼과 현재 플랫폼이 정확히 일치하지 않습니다")
 	}
 	if journalValue.RuleSetVersion != current.rules.Version {
-		return nil, fmt.Errorf("계획에 바인딩된 규칙 세트와 현재 내장 규칙 세트가 다릅니다")
+		return executionGateScope{}, fmt.Errorf("계획에 바인딩된 규칙 세트와 현재 내장 규칙 세트가 다릅니다")
 	}
 	if !reflect.DeepEqual(journalValue.RemediationBuild, current.build) {
-		return nil, fmt.Errorf("계획을 만든 조치 실행 파일과 현재 실행 파일 identity가 다릅니다")
+		return executionGateScope{}, fmt.Errorf("계획을 만든 조치 실행 파일과 현재 실행 파일 identity가 다릅니다")
 	}
 	resolved, err := current.rules.Resolve(current.platform)
 	if err != nil {
-		return nil, fmt.Errorf("현재 플랫폼 규칙을 다시 해석하지 못했습니다: %w", err)
+		return executionGateScope{}, fmt.Errorf("현재 플랫폼 규칙을 다시 해석하지 못했습니다: %w", err)
 	}
 	resolvedByID := resolvedRuleMap(resolved)
-	ruleIDs := make([]string, 0, len(journalValue.ChangeSets))
-	for _, changeSet := range journalValue.ChangeSets {
+	selected, err := selectExecutionChangeSets(journalValue, changeSetIDs)
+	if err != nil {
+		return executionGateScope{}, err
+	}
+	ruleIDs := make([]string, 0, len(selected))
+	for _, changeSet := range selected {
 		ruleIDs = append(ruleIDs, changeSet.RuleID)
 		currentRule, exists := resolvedByID[changeSet.RuleID]
 		if !exists || !currentRule.Applicable || currentRule.Verification.State != model.VerificationVerified {
-			return nil, fmt.Errorf("%s 규칙은 현재 플랫폼에서 verified 조치 대상이 아닙니다", changeSet.RuleID)
+			return executionGateScope{}, fmt.Errorf("%s 규칙은 현재 플랫폼에서 verified 조치 대상이 아닙니다", changeSet.RuleID)
+		}
+		if err := current.rules.ValidateRemediationRuleProvenance(current.platform, currentRule); err != nil {
+			return executionGateScope{}, fmt.Errorf("%s 규칙의 exact 플랫폼 검증 provenance가 유효하지 않습니다: %w", changeSet.RuleID, err)
 		}
 		if !reflect.DeepEqual(changeSet.RuleIdentity, ruleIdentity(currentRule)) {
-			return nil, fmt.Errorf("%s 규칙의 evaluator 또는 binding provenance가 계획과 다릅니다", changeSet.RuleID)
+			return executionGateScope{}, fmt.Errorf("%s 규칙의 evaluator 또는 binding provenance가 계획과 다릅니다", changeSet.RuleID)
 		}
 		currentRecipe, exists := current.recipes.Match(changeSet.RuleID, current.platform)
 		if !exists {
-			return nil, fmt.Errorf("%s 조치 정의가 현재 내장 정의에 없습니다", changeSet.RuleID)
+			return executionGateScope{}, fmt.Errorf("%s 조치 정의가 현재 내장 정의에 없습니다", changeSet.RuleID)
 		}
 		if err := requireVerifiedRecipe(currentRecipe); err != nil {
-			return nil, err
+			return executionGateScope{}, err
 		}
 		currentRecipeIdentity, identityErr := recipeIdentity(currentRecipe)
 		if identityErr != nil {
-			return nil, fmt.Errorf("%s 조치 정의 identity를 계산하지 못했습니다: %w", changeSet.RuleID, identityErr)
+			return executionGateScope{}, fmt.Errorf("%s 조치 정의 identity를 계산하지 못했습니다: %w", changeSet.RuleID, identityErr)
 		}
 		if !reflect.DeepEqual(changeSet.RecipeIdentity, currentRecipeIdentity) {
-			return nil, fmt.Errorf("%s 조치 정의 identity가 계획과 다릅니다", changeSet.RuleID)
+			return executionGateScope{}, fmt.Errorf("%s 조치 정의 identity가 계획과 다릅니다", changeSet.RuleID)
 		}
 	}
 	ownerUIDs, err := w.resolveRecipeOwnerUIDs(ctx, ruleIDs, current)
 	if err != nil {
-		return nil, err
+		return executionGateScope{}, err
 	}
-	if err := verifyJournalRecipeResolution(journalValue, current, ownerUIDs); err != nil {
-		return nil, err
+	if err := verifyJournalRecipeResolution(selected, current, ownerUIDs); err != nil {
+		return executionGateScope{}, err
 	}
-	freshResults, err := w.scanCurrentRules(ctx, ruleIDs, resolvedByID, current)
-	if err != nil {
-		return nil, err
+	return executionGateScope{
+		current:      current,
+		resolvedByID: resolvedByID,
+		changeSets:   selected,
+		ruleIDs:      ruleIDs,
+	}, nil
+}
+
+func selectExecutionChangeSets(value *model.RemediationJournal, changeSetIDs []string) ([]model.ChangeSet, error) {
+	if value == nil {
+		return nil, fmt.Errorf("조치 저널이 없습니다")
 	}
-	for _, changeSet := range journalValue.ChangeSets {
+	if len(changeSetIDs) == 0 {
+		return append([]model.ChangeSet(nil), value.ChangeSets...), nil
+	}
+	wanted := make(map[string]struct{}, len(changeSetIDs))
+	for _, changeSetID := range changeSetIDs {
+		if strings.TrimSpace(changeSetID) == "" {
+			return nil, fmt.Errorf("변경 세트 식별자가 비어 있습니다")
+		}
+		if _, duplicate := wanted[changeSetID]; duplicate {
+			return nil, fmt.Errorf("실행 gate 범위에 %s 변경 세트가 중복되었습니다", changeSetID)
+		}
+		wanted[changeSetID] = struct{}{}
+	}
+	selected := make([]model.ChangeSet, 0, len(wanted))
+	for _, changeSet := range value.ChangeSets {
+		if _, exists := wanted[changeSet.ID]; !exists {
+			continue
+		}
+		selected = append(selected, changeSet)
+		delete(wanted, changeSet.ID)
+	}
+	if len(wanted) != 0 {
+		return nil, fmt.Errorf("실행 gate 범위에 저널에 없는 변경 세트가 있습니다")
+	}
+	return selected, nil
+}
+
+func requireFreshFail(changeSets []model.ChangeSet, freshResults map[string]model.CheckResult) error {
+	for _, changeSet := range changeSets {
 		result, exists := freshResults[changeSet.RuleID]
 		if !exists || result.Status != model.StatusFail {
 			status := "결과 없음"
 			if exists {
 				status = string(result.Status)
 			}
-			return nil, fmt.Errorf("%s 현재 상태 재점검이 %s이므로 승인된 FAIL 조치를 계속할 수 없습니다", changeSet.RuleID, status)
+			return fmt.Errorf("%s 현재 상태 재점검이 %s이므로 승인된 FAIL 조치를 계속할 수 없습니다", changeSet.RuleID, status)
 		}
 	}
-	return journalValue, nil
+	return nil
 }
 
 func resolvedRuleMap(values []model.ResolvedRule) map[string]model.ResolvedRule {
@@ -523,7 +687,8 @@ func (w *Workflow) Plan(ctx context.Context, scan model.ScanRun, options PlanOpt
 	journalValue, err := w.manager.Plan(ctx, orchestrator.PlanRequest{
 		RunID: runID, ScanRunID: scan.Metadata.RunID,
 		ScanToolVersion: scan.Metadata.ToolVersion, ScanToolCommit: scan.Metadata.ToolCommit,
-		RuleSetVersion: scan.Metadata.RuleSetVersion, Platform: current.platform, RemediationBuild: current.build,
+		ScanToolExecutableSHA256: scan.Metadata.ToolExecutableSHA256,
+		RuleSetVersion:           scan.Metadata.RuleSetVersion, Platform: current.platform, RemediationBuild: current.build,
 		FailurePolicy: options.FailurePolicy, Host: actualHost, ChangeSets: changeSets,
 	})
 	if err != nil {
@@ -572,6 +737,10 @@ func (w *Workflow) Apply(ctx context.Context, runID string) error {
 		runID,
 		func(gateContext context.Context, current *model.RemediationJournal) error {
 			_, err := w.verifyJournalExecutionState(gateContext, current, true)
+			return err
+		},
+		func(gateContext context.Context, current *model.RemediationJournal, changeSetID, operationID string) error {
+			_, err := w.verifyJournalEffectExecutionState(gateContext, current, changeSetID, operationID, true)
 			return err
 		},
 		func(verificationContext context.Context, applied *model.RemediationJournal, changeSetIDs []string) ([]string, error) {
@@ -687,27 +856,33 @@ func (w *Workflow) RollbackItem(ctx context.Context, runID, changeSetID string, 
 	if w == nil || w.manager == nil {
 		return model.RollbackAttempt{}, fmt.Errorf("조치 workflow가 초기화되지 않았습니다")
 	}
-	if _, err := currentBuildIdentity(ctx, true); err != nil {
+	executorBuild, err := w.currentBuildIdentity(ctx, true)
+	if err != nil {
 		return model.RollbackAttempt{}, err
 	}
-	return w.manager.RollbackItem(ctx, runID, changeSetID, cascadeApproved, previewDigest)
+	return w.manager.RollbackItem(ctx, runID, changeSetID, cascadeApproved, previewDigest, executorBuild)
 }
 
 func (w *Workflow) RollbackRun(ctx context.Context, runID, previewDigest string) (model.RollbackAttempt, error) {
 	if w == nil || w.manager == nil {
 		return model.RollbackAttempt{}, fmt.Errorf("조치 workflow가 초기화되지 않았습니다")
 	}
-	if _, err := currentBuildIdentity(ctx, true); err != nil {
+	executorBuild, err := w.currentBuildIdentity(ctx, true)
+	if err != nil {
 		return model.RollbackAttempt{}, err
 	}
-	return w.manager.RollbackRun(ctx, runID, previewDigest)
+	return w.manager.RollbackRun(ctx, runID, previewDigest, executorBuild)
 }
 
 func (w *Workflow) Recover(ctx context.Context, runID string) (orchestrator.RecoveryAssessment, error) {
 	if w == nil || w.manager == nil {
 		return orchestrator.RecoveryAssessment{}, fmt.Errorf("조치 workflow가 초기화되지 않았습니다")
 	}
-	return w.manager.Recover(ctx, runID)
+	observedByBuild, err := w.currentBuildIdentity(ctx, false)
+	if err != nil {
+		return orchestrator.RecoveryAssessment{}, err
+	}
+	return w.manager.Recover(ctx, runID, observedByBuild)
 }
 
 func (w *Workflow) validateReportCompatibility(scan model.ScanRun, current gateSnapshot) error {
@@ -717,6 +892,11 @@ func (w *Workflow) validateReportCompatibility(scan model.ScanRun, current gateS
 	}
 	if metadata.RuleSetVersion != current.rules.Version {
 		return fmt.Errorf("보고서 규칙 세트가 현재 실행 파일의 내장 규칙과 다릅니다")
+	}
+	if metadata.ToolVersion != current.build.Version ||
+		metadata.ToolCommit != current.build.Commit ||
+		metadata.ToolExecutableSHA256 != current.build.ExecutableSHA256 {
+		return fmt.Errorf("보고서를 만든 점검 실행 파일과 현재 실행 파일 identity가 다릅니다")
 	}
 	if !model.SameRemediationPlatformIdentity(metadata.Platform, current.platform) {
 		return fmt.Errorf("보고서 플랫폼과 현재 플랫폼이 일치하지 않습니다")
@@ -734,6 +914,9 @@ func (w *Workflow) eligibleRecipe(scan model.ScanRun, result model.CheckResult, 
 	}
 	if !resolved.Applicable || resolved.Verification.State != model.VerificationVerified {
 		return model.RemediationRecipe{}, false, "현재 환경의 규칙 검증이 완료되지 않음"
+	}
+	if err := current.rules.ValidateRemediationRuleProvenance(current.platform, resolved); err != nil {
+		return model.RemediationRecipe{}, false, "현재 환경의 규칙 검증 provenance가 exact 플랫폼에 고정되지 않음"
 	}
 	item, exists := current.recipes.Match(result.RuleID, current.platform)
 	if !exists {
@@ -881,11 +1064,8 @@ func (w *Workflow) resolveRecipeOwnerUIDs(ctx context.Context, ruleIDs []string,
 	return ownerUIDs, nil
 }
 
-func verifyJournalRecipeResolution(value *model.RemediationJournal, current gateSnapshot, ownerUIDs map[string]int) error {
-	if value == nil {
-		return fmt.Errorf("조치 저널이 없습니다")
-	}
-	for _, changeSet := range value.ChangeSets {
+func verifyJournalRecipeResolution(changeSets []model.ChangeSet, current gateSnapshot, ownerUIDs map[string]int) error {
+	for _, changeSet := range changeSets {
 		item, exists := current.recipes.Match(changeSet.RuleID, current.platform)
 		if !exists {
 			return fmt.Errorf("%s 조치 정의가 현재 내장 정의에 없습니다", changeSet.RuleID)

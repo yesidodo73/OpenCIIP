@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/yesidodo73/OpenCIIP/internal/model"
 	"github.com/yesidodo73/OpenCIIP/internal/remediation/conflict"
@@ -85,13 +86,15 @@ func (m *Manager) verifyLoadedJournal(ctx context.Context, runID string, value *
 		return nil, wrapDependency("verify host identity", runID, "", "", err)
 	}
 	calculated, err := digestPlan(value.RunID, PlanRequest{
-		ScanRunID:        value.ScanRunID,
-		ScanToolVersion:  value.ScanToolVersion,
-		ScanToolCommit:   value.ScanToolCommit,
-		RuleSetVersion:   value.RuleSetVersion,
-		Platform:         value.Platform,
-		RemediationBuild: value.RemediationBuild,
-		FailurePolicy:    value.FailurePolicy,
+		SchemaVersion:            value.SchemaVersion,
+		ScanRunID:                value.ScanRunID,
+		ScanToolVersion:          value.ScanToolVersion,
+		ScanToolCommit:           value.ScanToolCommit,
+		ScanToolExecutableSHA256: value.ScanToolExecutableSHA256,
+		RuleSetVersion:           value.RuleSetVersion,
+		Platform:                 value.Platform,
+		RemediationBuild:         value.RemediationBuild,
+		FailurePolicy:            value.FailurePolicy,
 	}, value.Host, value.ChangeSets, value.ConflictGraph)
 	if err != nil {
 		return nil, &Error{Code: CodeInvalidState, Operation: "verify plan digest", RunID: runID, Err: err}
@@ -303,6 +306,23 @@ func appendUnique(values []string, additions ...string) []string {
 	return result
 }
 
+func (m *Manager) rollbackAttemptCompletionTime(
+	value *model.RemediationJournal,
+	startedAt time.Time,
+	errors []model.JournalError,
+) time.Time {
+	completedAt := m.nextEventTime(value)
+	if startedAt.After(completedAt) {
+		completedAt = startedAt
+	}
+	for _, journalError := range errors {
+		if journalError.OccurredAt.After(completedAt) {
+			completedAt = journalError.OccurredAt
+		}
+	}
+	return completedAt
+}
+
 func incompleteRollbackAttempt(value *model.RemediationJournal) (*model.RollbackAttempt, bool) {
 	if value == nil || len(value.RollbackAttempts) == 0 {
 		return nil, false
@@ -319,7 +339,12 @@ func operationResource(operation model.OperationRecord) *model.ResourceRef {
 	return &reference
 }
 
-func (m *Manager) makeJournalError(phase, changeSetID, operationID string, operation *model.OperationRecord, err error) model.JournalError {
+func (m *Manager) makeJournalError(
+	value *model.RemediationJournal,
+	phase, changeSetID, operationID string,
+	operation *model.OperationRecord,
+	err error,
+) model.JournalError {
 	code := model.JournalErrorRecoveryAmbiguous
 	if regularfile.CodeOf(err) == regularfile.CodeFileChanged {
 		code = model.JournalErrorExternalChange
@@ -373,7 +398,7 @@ func (m *Manager) makeJournalError(phase, changeSetID, operationID string, opera
 		Resource:    resource,
 		Message:     message,
 		Retryable:   false,
-		OccurredAt:  m.nowUTC(),
+		OccurredAt:  m.nextEventTime(value),
 	}
 }
 

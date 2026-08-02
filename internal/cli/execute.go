@@ -14,6 +14,8 @@ import (
 	"github.com/yesidodo73/OpenCIIP/internal/engine"
 	"github.com/yesidodo73/OpenCIIP/internal/exitcode"
 	"github.com/yesidodo73/OpenCIIP/internal/model"
+	"github.com/yesidodo73/OpenCIIP/internal/presentation"
+	"github.com/yesidodo73/OpenCIIP/internal/redact"
 	remediationworkflow "github.com/yesidodo73/OpenCIIP/internal/remediation/workflow"
 	"github.com/yesidodo73/OpenCIIP/internal/report"
 	"github.com/yesidodo73/OpenCIIP/internal/tui"
@@ -28,13 +30,17 @@ func Execute(ctx context.Context, args []string, stdin io.Reader, stdout, stderr
 	if err := command.Execute(); err != nil {
 		var failure *commandError
 		if errors.As(err, &failure) {
-			_, _ = fmt.Fprintln(stderr, failure.err)
+			_, _ = fmt.Fprintln(stderr, terminalErrorText(failure.err))
 			return failure.code
 		}
-		_, _ = fmt.Fprintln(stderr, err)
+		_, _ = fmt.Fprintln(stderr, terminalErrorText(err))
 		return exitcode.Usage
 	}
 	return resultCode
+}
+
+func terminalErrorText(err error) string {
+	return presentation.Sanitize(redact.Text(fmt.Sprint(err)))
 }
 
 func newRootCommand(stdin io.Reader, stdout, stderr io.Writer, resultCode *int) *cobra.Command {

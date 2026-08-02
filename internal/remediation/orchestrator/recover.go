@@ -1,15 +1,21 @@
 package orchestrator
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"sort"
 
 	"github.com/yesidodo73/OpenCIIP/internal/model"
+	journalpkg "github.com/yesidodo73/OpenCIIP/internal/remediation/journal"
 	"github.com/yesidodo73/OpenCIIP/internal/remediation/regularfile"
 )
 
-func (m *Manager) Recover(ctx context.Context, runID string) (RecoveryAssessment, error) {
+func (m *Manager) Recover(ctx context.Context, runID string, observedByBuild model.RemediationBuildIdentity) (RecoveryAssessment, error) {
+	if err := observedByBuild.Validate(); err != nil {
+		return RecoveryAssessment{}, &Error{Code: CodeInvalidInput, Operation: "recover", RunID: runID, Err: fmt.Errorf("invalid recovery observer build: %w", err)}
+	}
 	lock, err := m.acquire(ctx, "recover")
 	if err != nil {
 		return RecoveryAssessment{}, err
@@ -24,6 +30,10 @@ func (m *Manager) Recover(ctx context.Context, runID string) (RecoveryAssessment
 		return RecoveryAssessment{}, err
 	}
 	if err := m.ensureNoOtherRecoverable(ctx, runID); err != nil {
+		return RecoveryAssessment{}, err
+	}
+	value, err = m.claimRecoveryAttempt(ctx, value, observedByBuild)
+	if err != nil {
 		return RecoveryAssessment{}, err
 	}
 	assessment := RecoveryAssessment{RunID: runID, LastValidRevision: value.Revision}
@@ -45,13 +55,14 @@ func (m *Manager) Recover(ctx context.Context, runID string) (RecoveryAssessment
 		return assessment, cancelErr
 	}
 	if value.State.Terminal() && !value.State.NeedsOperatorAction() {
-		return assessment, &Error{Code: CodeInvalidState, Operation: "recover", RunID: runID, Err: fmt.Errorf("run %s does not require recovery", value.State)}
+		return assessment, nil
 	}
 	handler, err := m.fileHandler(runID)
 	if err != nil {
 		return assessment, err
 	}
-	value, err = m.recoverOperationChains(ctx, value, handler, &assessment)
+	observedFrontier := make(map[string]model.ResourceSnapshot)
+	value, err = m.recoverOperationChains(ctx, value, handler, &assessment, observedFrontier, observedByBuild)
 	if err != nil {
 		return assessment, err
 	}
@@ -86,12 +97,96 @@ func (m *Manager) Recover(ctx context.Context, runID string) (RecoveryAssessment
 	assessment.ConfirmedApplied = removeAssessmentIDs(assessment.ConfirmedApplied, assessment.Ambiguous)
 	assessment.Reasons = uniqueSorted(assessment.Reasons)
 	assessment.AutomaticRollbackPossible = len(assessment.Ambiguous) == 0 && len(assessment.ConfirmedApplied) > 0
-	value, err = m.finalizeRecoveredRun(ctx, value, assessment)
+	value, err = m.finalizeRecoveredRun(ctx, value, handler, observedFrontier, assessment, observedByBuild)
 	if err != nil {
 		return assessment, err
 	}
 	assessment.LastValidRevision = value.Revision
 	return assessment, nil
+}
+
+func (m *Manager) claimRecoveryAttempt(
+	ctx context.Context,
+	value *model.RemediationJournal,
+	observedByBuild model.RemediationBuildIdentity,
+) (*model.RemediationJournal, error) {
+	if value == nil {
+		return value, &Error{Code: CodeInvalidInput, Operation: "claim recovery attempt", Err: fmt.Errorf("journal is required")}
+	}
+	if value.SchemaVersion == 2 {
+		return value, nil
+	}
+	if value.SchemaVersion != model.RemediationSchemaVersion {
+		return value, &Error{Code: CodeInvalidState, Operation: "claim recovery attempt", RunID: value.RunID, Err: fmt.Errorf("unsupported remediation schema version %d", value.SchemaVersion)}
+	}
+	attempt, incomplete := incompleteRollbackAttempt(value)
+	if !incomplete {
+		return value, nil
+	}
+	if attempt.ObservedByBuild != nil {
+		if *attempt.ObservedByBuild != observedByBuild {
+			return value, &Error{Code: CodeRecoveryRequired, Operation: "claim recovery attempt", RunID: value.RunID, Err: fmt.Errorf("rollback attempt %s is owned by a different recovery build", attempt.ID)}
+		}
+		return value, nil
+	}
+	if attempt.Trigger == model.RollbackCrashRecovery {
+		return value, &Error{Code: CodeRecoveryRequired, Operation: "claim recovery attempt", RunID: value.RunID, Err: fmt.Errorf("crash recovery attempt %s has no durable observer build", attempt.ID)}
+	}
+	next, persistErr := m.update(ctx, value, "claim interrupted rollback recovery", func(journal *model.RemediationJournal) error {
+		latest, ok := incompleteRollbackAttempt(journal)
+		if !ok || latest.ID != attempt.ID {
+			return fmt.Errorf("incomplete rollback attempt changed before recovery ownership was recorded")
+		}
+		if latest.ObservedByBuild != nil {
+			if *latest.ObservedByBuild != observedByBuild {
+				return fmt.Errorf("rollback attempt %s is owned by a different recovery build", latest.ID)
+			}
+			return nil
+		}
+		copy := observedByBuild
+		journal.RollbackAttempts[len(journal.RollbackAttempts)-1].ObservedByBuild = &copy
+		return nil
+	})
+	if persistErr == nil {
+		return next, nil
+	}
+	latest, reloadErr := m.loadAndVerify(ctx, value.RunID)
+	if reloadErr == nil && recoveryObserverClaimMatches(value, latest, attempt.ID, observedByBuild) {
+		return latest, nil
+	}
+	return value, persistErr
+}
+
+func recoveryObserverClaimMatches(
+	previous, actual *model.RemediationJournal,
+	attemptID string,
+	observedByBuild model.RemediationBuildIdentity,
+) bool {
+	if previous == nil || actual == nil ||
+		actual.Revision != previous.Revision+1 ||
+		!actual.UpdatedAt.After(previous.UpdatedAt) ||
+		len(actual.RollbackAttempts) != len(previous.RollbackAttempts) ||
+		len(actual.RollbackAttempts) == 0 {
+		return false
+	}
+	claimed := actual.RollbackAttempts[len(actual.RollbackAttempts)-1]
+	if claimed.ID != attemptID || claimed.CompletedAt != nil ||
+		claimed.ObservedByBuild == nil || *claimed.ObservedByBuild != observedByBuild {
+		return false
+	}
+	normalized, err := cloneRecoveryJournal(actual)
+	if err != nil {
+		return false
+	}
+	normalized.Revision = previous.Revision
+	normalized.UpdatedAt = previous.UpdatedAt
+	normalized.RollbackAttempts[len(normalized.RollbackAttempts)-1].ObservedByBuild = nil
+	expected, err := journalpkg.CanonicalJSON(previous)
+	if err != nil {
+		return false
+	}
+	got, err := journalpkg.CanonicalJSON(normalized)
+	return err == nil && bytes.Equal(expected, got)
 }
 
 type recoveryOperationRef struct {
@@ -142,6 +237,8 @@ func (m *Manager) recoverOperationChains(
 	value *model.RemediationJournal,
 	handler fileRuntime,
 	assessment *RecoveryAssessment,
+	observedFrontier map[string]model.ResourceSnapshot,
+	observedByBuild model.RemediationBuildIdentity,
 ) (*model.RemediationJournal, error) {
 	if value == nil || handler == nil || assessment == nil {
 		return nil, &Error{Code: CodeInvalidInput, Operation: "recover operation chains", Err: fmt.Errorf("journal, file handler, and assessment are required")}
@@ -215,6 +312,9 @@ func (m *Manager) recoverOperationChains(
 				continue
 			}
 			logicalCurrent[resourceKey] = current
+			if observedFrontier != nil {
+				observedFrontier[resourceKey] = current
+			}
 		}
 		before := exactEqual(operationCopy.Before, current)
 		desiredMatches := exactEqual(operationCopy.Desired, current)
@@ -250,6 +350,34 @@ func (m *Manager) recoverOperationChains(
 			}
 			delete(rolledBackSuffixes, resourceKey)
 		}
+		if before &&
+			recoveredRollbackCandidate(value, reference.changeSetID, operationCopy) &&
+			recoveryAttemptDefersChangeSet(value, reference.changeSetID) {
+			assessment.Reasons = append(assessment.Reasons, identifier+": 별도의 승인 범위에 속한 진행 중 복구 시도를 먼저 종결합니다")
+			if suffix := rolledBackSuffixes[resourceKey]; len(suffix) > 0 {
+				deferred := operationCopy
+				observedRollback := current
+				deferred.ObservedRollback = &observedRollback
+				combined := append(append([]recoveredRollbackRef(nil), suffix...), recoveredRollbackRef{
+					changeSetID: reference.changeSetID,
+					operationID: reference.operationID,
+					operation:   deferred,
+				})
+				if chainErr := validateRecoveredRollbackSuffix(current, combined); chainErr != nil {
+					blockedResources[resourceKey] = chainErr
+					value, err = m.markRecoveredRollbackSuffixAmbiguous(ctx, value, suffix, assessment, chainErr)
+					if err != nil {
+						return value, err
+					}
+				} else {
+					for _, rolledBack := range suffix {
+						assessment.ConfirmedRolledBack = append(assessment.ConfirmedRolledBack, rolledBack.changeSetID+"/"+rolledBack.operationID)
+					}
+				}
+				delete(rolledBackSuffixes, resourceKey)
+			}
+			continue
+		}
 
 		activeEffect := false
 		resolvedToBefore := false
@@ -279,7 +407,7 @@ func (m *Manager) recoverOperationChains(
 			}
 		case model.OperationApplied, model.OperationVerified:
 			if before && rollbackRecoveryScopeCovers(value, reference.changeSetID) {
-				value, err = m.resolveRecoveredRollback(ctx, value, reference.changeSetID, reference.operationID, current)
+				value, err = m.resolveRecoveredRollback(ctx, value, reference.changeSetID, reference.operationID, current, observedByBuild)
 				assessment.ConfirmedRolledBack = append(assessment.ConfirmedRolledBack, identifier)
 				logicalCurrent[resourceKey] = operationCopy.Before
 				resolvedToBefore = true
@@ -348,7 +476,7 @@ func (m *Manager) recoverOperationChains(
 			}
 		case model.OperationFailed:
 			if before && operationCopy.RollbackIntentAt != nil {
-				value, err = m.resolveRecoveredRollback(ctx, value, reference.changeSetID, reference.operationID, current)
+				value, err = m.resolveRecoveredRollback(ctx, value, reference.changeSetID, reference.operationID, current, observedByBuild)
 				assessment.ConfirmedRolledBack = append(assessment.ConfirmedRolledBack, identifier)
 				logicalCurrent[resourceKey] = operationCopy.Before
 				resolvedToBefore = true
@@ -438,6 +566,9 @@ func (m *Manager) recoverOperationChains(
 		}
 		earliest := suffix[len(suffix)-1].operation
 		live, captureErr := handler.Capture(ctx, earliest.Resource)
+		if captureErr == nil && observedFrontier != nil {
+			observedFrontier[resourceKey] = live
+		}
 		if captureErr != nil || !exactEqual(earliest.Before, live) {
 			if captureErr == nil {
 				captureErr = fmt.Errorf("fully rolled-back writer chain does not match its earliest before state")
@@ -485,23 +616,54 @@ func operationCanResolveToBefore(operation model.OperationRecord) bool {
 	}
 }
 
-func rollbackRecoveryScopeCovers(value *model.RemediationJournal, changeSetID string) bool {
-	if value == nil {
+func recoveredRollbackCandidate(value *model.RemediationJournal, changeSetID string, operation model.OperationRecord) bool {
+	switch operation.State {
+	case model.OperationApplied, model.OperationVerified:
+		return rollbackRecoveryScopeCovers(value, changeSetID)
+	case model.OperationRollbackIntentDurable:
+		return true
+	case model.OperationAmbiguous, model.OperationFailed:
+		return operation.RollbackIntentAt != nil
+	default:
 		return false
+	}
+}
+
+func recoveryAttemptDefersChangeSet(value *model.RemediationJournal, changeSetID string) bool {
+	active, incomplete := incompleteRollbackAttempt(value)
+	if !incomplete {
+		return false
+	}
+	for _, target := range active.ExpandedChangeSets {
+		if target == changeSetID {
+			return false
+		}
+	}
+	return true
+}
+
+func rollbackRecoveryScopeCovers(value *model.RemediationJournal, changeSetID string) bool {
+	_, covered := rollbackRecoveryAttempt(value, changeSetID)
+	return covered
+}
+
+func rollbackRecoveryAttempt(value *model.RemediationJournal, changeSetID string) (model.RollbackAttempt, bool) {
+	if value == nil {
+		return model.RollbackAttempt{}, false
 	}
 	changeSet, _, err := findChangeSet(value, changeSetID)
 	if err != nil || !(changeSet.State.NeedsOperatorAction() || changeSet.State == model.ChangeRollingBack) {
-		return false
+		return model.RollbackAttempt{}, false
 	}
 	for index := len(value.RollbackAttempts) - 1; index >= 0; index-- {
 		attempt := value.RollbackAttempts[index]
 		for _, target := range attempt.ExpandedChangeSets {
 			if target == changeSetID {
-				return true
+				return attempt, true
 			}
 		}
 	}
-	return false
+	return model.RollbackAttempt{}, false
 }
 
 func validateRecoveredRollbackSuffix(anchor model.ResourceSnapshot, suffix []recoveredRollbackRef) error {
@@ -551,7 +713,7 @@ func (m *Manager) resolveUnappliedOperation(ctx context.Context, value *model.Re
 	if !canResolveNoEffect(*operation) || !exactEqual(operation.Before, observed) {
 		return value, &Error{Code: CodeRecoveryRequired, Operation: "resolve unapplied operation", RunID: value.RunID, ChangeSetID: changeSetID, OperationID: operationID, Err: fmt.Errorf("operation does not have exact no-effect evidence")}
 	}
-	journalError := m.makeJournalError("recover_no_effect", changeSetID, operationID, operation, &Error{Code: CodeApplyFailed, Err: fmt.Errorf("durable apply intent produced no observed target change")})
+	journalError := m.makeJournalError(value, "recover_no_effect", changeSetID, operationID, operation, &Error{Code: CodeApplyFailed, Err: fmt.Errorf("durable apply intent produced no observed target change")})
 	return m.update(ctx, value, "persist recovered no-effect operation", func(journal *model.RemediationJournal) error {
 		target, _, _, findErr := findOperation(journal, changeSetID, operationID)
 		if findErr != nil {
@@ -582,7 +744,13 @@ func canInferInterruptedApply(operation model.OperationRecord) bool {
 		operation.RecoveryMode == model.RecoveryStateInferable
 }
 
-func (m *Manager) resolveRecoveredRollback(ctx context.Context, value *model.RemediationJournal, changeSetID, operationID string, observed model.ResourceSnapshot) (*model.RemediationJournal, error) {
+func (m *Manager) resolveRecoveredRollback(
+	ctx context.Context,
+	value *model.RemediationJournal,
+	changeSetID, operationID string,
+	observed model.ResourceSnapshot,
+	observedByBuild model.RemediationBuildIdentity,
+) (*model.RemediationJournal, error) {
 	operation, _, _, err := findOperation(value, changeSetID, operationID)
 	if err != nil {
 		return nil, err
@@ -591,7 +759,13 @@ func (m *Manager) resolveRecoveredRollback(ctx context.Context, value *model.Rem
 		if !operation.State.CanTransitionTo(model.OperationRollbackIntentDurable) {
 			return value, &Error{Code: CodeRecoveryRequired, Operation: "record recovered rollback intent", RunID: value.RunID, ChangeSetID: changeSetID, OperationID: operationID, Err: fmt.Errorf("operation %s cannot enter rollback intent", operation.State)}
 		}
-		intentAt := m.nowUTC()
+		if operation.RollbackIntentAt == nil {
+			value, err = m.ensureCrashRecoveryRollbackAttempt(ctx, value, changeSetID, observedByBuild)
+			if err != nil {
+				return value, err
+			}
+		}
+		intentAt := m.nextEventTime(value)
 		value, err = m.update(ctx, value, "record recovered rollback intent", func(journal *model.RemediationJournal) error {
 			target, _, _, findErr := findOperation(journal, changeSetID, operationID)
 			if findErr != nil {
@@ -610,8 +784,66 @@ func (m *Manager) resolveRecoveredRollback(ctx context.Context, value *model.Rem
 	return m.resolveOperation(ctx, value, changeSetID, operationID, model.OperationRolledBack, &observed)
 }
 
+func (m *Manager) ensureCrashRecoveryRollbackAttempt(
+	ctx context.Context,
+	value *model.RemediationJournal,
+	changeSetID string,
+	observedByBuild model.RemediationBuildIdentity,
+) (*model.RemediationJournal, error) {
+	if value == nil {
+		return value, &Error{Code: CodeInvalidInput, Operation: "start crash recovery rollback attempt", ChangeSetID: changeSetID, Err: fmt.Errorf("journal is required")}
+	}
+	if active, incomplete := incompleteRollbackAttempt(value); incomplete {
+		for _, target := range active.ExpandedChangeSets {
+			if target == changeSetID {
+				return value, nil
+			}
+		}
+		return value, &Error{Code: CodeRecoveryRequired, Operation: "start crash recovery rollback attempt", RunID: value.RunID, ChangeSetID: changeSetID, Err: fmt.Errorf("incomplete rollback attempt %s does not cover the recovered change set", active.ID)}
+	}
+	prior, covered := rollbackRecoveryAttempt(value, changeSetID)
+	if !covered || prior.CompletedAt == nil {
+		return value, &Error{Code: CodeRecoveryRequired, Operation: "start crash recovery rollback attempt", RunID: value.RunID, ChangeSetID: changeSetID, Err: fmt.Errorf("completed rollback scope does not cover the recovered change set")}
+	}
+	attemptID, err := m.nextID("rollback-")
+	if err != nil {
+		return value, &Error{Code: CodePersistFailed, Operation: "generate crash recovery attempt ID", RunID: value.RunID, ChangeSetID: changeSetID, Err: err}
+	}
+	startedAt := m.nextEventTime(value)
+	return m.update(ctx, value, "start crash recovery rollback attempt", func(journal *model.RemediationJournal) error {
+		if _, incomplete := incompleteRollbackAttempt(journal); incomplete {
+			return fmt.Errorf("rollback attempt changed while starting crash recovery")
+		}
+		if journal.State != model.RunRollingBack {
+			if !journal.State.CanTransitionTo(model.RunRollingBack) {
+				return fmt.Errorf("run %s cannot enter crash recovery rollback", journal.State)
+			}
+			journal.State = model.RunRollingBack
+		}
+		journal.RollbackAttempts = append(journal.RollbackAttempts, model.RollbackAttempt{
+			ID:                  attemptID,
+			Scope:               prior.Scope,
+			Trigger:             model.RollbackCrashRecovery,
+			ObservedByBuild:     recoveryAttemptObserver(journal, observedByBuild),
+			RequestedChangeSets: append([]string(nil), prior.RequestedChangeSets...),
+			ExpandedChangeSets:  append([]string(nil), prior.ExpandedChangeSets...),
+			CascadeApproved:     prior.CascadeApproved,
+			StartedAt:           startedAt,
+		})
+		return nil
+	})
+}
+
+func recoveryAttemptObserver(value *model.RemediationJournal, observedByBuild model.RemediationBuildIdentity) *model.RemediationBuildIdentity {
+	if value == nil || value.SchemaVersion != model.RemediationSchemaVersion {
+		return nil
+	}
+	copy := observedByBuild
+	return &copy
+}
+
 func (m *Manager) resolveOperation(ctx context.Context, value *model.RemediationJournal, changeSetID, operationID string, state model.OperationState, observed *model.ResourceSnapshot) (*model.RemediationJournal, error) {
-	resolvedAt := m.nowUTC()
+	resolvedAt := m.nextEventTime(value)
 	return m.update(ctx, value, "persist recovered operation", func(journal *model.RemediationJournal) error {
 		operation, _, _, err := findOperation(journal, changeSetID, operationID)
 		if err != nil {
@@ -660,7 +892,7 @@ func (m *Manager) persistRecoveryRequired(ctx context.Context, value *model.Reme
 	if err != nil {
 		return nil, err
 	}
-	journalError := m.makeJournalError("recovery", changeSetID, operationID, operation, &Error{Code: CodeRecoveryRequired, Err: cause})
+	journalError := m.makeJournalError(value, "recovery", changeSetID, operationID, operation, &Error{Code: CodeRecoveryRequired, Err: cause})
 	if operation.State.CanTransitionTo(model.OperationAmbiguous) {
 		value, err = m.update(ctx, value, "persist ambiguous recovery operation", func(journal *model.RemediationJournal) error {
 			target, _, _, findErr := findOperation(journal, changeSetID, operationID)
@@ -757,7 +989,7 @@ func (m *Manager) reconcileRecoveredChangeSet(ctx context.Context, value *model.
 	}
 	rollbackResolution := anyRolledBack || changeSet.State == model.ChangeRollingBack || changeSet.State.NeedsOperatorAction()
 	if allRolledBack && anyRolledBack && rollbackResolution && changeSet.State != model.ChangeRolledBack {
-		rolledBackAt := m.nowUTC()
+		rolledBackAt := m.nextEventTime(value)
 		if changeSet.State != model.ChangeRollingBack {
 			if !changeSet.State.CanTransitionTo(model.ChangeRollingBack) {
 				return value, nil
@@ -794,7 +1026,7 @@ func (m *Manager) reconcileRecoveredChangeSet(ctx context.Context, value *model.
 		changeSet.State == model.ChangeRollbackFailed ||
 		changeSet.State == model.ChangePartiallyRolledBack ||
 		changeSet.State == model.ChangeRecoveryRequired) {
-		recoveryError := m.makeJournalError("recover_unapplied", changeSetID, "", nil, &Error{Code: CodeApplyFailed, Err: fmt.Errorf("interrupted change set has no observed applied effect")})
+		recoveryError := m.makeJournalError(value, "recover_unapplied", changeSetID, "", nil, &Error{Code: CodeApplyFailed, Err: fmt.Errorf("interrupted change set has no observed applied effect")})
 		return m.update(ctx, value, "reconcile unapplied change set", func(journal *model.RemediationJournal) error {
 			target, _, findErr := findChangeSet(journal, changeSetID)
 			if findErr != nil {
@@ -830,7 +1062,7 @@ func (m *Manager) reconcileRecoveredChangeSet(ctx context.Context, value *model.
 			}
 			orderedAfter = append(orderedAfter, after)
 		}
-		appliedAt := m.nowUTC()
+		appliedAt := m.nextEventTime(value)
 		return m.update(ctx, value, "reconcile applied change set", func(journal *model.RemediationJournal) error {
 			target, _, findErr := findChangeSet(journal, changeSetID)
 			if findErr != nil {
@@ -847,7 +1079,34 @@ func (m *Manager) reconcileRecoveredChangeSet(ctx context.Context, value *model.
 	return value, nil
 }
 
-func (m *Manager) finalizeIncompleteRollbackAttempt(ctx context.Context, value *model.RemediationJournal) (*model.RemediationJournal, bool, error) {
+func (m *Manager) verifyRecoveryRollbackSuccess(
+	ctx context.Context,
+	value *model.RemediationJournal,
+	handler fileRuntime,
+	observedFrontier map[string]model.ResourceSnapshot,
+	operation string,
+) error {
+	if value == nil {
+		return &Error{Code: CodeRecoveryRequired, Operation: operation, Committed: true, Err: fmt.Errorf("journal is required")}
+	}
+	if len(observedFrontier) == 0 {
+		return &Error{Code: CodeRecoveryRequired, Operation: operation, RunID: value.RunID, Committed: true, Err: fmt.Errorf("recovery has no observed live frontier for a successful rollback")}
+	}
+	verificationContext, cancelVerification := newApplyCleanupContext(ctx)
+	err := verifyLiveFrontierSnapshots(verificationContext, handler, observedFrontier, "recovery rollback live frontier")
+	cancelVerification()
+	if err != nil {
+		return &Error{Code: CodeRecoveryRequired, Operation: operation, RunID: value.RunID, Committed: true, Err: err}
+	}
+	return nil
+}
+
+func (m *Manager) finalizeIncompleteRollbackAttempt(
+	ctx context.Context,
+	value *model.RemediationJournal,
+	handler fileRuntime,
+	observedFrontier map[string]model.ResourceSnapshot,
+) (*model.RemediationJournal, bool, error) {
 	attempt, incomplete := incompleteRollbackAttempt(value)
 	if !incomplete {
 		return value, false, nil
@@ -877,7 +1136,7 @@ func (m *Manager) finalizeIncompleteRollbackAttempt(ctx context.Context, value *
 			if err != nil {
 				return value, true, err
 			}
-			journalError := m.makeJournalError("recover_interrupted_rollback", changeSetID, "", nil, &Error{Code: CodeRollbackFailed, Err: fmt.Errorf("rollback attempt %s ended before this change set was durably completed", attemptID)})
+			journalError := m.makeJournalError(value, "recover_interrupted_rollback", changeSetID, "", nil, &Error{Code: CodeRollbackFailed, Err: fmt.Errorf("rollback attempt %s ended before this change set was durably completed", attemptID)})
 			if changeSet.State != model.ChangeRollbackFailed {
 				if changeSet.State != model.ChangeRollingBack {
 					if !changeSet.State.CanTransitionTo(model.ChangeRollingBack) {
@@ -925,7 +1184,6 @@ func (m *Manager) finalizeIncompleteRollbackAttempt(ctx context.Context, value *
 		}
 	}
 
-	completedAt := m.nowUTC()
 	outcome := model.RollbackSucceeded
 	targetUnresolved := rollbackTargetUnresolved(value, targets)
 	unresolved := appendUnique(unresolvedRollbackChangeSets(value), targetUnresolved...)
@@ -954,6 +1212,11 @@ func (m *Manager) finalizeIncompleteRollbackAttempt(ctx context.Context, value *
 	if outsideViolation {
 		finalState = model.RunRecoveryRequired
 	}
+	if outcome == model.RollbackSucceeded {
+		if err := m.verifyRecoveryRollbackSuccess(ctx, value, handler, observedFrontier, "verify interrupted rollback before success"); err != nil {
+			return value, true, err
+		}
+	}
 
 	errorCode := CodeRollbackFailed
 	errorReason := fmt.Errorf("rollback attempt %s was interrupted", attemptID)
@@ -961,9 +1224,14 @@ func (m *Manager) finalizeIncompleteRollbackAttempt(ctx context.Context, value *
 		errorCode = CodeRecoveryRequired
 		errorReason = fmt.Errorf("rollback attempt %s requires recovery for unresolved or non-verified change state", attemptID)
 	}
-	journalError := m.makeJournalError("recover_interrupted_rollback", "", "", nil, &Error{Code: errorCode, Err: errorReason})
+	journalError := m.makeJournalError(value, "recover_interrupted_rollback", "", "", nil, &Error{Code: errorCode, Err: errorReason})
 	applyFailureError := firstApplyFailureError(value)
-	next, err := m.update(ctx, value, "complete interrupted rollback attempt", func(journal *model.RemediationJournal) error {
+	completionErrors := append([]model.JournalError(nil), attempt.Errors...)
+	if outcome != model.RollbackSucceeded || outsideViolation {
+		completionErrors = append(completionErrors, journalError)
+	}
+	completedAt := m.rollbackAttemptCompletionTime(value, attempt.StartedAt, completionErrors)
+	next, err := m.updateRecoveryTerminal(ctx, value, "complete interrupted rollback attempt", func(journal *model.RemediationJournal) error {
 		last := &journal.RollbackAttempts[len(journal.RollbackAttempts)-1]
 		if last.ID != attemptID || last.CompletedAt != nil {
 			return fmt.Errorf("incomplete rollback attempt changed during recovery")
@@ -1028,7 +1296,13 @@ func unresolvedRollbackChangeSets(value *model.RemediationJournal) []string {
 	return appendUnique(nil, result...)
 }
 
-func (m *Manager) finalizeCompletedRollbackTransition(ctx context.Context, value *model.RemediationJournal) (*model.RemediationJournal, bool, error) {
+func (m *Manager) finalizeCompletedRollbackTransition(
+	ctx context.Context,
+	value *model.RemediationJournal,
+	handler fileRuntime,
+	observedFrontier map[string]model.ResourceSnapshot,
+	observedByBuild model.RemediationBuildIdentity,
+) (*model.RemediationJournal, bool, error) {
 	if value == nil || value.State != model.RunRollingBack || len(value.RollbackAttempts) == 0 {
 		return value, false, nil
 	}
@@ -1040,7 +1314,7 @@ func (m *Manager) finalizeCompletedRollbackTransition(ctx context.Context, value
 		return value, true, &Error{Code: CodeRecoveryRequired, Operation: "recover completed rollback transition", RunID: value.RunID, Err: fmt.Errorf("rollback attempt %s has no completed outcome", attempt.ID)}
 	}
 	if attempt.Outcome != model.RollbackSucceeded && rollbackScopeResolved(value, attempt.ExpandedChangeSets) {
-		next, err := m.finalizeResolvedCrashRollback(ctx, value, attempt.Scope, attempt.RequestedChangeSets, attempt.ExpandedChangeSets, attempt.CascadeApproved)
+		next, err := m.finalizeResolvedCrashRollback(ctx, value, handler, observedFrontier, attempt.Scope, attempt.RequestedChangeSets, attempt.ExpandedChangeSets, attempt.CascadeApproved, observedByBuild)
 		return next, true, err
 	}
 	finalState := classifyRollbackRunState(value, attempt.ExpandedChangeSets, attempt.Scope)
@@ -1053,9 +1327,14 @@ func (m *Manager) finalizeCompletedRollbackTransition(ctx context.Context, value
 	if len(rollbackOutsideUnresolved(value, attempt.ExpandedChangeSets, attempt.Scope)) > 0 {
 		finalState = model.RunRecoveryRequired
 	}
-	stateError := m.rollbackRunStateError("recover_completed_rollback", finalState)
+	if attempt.Outcome == model.RollbackSucceeded {
+		if err := m.verifyRecoveryRollbackSuccess(ctx, value, handler, observedFrontier, "verify completed rollback before terminal transition"); err != nil {
+			return value, true, err
+		}
+	}
+	stateError := m.rollbackRunStateError(value, "recover_completed_rollback", finalState)
 	applyFailureError := firstApplyFailureError(value)
-	next, err := m.update(ctx, value, "complete recovered rollback run transition", func(journal *model.RemediationJournal) error {
+	next, err := m.updateRecoveryTerminal(ctx, value, "complete recovered rollback run transition", func(journal *model.RemediationJournal) error {
 		journal.State = finalState
 		journal.UnresolvedChangeSets = unresolved
 		if stateError != nil {
@@ -1136,9 +1415,12 @@ func uncoveredRecoveredRollbackTargets(value *model.RemediationJournal) []string
 func (m *Manager) finalizeResolvedCrashRollback(
 	ctx context.Context,
 	value *model.RemediationJournal,
+	handler fileRuntime,
+	observedFrontier map[string]model.ResourceSnapshot,
 	scope model.RollbackScope,
 	requested, targets []string,
 	cascadeApproved bool,
+	observedByBuild model.RemediationBuildIdentity,
 ) (*model.RemediationJournal, error) {
 	// One recovery pass can reconcile effects from several historical failed
 	// attempts. Cover every rolled-back change that still lacks immutable
@@ -1153,11 +1435,6 @@ func (m *Manager) finalizeResolvedCrashRollback(
 	if len(targets) == 0 {
 		return value, &Error{Code: CodeInvalidState, Operation: "finalize resolved crash rollback", RunID: value.RunID, Err: fmt.Errorf("resolved rollback scope is empty")}
 	}
-	attemptID, err := m.nextID("rollback-")
-	if err != nil {
-		return value, &Error{Code: CodePersistFailed, Operation: "generate crash recovery attempt ID", RunID: value.RunID, Err: err}
-	}
-	now := m.nowUTC()
 	finalState := classifyRollbackRunState(value, targets, scope)
 	outsideUnresolved := rollbackOutsideUnresolved(value, targets, scope)
 	unresolved := appendUnique(unresolvedRollbackChangeSets(value), rollbackTargetUnresolved(value, targets)...)
@@ -1165,24 +1442,34 @@ func (m *Manager) finalizeResolvedCrashRollback(
 	if len(outsideUnresolved) > 0 {
 		finalState = model.RunRecoveryRequired
 	}
-	stateError := m.rollbackRunStateError("recover_resolved_crash_rollback", finalState)
+	if err := m.verifyRecoveryRollbackSuccess(ctx, value, handler, observedFrontier, "verify resolved crash rollback before success"); err != nil {
+		return value, err
+	}
+	attemptID, err := m.nextID("rollback-")
+	if err != nil {
+		return value, &Error{Code: CodePersistFailed, Operation: "generate crash recovery attempt ID", RunID: value.RunID, Err: err}
+	}
+	startedAt := m.nextEventTime(value)
+	stateError := m.rollbackRunStateError(value, "recover_resolved_crash_rollback", finalState)
 	applyFailureError := firstApplyFailureError(value)
 	attemptErrors := make([]model.JournalError, 0, 1)
 	if stateError != nil {
 		attemptErrors = append(attemptErrors, *stateError)
 	}
+	completedAt := m.rollbackAttemptCompletionTime(value, startedAt, attemptErrors)
 	next, err := m.update(ctx, value, "record resolved crash rollback", func(journal *model.RemediationJournal) error {
 		journal.State = model.RunRollingBack
 		journal.RollbackAttempts = append(journal.RollbackAttempts, model.RollbackAttempt{
 			ID:                  attemptID,
 			Scope:               scope,
 			Trigger:             model.RollbackCrashRecovery,
+			ObservedByBuild:     recoveryAttemptObserver(journal, observedByBuild),
 			RequestedChangeSets: append([]string(nil), requested...),
 			ExpandedChangeSets:  append([]string(nil), targets...),
 			CascadeApproved:     cascadeApproved,
 			Outcome:             model.RollbackSucceeded,
-			StartedAt:           now,
-			CompletedAt:         &now,
+			StartedAt:           startedAt,
+			CompletedAt:         &completedAt,
 			Errors:              append([]model.JournalError(nil), attemptErrors...),
 		})
 		return nil
@@ -1190,7 +1477,10 @@ func (m *Manager) finalizeResolvedCrashRollback(
 	if err != nil {
 		return value, err
 	}
-	return m.update(ctx, next, "complete resolved crash rollback", func(journal *model.RemediationJournal) error {
+	if err := m.verifyRecoveryRollbackSuccess(ctx, next, handler, observedFrontier, "verify resolved crash rollback before terminal transition"); err != nil {
+		return next, err
+	}
+	return m.updateRecoveryTerminal(ctx, next, "complete resolved crash rollback", func(journal *model.RemediationJournal) error {
 		journal.State = finalState
 		journal.UnresolvedChangeSets = unresolved
 		if stateError != nil {
@@ -1206,20 +1496,271 @@ func (m *Manager) finalizeResolvedCrashRollback(
 	})
 }
 
-func (m *Manager) finalizeRecoveredRun(ctx context.Context, value *model.RemediationJournal, assessment RecoveryAssessment) (*model.RemediationJournal, error) {
+func (m *Manager) updateRecoveryTerminal(
+	parent context.Context,
+	current *model.RemediationJournal,
+	operation string,
+	mutate func(*model.RemediationJournal) error,
+) (*model.RemediationJournal, error) {
+	if current == nil || mutate == nil {
+		return current, &Error{Code: CodeInvalidInput, Operation: operation, Err: fmt.Errorf("current journal and terminal mutation are required")}
+	}
+	expected, err := cloneRecoveryJournal(current)
+	if err != nil {
+		return current, &Error{Code: CodeInvalidState, Operation: operation, RunID: current.RunID, Err: fmt.Errorf("clone expected terminal revision: %w", err)}
+	}
+	if err := mutate(expected); err != nil {
+		return current, &Error{Code: CodeInvalidState, Operation: operation, RunID: current.RunID, Err: fmt.Errorf("build expected terminal revision: %w", err)}
+	}
+	expected.Revision = current.Revision + 1
+	expected.UpdatedAt = expected.LatestEventTime()
+	if !expected.State.Terminal() {
+		return current, &Error{Code: CodeInvalidState, Operation: operation, RunID: current.RunID, Err: fmt.Errorf("recovery finalization candidate %s is not terminal", expected.State)}
+	}
+	if err := expected.Validate(); err != nil {
+		return current, &Error{Code: CodeInvalidState, Operation: operation, RunID: current.RunID, Err: fmt.Errorf("expected terminal revision is invalid: %w", err)}
+	}
+
+	next, firstErr := m.update(parent, current, operation, mutate)
+	if firstErr == nil {
+		return next, nil
+	}
+	latest, reloadErr := m.reloadApplyJournal(parent, current.RunID, "reload after "+operation, firstErr)
+	if reloadErr != nil {
+		return current, reloadErr
+	}
+	if recoveryTerminalRevisionMatches(expected, latest) {
+		return latest, nil
+	}
+	return current, firstErr
+}
+
+func (m *Manager) updateRecoveryRetainedWriterTerminal(
+	parent context.Context,
+	current *model.RemediationJournal,
+	handler fileRuntime,
+	operation string,
+	mutate func(*model.RemediationJournal) error,
+) (*model.RemediationJournal, error) {
+	verificationContext, cancelVerification := newApplyCleanupContext(parent)
+	verified, err := m.verifyRetainedWriterFrontier(verificationContext, current, handler)
+	cancelVerification()
+	if err != nil {
+		return verified, err
+	}
+
+	next, terminalErr := m.updateRecoveryTerminal(parent, verified, operation, mutate)
+	if terminalErr == nil {
+		return next, nil
+	}
+	next, err = m.reloadApplyJournal(parent, current.RunID, "reload after "+operation+" retained-writer boundary", terminalErr)
+	if err != nil {
+		return current, err
+	}
+
+	revalidationContext, cancelRevalidation := newApplyCleanupContext(parent)
+	next, err = m.verifyRetainedWriterFrontier(revalidationContext, next, handler)
+	cancelRevalidation()
+	if err != nil {
+		return next, err
+	}
+	return next, terminalErr
+}
+
+func (m *Manager) verifyRetainedWriterFrontier(
+	ctx context.Context,
+	value *model.RemediationJournal,
+	handler fileRuntime,
+) (*model.RemediationJournal, error) {
+	if value == nil || handler == nil {
+		return value, &Error{
+			Code:      CodeInvalidInput,
+			Operation: "verify retained writer frontier",
+			Err:       fmt.Errorf("journal and file handler are required"),
+		}
+	}
+	type writer struct {
+		changeSetID       string
+		operationID       string
+		changeSetSequence int
+		operationSequence int
+		operation         model.OperationRecord
+		expected          model.ResourceSnapshot
+	}
+	writers := make([]writer, 0)
+	for _, changeSet := range value.ChangeSets {
+		retained := changeSet.State == model.ChangeVerified ||
+			(changeSet.State == model.ChangeRolledBack && completedRollbackAttemptCovers(value, changeSet.ID))
+		if !retained {
+			continue
+		}
+		for _, operation := range changeSet.Operations {
+			if operation.State == model.OperationPlanned || operation.ProvesNoEffect() {
+				continue
+			}
+			writers = append(writers, writer{
+				changeSetID:       changeSet.ID,
+				operationID:       operation.ID,
+				changeSetSequence: changeSet.Sequence,
+				operationSequence: operation.Sequence,
+				operation:         operation,
+			})
+		}
+	}
+	sort.SliceStable(writers, func(i, j int) bool {
+		if writers[i].changeSetSequence != writers[j].changeSetSequence {
+			return writers[i].changeSetSequence < writers[j].changeSetSequence
+		}
+		if writers[i].operationSequence != writers[j].operationSequence {
+			return writers[i].operationSequence < writers[j].operationSequence
+		}
+		if writers[i].changeSetID != writers[j].changeSetID {
+			return writers[i].changeSetID < writers[j].changeSetID
+		}
+		return writers[i].operationID < writers[j].operationID
+	})
+
+	frontier := make(map[string]writer)
+	for _, item := range writers {
+		if item.operation.Before.IsZero() {
+			return value, &Error{
+				Code:        CodeInvalidState,
+				Operation:   "verify retained writer frontier",
+				RunID:       value.RunID,
+				ChangeSetID: item.changeSetID,
+				OperationID: item.operationID,
+				Err:         fmt.Errorf("retained writer has no durable before state"),
+			}
+		}
+		if _, exists := frontier[item.operation.Resource.Key]; !exists {
+			beforeWriter := item
+			beforeWriter.expected = item.operation.Before
+			frontier[item.operation.Resource.Key] = beforeWriter
+		}
+		switch item.operation.State {
+		case model.OperationVerified:
+			if item.operation.ObservedAfter == nil {
+				return value, &Error{
+					Code:        CodeInvalidState,
+					Operation:   "verify retained writer frontier",
+					RunID:       value.RunID,
+					ChangeSetID: item.changeSetID,
+					OperationID: item.operationID,
+					Err:         fmt.Errorf("verified retained writer has no durable after state"),
+				}
+			}
+			afterWriter := item
+			afterWriter.expected = *item.operation.ObservedAfter
+			frontier[item.operation.Resource.Key] = afterWriter
+		case model.OperationRolledBack:
+			// The writer no longer contributes to the live frontier. If it
+			// was the first writer, its durable before state remains expected.
+		default:
+			return value, &Error{
+				Code:        CodeInvalidState,
+				Operation:   "verify retained writer frontier",
+				RunID:       value.RunID,
+				ChangeSetID: item.changeSetID,
+				OperationID: item.operationID,
+				Err:         fmt.Errorf("retained writer remains %s", item.operation.State),
+			}
+		}
+	}
+
+	keys := make([]string, 0, len(frontier))
+	for key := range frontier {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		item := frontier[key]
+		current, err := handler.Capture(ctx, item.operation.Resource)
+		if err == nil && exactEqual(item.expected, current) {
+			continue
+		}
+		if err == nil {
+			err = fmt.Errorf("retained writer frontier %s changed before terminal persistence", key)
+		}
+		next, persistErr := m.persistRecoveryRequired(ctx, value, item.changeSetID, item.operationID, err)
+		if persistErr != nil {
+			return next, persistErr
+		}
+		return next, &Error{
+			Code:        CodeRecoveryRequired,
+			Operation:   "verify retained writer frontier",
+			RunID:       value.RunID,
+			ChangeSetID: item.changeSetID,
+			OperationID: item.operationID,
+			Committed:   true,
+			Err:         err,
+		}
+	}
+	return value, nil
+}
+
+func cloneRecoveryJournal(value *model.RemediationJournal) (*model.RemediationJournal, error) {
+	if value == nil {
+		return nil, fmt.Errorf("journal is required")
+	}
+	encoded, err := journalpkg.CanonicalJSON(value)
+	if err != nil {
+		return nil, err
+	}
+	decoder := json.NewDecoder(bytes.NewReader(encoded))
+	decoder.DisallowUnknownFields()
+	var clone model.RemediationJournal
+	if err := decoder.Decode(&clone); err != nil {
+		return nil, err
+	}
+	return &clone, nil
+}
+
+func recoveryTerminalRevisionMatches(expected, actual *model.RemediationJournal) bool {
+	if expected == nil || actual == nil ||
+		!expected.State.Terminal() ||
+		actual.Revision != expected.Revision ||
+		actual.State != expected.State ||
+		actual.RunID != expected.RunID ||
+		!actual.UpdatedAt.After(expected.UpdatedAt) {
+		return false
+	}
+	if err := actual.Validate(); err != nil {
+		return false
+	}
+	expectedCopy, err := cloneRecoveryJournal(expected)
+	if err != nil {
+		return false
+	}
+	expectedCopy.UpdatedAt = actual.UpdatedAt
+	expectedJSON, err := journalpkg.CanonicalJSON(expectedCopy)
+	if err != nil {
+		return false
+	}
+	actualJSON, err := journalpkg.CanonicalJSON(actual)
+	return err == nil && bytes.Equal(expectedJSON, actualJSON)
+}
+
+func (m *Manager) finalizeRecoveredRun(
+	ctx context.Context,
+	value *model.RemediationJournal,
+	handler fileRuntime,
+	observedFrontier map[string]model.ResourceSnapshot,
+	assessment RecoveryAssessment,
+	observedByBuild model.RemediationBuildIdentity,
+) (*model.RemediationJournal, error) {
 	if len(assessment.Ambiguous) > 0 {
 		return value, nil
 	}
 	if len(value.RollbackAttempts) > 0 {
 		attempt := value.RollbackAttempts[len(value.RollbackAttempts)-1]
 		if attemptTargetsOnlyNoEffect(value, attempt.ExpandedChangeSets) {
-			return m.finalizeNoEffectRollbackAttempt(ctx, value, attempt)
+			return m.finalizeNoEffectRollbackAttempt(ctx, value, handler, attempt)
 		}
 	}
-	if next, handled, err := m.finalizeIncompleteRollbackAttempt(ctx, value); handled {
+	if next, handled, err := m.finalizeIncompleteRollbackAttempt(ctx, value, handler, observedFrontier); handled {
 		return next, err
 	}
-	if next, handled, err := m.finalizeCompletedRollbackTransition(ctx, value); handled {
+	if next, handled, err := m.finalizeCompletedRollbackTransition(ctx, value, handler, observedFrontier, observedByBuild); handled {
 		return next, err
 	}
 	stableInterruptedApply := stableInterruptedApplyShape(value) && (value.State == model.RunApplying ||
@@ -1229,14 +1770,14 @@ func (m *Manager) finalizeRecoveredRun(ctx context.Context, value *model.Remedia
 		targets := rollbackTargets(value)
 		journalError := firstApplyFailureError(value)
 		if journalError == nil {
-			generated := m.makeJournalError("recover_interrupted_apply", "", "", nil, &Error{Code: CodeApplyFailed, Err: fmt.Errorf("interrupted apply has no nonterminal target effect")})
+			generated := m.makeJournalError(value, "recover_interrupted_apply", "", "", nil, &Error{Code: CodeApplyFailed, Err: fmt.Errorf("interrupted apply has no nonterminal target effect")})
 			journalError = &generated
 		}
 		if value.FailurePolicy == model.FailureRollbackRun && len(targets) > 0 {
 			if value.State == model.RunRecoveryRequired && sameIDs(value.UnresolvedChangeSets, targets) {
 				return value, nil
 			}
-			return m.update(ctx, value, "require rollback for recovered run-policy failure", func(journal *model.RemediationJournal) error {
+			return m.updateRecoveryTerminal(ctx, value, "require rollback for recovered run-policy failure", func(journal *model.RemediationJournal) error {
 				journal.State = model.RunRecoveryRequired
 				journal.UnresolvedChangeSets = appendUnique(nil, targets...)
 				if journalError != nil {
@@ -1246,7 +1787,7 @@ func (m *Manager) finalizeRecoveredRun(ctx context.Context, value *model.Remedia
 				return nil
 			})
 		}
-		return m.update(ctx, value, "finalize recovered stable apply interruption", func(journal *model.RemediationJournal) error {
+		return m.updateRecoveryRetainedWriterTerminal(ctx, value, handler, "finalize recovered stable apply interruption", func(journal *model.RemediationJournal) error {
 			journal.State = model.RunFailed
 			journal.UnresolvedChangeSets = nil
 			if journalError != nil {
@@ -1259,18 +1800,18 @@ func (m *Manager) finalizeRecoveredRun(ctx context.Context, value *model.Remedia
 	operatorActionState := value.State == model.RunRecoveryRequired || value.State == model.RunRollbackFailed || value.State == model.RunPartiallyRolledBack
 	if operatorActionState {
 		if prior, available := lastUnsuccessfulRollbackAttempt(value); available && rollbackScopeResolved(value, prior.ExpandedChangeSets) {
-			return m.finalizeResolvedCrashRollback(ctx, value, prior.Scope, prior.RequestedChangeSets, prior.ExpandedChangeSets, prior.CascadeApproved)
+			return m.finalizeResolvedCrashRollback(ctx, value, handler, observedFrontier, prior.Scope, prior.RequestedChangeSets, prior.ExpandedChangeSets, prior.CascadeApproved, observedByBuild)
 		}
 		if len(rollbackTargets(value)) == 0 && len(unresolvedRollbackChangeSets(value)) == 0 && !hasRecoveryRequiredEvidence(value) {
 			targets := recoveredRollbackTargets(value)
 			if len(targets) > 0 {
-				return m.finalizeResolvedCrashRollback(ctx, value, model.RollbackRun, nil, targets, true)
+				return m.finalizeResolvedCrashRollback(ctx, value, handler, observedFrontier, model.RollbackRun, nil, targets, true, observedByBuild)
 			}
 			if value.State != model.RunRecoveryRequired {
 				return value, nil
 			}
 			applyFailureError := firstApplyFailureError(value)
-			return m.update(ctx, value, "finalize resolved recovery", func(journal *model.RemediationJournal) error {
+			return m.updateRecoveryTerminal(ctx, value, "finalize resolved recovery", func(journal *model.RemediationJournal) error {
 				journal.State = model.RunFailed
 				journal.UnresolvedChangeSets = nil
 				if applyFailureError != nil {
@@ -1288,8 +1829,8 @@ func (m *Manager) finalizeRecoveredRun(ctx context.Context, value *model.Remedia
 	}
 	targets := rollbackTargets(value)
 	if (value.State == model.RunApplying || value.State == model.RunVerifying) && len(targets) > 0 {
-		journalError := m.makeJournalError("recover_active_apply", "", "", nil, &Error{Code: CodeRecoveryRequired, Err: fmt.Errorf("recovered applied effects require an approved rollback")})
-		return m.update(ctx, value, "require rollback for recovered active apply", func(journal *model.RemediationJournal) error {
+		journalError := m.makeJournalError(value, "recover_active_apply", "", "", nil, &Error{Code: CodeRecoveryRequired, Err: fmt.Errorf("recovered applied effects require an approved rollback")})
+		return m.updateRecoveryTerminal(ctx, value, "require rollback for recovered active apply", func(journal *model.RemediationJournal) error {
 			journal.State = model.RunRecoveryRequired
 			journal.UnresolvedChangeSets = appendUnique(nil, targets...)
 			journal.Error = &journalError
@@ -1297,7 +1838,7 @@ func (m *Manager) finalizeRecoveredRun(ctx context.Context, value *model.Remedia
 		})
 	}
 	if (value.State == model.RunPlanned || value.State == model.RunApproved || value.State == model.RunApplying) && len(rollbackTargets(value)) == 0 {
-		return m.update(ctx, value, "finalize recovered apply failure", func(journal *model.RemediationJournal) error {
+		return m.updateRecoveryTerminal(ctx, value, "finalize recovered apply failure", func(journal *model.RemediationJournal) error {
 			journal.State = model.RunFailed
 			journal.UnresolvedChangeSets = nil
 			return nil
@@ -1342,9 +1883,15 @@ func attemptTargetsOnlyNoEffect(value *model.RemediationJournal, targets []strin
 	return foundNoEffect
 }
 
-func (m *Manager) finalizeNoEffectRollbackAttempt(ctx context.Context, value *model.RemediationJournal, attempt model.RollbackAttempt) (*model.RemediationJournal, error) {
-	completedAt := m.nowUTC()
-	rollbackError := m.makeJournalError("recover_no_effect_rollback", "", "", nil, &Error{Code: CodeRollbackFailed, Err: fmt.Errorf("rollback attempt had no live effect to restore")})
+func (m *Manager) finalizeNoEffectRollbackAttempt(
+	ctx context.Context,
+	value *model.RemediationJournal,
+	handler fileRuntime,
+	attempt model.RollbackAttempt,
+) (*model.RemediationJournal, error) {
+	rollbackError := m.makeJournalError(value, "recover_no_effect_rollback", "", "", nil, &Error{Code: CodeRollbackFailed, Err: fmt.Errorf("rollback attempt had no live effect to restore")})
+	completionErrors := append(append([]model.JournalError(nil), attempt.Errors...), rollbackError)
+	completedAt := m.rollbackAttemptCompletionTime(value, attempt.StartedAt, completionErrors)
 	applyError := firstNoEffectError(value)
 	unresolved := unresolvedAfterNoEffectAttempt(value, attempt.ExpandedChangeSets)
 	finalState := model.RunFailed
@@ -1357,7 +1904,7 @@ func (m *Manager) finalizeNoEffectRollbackAttempt(ctx context.Context, value *mo
 			return value, &Error{Code: CodeRecoveryRequired, Operation: "finalize no-effect rollback attempt", RunID: value.RunID, Err: fmt.Errorf("run %s cannot retain unresolved outside changes", value.State)}
 		}
 	}
-	return m.update(ctx, value, "finalize no-effect rollback attempt", func(journal *model.RemediationJournal) error {
+	return m.updateRecoveryRetainedWriterTerminal(ctx, value, handler, "finalize no-effect rollback attempt", func(journal *model.RemediationJournal) error {
 		if len(journal.RollbackAttempts) == 0 || journal.RollbackAttempts[len(journal.RollbackAttempts)-1].ID != attempt.ID {
 			return fmt.Errorf("rollback attempt changed during no-effect recovery")
 		}

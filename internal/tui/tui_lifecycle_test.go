@@ -134,7 +134,7 @@ func TestRemediationAvailabilityRequiresRootAndMaskedReport(t *testing.T) {
 	}
 }
 
-func TestBuiltInPendingRecipeDoesNotEnableRemediation(t *testing.T) {
+func TestBuiltInVerifiedRecipeEnablesRemediation(t *testing.T) {
 	t.Parallel()
 	platform := model.PlatformInfo{
 		ID:                 "rocky",
@@ -152,7 +152,7 @@ func TestBuiltInPendingRecipeDoesNotEnableRemediation(t *testing.T) {
 		}},
 	}
 	verified, pending, err := builtInRemediationCandidates(run, platform)
-	if err != nil || verified || !pending {
+	if err != nil || !verified || pending {
 		t.Fatalf("built-in U-19 candidate = verified %t, pending %t, err %v", verified, pending, err)
 	}
 }
