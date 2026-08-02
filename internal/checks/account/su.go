@@ -64,6 +64,10 @@ func evaluateSURestriction(ctx context.Context, rule model.ResolvedRule, environ
 			Summary:  "일반 사용자의 su 명령 사용이 승인 그룹으로 제한되어 있지 않습니다.",
 			Expected: "pam_wheel.so use_uid를 우회할 수 없는 required 또는 requisite 경로에 적용해야 합니다.",
 			Observed: assessment.Observed,
+			Details: []model.ResultDetail{{
+				Label: "su 사용 제한", Current: assessment.Observed,
+				Expected: "pam_wheel.so use_uid로 승인 그룹만 허용", Source: "/etc/pam.d/su",
+			}},
 			Evidence: evidence,
 		}
 	}

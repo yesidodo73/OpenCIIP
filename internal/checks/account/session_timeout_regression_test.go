@@ -2,6 +2,7 @@ package account
 
 import (
 	"context"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -115,7 +116,68 @@ func TestSessionTimeoutUsesFinalSourcedStartupState(t *testing.T) {
 			if !strings.Contains(outcome.Observed, test.observedContains) {
 				t.Errorf("observed = %q, want substring %q", outcome.Observed, test.observedContains)
 			}
+			if outcome.Status != model.StatusPass && len(outcome.Details) == 0 {
+				t.Errorf("outcome has no compact display details: %#v", outcome)
+			}
 		})
+	}
+}
+
+func TestCompactSessionTimeoutItemsLimitsHumanDetail(t *testing.T) {
+	t.Parallel()
+
+	items := []string{
+		"/etc/profile:1 조건부 구문",
+		"/etc/profile:2 동적 source",
+		"/etc/profile:3 여러 줄 구문",
+		"/etc/profile:4 명령 치환",
+		"/etc/profile:5 불명확한 분기",
+	}
+	got := compactSessionTimeoutItems(items, 3)
+	for _, expected := range []string{items[0], items[1], items[2], "외 2건은 증적에서 확인할 수 있습니다."} {
+		if !strings.Contains(got, expected) {
+			t.Fatalf("compactSessionTimeoutItems() lacks %q: %q", expected, got)
+		}
+	}
+	for _, hidden := range items[3:] {
+		if strings.Contains(got, hidden) {
+			t.Fatalf("compactSessionTimeoutItems() did not hide overflow %q: %q", hidden, got)
+		}
+	}
+	if strings.Contains(got, "; ") {
+		t.Fatalf("compactSessionTimeoutItems() retained semicolon delimiters: %q", got)
+	}
+}
+
+func TestCompactSessionTimeoutFormattingDoesNotMutateEvidenceSlices(t *testing.T) {
+	t.Parallel()
+
+	items := []string{"z 조건", "a 조건", "z 조건", "b 조건"}
+	originalItems := append([]string(nil), items...)
+	_ = compactSessionTimeoutItems(items, 3)
+	if !reflect.DeepEqual(items, originalItems) {
+		t.Fatalf("compactSessionTimeoutItems() mutated input = %#v, want %#v", items, originalItems)
+	}
+
+	paths := []string{"/etc/profile", "/etc/bashrc", "/etc/profile", "/root/.bashrc"}
+	originalPaths := append([]string(nil), paths...)
+	_ = compactSessionTimeoutSource(paths)
+	if !reflect.DeepEqual(paths, originalPaths) {
+		t.Fatalf("compactSessionTimeoutSource() mutated input = %#v, want %#v", paths, originalPaths)
+	}
+}
+
+func TestCompactSessionTimeoutDetailsCapsContexts(t *testing.T) {
+	t.Parallel()
+
+	details := make([]model.ResultDetail, 10)
+	for index := range details {
+		details[index] = model.ResultDetail{Label: "context-" + strconv.Itoa(index)}
+	}
+	got := compactSessionTimeoutDetails(details, "expected")
+	if len(got) != 9 || got[8].Label != "추가 확인 항목" ||
+		!strings.Contains(got[8].Current, "외 2개") {
+		t.Fatalf("compactSessionTimeoutDetails() = %#v", got)
 	}
 }
 

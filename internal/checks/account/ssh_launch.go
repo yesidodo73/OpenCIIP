@@ -7,6 +7,7 @@ import (
 	"os"
 	"path"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -17,7 +18,44 @@ import (
 	"github.com/yesidodo73/OpenCIIP/internal/model"
 )
 
-const sshdLaunchProperties = "ExecStart,Environment,EnvironmentFiles,PassEnvironment,UnsetEnvironment"
+type systemdNamespaceProperty struct {
+	Name    string
+	Boolean bool
+}
+
+var sshdNamespaceProperties = [...]systemdNamespaceProperty{
+	{Name: "RootDirectory"},
+	{Name: "RootImage"},
+	{Name: "RootEphemeral", Boolean: true},
+	{Name: "RootDirectoryStartOnly", Boolean: true},
+	{Name: "BindPaths"},
+	{Name: "BindReadOnlyPaths"},
+	{Name: "TemporaryFileSystem"},
+	{Name: "MountImages"},
+	{Name: "ExtensionImages"},
+	{Name: "ExtensionDirectories"},
+	{Name: "InaccessiblePaths"},
+}
+
+var sshdUnprintableArraySignatures = map[string]string{
+	"BindPaths":           "a(ssbt)",
+	"BindReadOnlyPaths":   "a(ssbt)",
+	"TemporaryFileSystem": "a(ss)",
+}
+
+var sshdLaunchProperties = func() string {
+	names := []string{
+		"ExecStart",
+		"Environment",
+		"EnvironmentFiles",
+		"PassEnvironment",
+		"UnsetEnvironment",
+	}
+	for _, property := range sshdNamespaceProperties {
+		names = append(names, property.Name)
+	}
+	return strings.Join(names, ",")
+}()
 
 type sshLaunchProfile struct {
 	Unit                   string
@@ -138,6 +176,23 @@ func inspectSSHDLaunchProfile(ctx context.Context, environment evaluator.Environ
 	if parseErr != nil {
 		return profile, evidence, "systemd 기동 속성을 해석할 수 없음", nil
 	}
+	namespaceOverrides, namespaceEvidence, namespaceReason := inspectSystemdNamespaceProperties(
+		ctx,
+		environment,
+		unitName,
+		properties,
+	)
+	evidence = append(evidence, namespaceEvidence...)
+	evidence[0].Fact["namespace_property_count"] = len(sshdNamespaceProperties)
+	if namespaceReason != "" {
+		return profile, evidence, namespaceReason, nil
+	}
+	if len(namespaceOverrides) > 0 {
+		evidence[0].Fact["namespace_override_properties"] = append([]string(nil), namespaceOverrides...)
+		return profile, evidence,
+			"systemd 파일 시스템 격리 속성이 활성화되었거나 값을 해석할 수 없음: " + strings.Join(namespaceOverrides, ", "),
+			nil
+	}
 	execStart, exists := properties["ExecStart"]
 	if !exists || strings.TrimSpace(execStart) == "" {
 		return profile, evidence, "ExecStart가 없음", nil
@@ -180,6 +235,150 @@ func inspectSSHDLaunchProfile(ctx context.Context, environment evaluator.Environ
 	evidence[0].Fact["configuration_argument_count"] = len(configurationArguments)
 	evidence[0].Fact["custom_configuration"] = custom
 	return profile, evidence, "", nil
+}
+
+func inspectSystemdNamespaceProperties(
+	ctx context.Context,
+	environment evaluator.Environment,
+	unitName string,
+	properties map[string]string,
+) ([]string, []model.Evidence, string) {
+	active := make([]string, 0)
+	evidence := make([]model.Evidence, 0)
+	for _, property := range sshdNamespaceProperties {
+		value, exists := properties[property.Name]
+		if !exists {
+			continue
+		}
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if value == "[unprintable]" {
+			signature, supported := sshdUnprintableArraySignatures[property.Name]
+			if !supported {
+				return nil, evidence,
+					"systemd 파일 시스템 격리 속성 값을 해석할 수 없음: " + property.Name
+			}
+			count, propertyEvidence, reason := inspectSystemdArrayProperty(
+				ctx,
+				environment,
+				unitName,
+				property.Name,
+				signature,
+			)
+			evidence = append(evidence, propertyEvidence)
+			if reason != "" {
+				return nil, evidence, reason
+			}
+			if count > 0 {
+				active = append(active, property.Name)
+			}
+			continue
+		}
+		if property.Boolean {
+			switch strings.ToLower(value) {
+			case "no", "false", "0":
+				continue
+			}
+		}
+		active = append(active, property.Name)
+	}
+	return active, evidence, ""
+}
+
+func inspectSystemdArrayProperty(
+	ctx context.Context,
+	environment evaluator.Environment,
+	unitName string,
+	propertyName string,
+	expectedSignature string,
+) (int, model.Evidence, string) {
+	objectPath := systemdUnitObjectPath(unitName)
+	spec := executor.Spec{
+		Name: "busctl",
+		Arguments: []string{
+			"get-property",
+			"org.freedesktop.systemd1",
+			objectPath,
+			"org.freedesktop.systemd1.Service",
+			propertyName,
+		},
+		Timeout:   10 * time.Second,
+		MaxOutput: 1 << 20,
+	}
+	result, err := environment.Commands.Run(ctx, spec)
+	evidence := support.CommandSummaryEvidence("systemd-sshd-namespace-property", spec, result, map[string]any{
+		"unit":               unitName,
+		"property":           propertyName,
+		"expected_signature": expectedSignature,
+		"exit_code":          result.ExitCode,
+		"truncated":          result.Truncated,
+	})
+	if err != nil {
+		evidence.Fact["run_error"] = true
+		return 0, evidence,
+			propertyName + "의 systemd typed 속성 조회 명령을 실행할 수 없음"
+	}
+	if result.ExitCode != 0 || result.Truncated || result.TimedOut {
+		return 0, evidence, fmt.Sprintf(
+			"%s의 systemd typed 속성을 확인할 수 없음: exit=%d truncated=%t timed_out=%t",
+			propertyName,
+			result.ExitCode,
+			result.Truncated,
+			result.TimedOut,
+		)
+	}
+	count, ok := parseBusctlArrayCount(string(result.Stdout), expectedSignature)
+	if !ok {
+		return 0, evidence,
+			propertyName + "의 systemd typed 배열 출력을 해석할 수 없음"
+	}
+	evidence.Fact["array_count"] = count
+	return count, evidence, ""
+}
+
+func parseBusctlArrayCount(output string, expectedSignature string) (int, bool) {
+	output = strings.TrimSpace(strings.ReplaceAll(output, "\r\n", "\n"))
+	if output == "" || strings.ContainsAny(output, "\x00\r\n\t") {
+		return 0, false
+	}
+	signature, remainder, found := strings.Cut(output, " ")
+	if !found || signature != expectedSignature {
+		return 0, false
+	}
+	remainder = strings.TrimSpace(remainder)
+	countToken, payload, hasPayload := strings.Cut(remainder, " ")
+	count, err := strconv.Atoi(countToken)
+	if err != nil || count < 0 || strconv.Itoa(count) != countToken {
+		return 0, false
+	}
+	payload = strings.TrimSpace(payload)
+	if count == 0 {
+		return 0, !hasPayload || payload == ""
+	}
+	if !hasPayload || payload == "" {
+		return 0, false
+	}
+	return count, true
+}
+
+func systemdUnitObjectPath(unitName string) string {
+	const prefix = "/org/freedesktop/systemd1/unit/"
+	var escaped strings.Builder
+	escaped.Grow(len(prefix) + len(unitName))
+	escaped.WriteString(prefix)
+	for index := 0; index < len(unitName); index++ {
+		character := unitName[index]
+		if (character >= 'a' && character <= 'z') ||
+			(character >= 'A' && character <= 'Z') ||
+			(character >= '0' && character <= '9') {
+			escaped.WriteByte(character)
+			continue
+		}
+		escaped.WriteString(fmt.Sprintf("_%02x", character))
+	}
+	return escaped.String()
 }
 
 func parseSystemdExecStart(value string) (string, []string, string) {
@@ -292,10 +491,7 @@ func resolveSystemdEnvironment(
 	if len(wanted) == 0 {
 		return values, nil, "", nil
 	}
-	inline, exists := properties["Environment"]
-	if !exists {
-		return nil, nil, "systemd Environment 속성이 없음", nil
-	}
+	inline := properties["Environment"]
 	words, ok := splitSystemdWords(inline)
 	if !ok {
 		return nil, nil, "systemd Environment 값을 해석할 수 없음", nil
@@ -310,10 +506,7 @@ func resolveSystemdEnvironment(
 		}
 	}
 
-	filesValue, exists := properties["EnvironmentFiles"]
-	if !exists {
-		return nil, nil, "systemd EnvironmentFiles 속성이 없음", nil
-	}
+	filesValue := properties["EnvironmentFiles"]
 	files, reason := parseSystemdEnvironmentFiles(filesValue)
 	if reason != "" {
 		return nil, nil, reason, nil
@@ -346,18 +539,12 @@ func resolveSystemdEnvironment(
 		}))
 	}
 
-	passValue, exists := properties["PassEnvironment"]
-	if !exists {
-		return nil, evidence, "systemd PassEnvironment 속성이 없음", nil
-	}
+	passValue := properties["PassEnvironment"]
 	passNames, ok := splitSystemdWords(passValue)
 	if !ok {
 		return nil, evidence, "systemd PassEnvironment 값을 해석할 수 없음", nil
 	}
-	unsetValue, exists := properties["UnsetEnvironment"]
-	if !exists {
-		return nil, evidence, "systemd UnsetEnvironment 속성이 없음", nil
-	}
+	unsetValue := properties["UnsetEnvironment"]
 	unsetEntries, ok := splitSystemdWords(unsetValue)
 	if !ok {
 		return nil, evidence, "systemd UnsetEnvironment 값을 해석할 수 없음", nil

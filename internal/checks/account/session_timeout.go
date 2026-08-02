@@ -26,6 +26,7 @@ func evaluateSessionTimeout(ctx context.Context, rule model.ResolvedRule, enviro
 	if maximum < 1 || maximum > 86400 {
 		return checkError("invalid_rule_parameter", fmt.Errorf("max_session_timeout_seconds must be between 1 and 86400"))
 	}
+	expected := fmt.Sprintf("지원되는 모든 대화형 shell에서 export·readonly TMOUT이 1~%d초여야 합니다.", maximum)
 	accounts, accountEvidence, err := support.ReadEffectivePasswd(ctx, environment.Commands)
 	if err != nil {
 		return checkError("account_inventory_failed", err)
@@ -50,6 +51,8 @@ func evaluateSessionTimeout(ctx context.Context, rule model.ResolvedRule, enviro
 	evidence := []model.Evidence{accountEvidence}
 	violations := make([]string, 0)
 	unknowns := make([]string, 0)
+	violationDetails := make([]model.ResultDetail, 0)
+	unknownDetails := make([]model.ResultDetail, 0)
 	contextFacts := make([]map[string]any, 0)
 	accountCounts := make(map[string]int, len(interactive))
 	for _, account := range interactive {
@@ -71,6 +74,12 @@ func evaluateSessionTimeout(ctx context.Context, rule model.ResolvedRule, enviro
 		if accountCounts[account.Name] != 1 {
 			if accountCounts[account.Name] > 0 {
 				unknowns = append(unknowns, account.Name+": NSS에 같은 이름의 계정 항목이 중복됨")
+				unknownDetails = append(unknownDetails, model.ResultDetail{
+					Label:    account.Name,
+					Current:  "NSS에 같은 이름의 계정 항목이 중복되어 있습니다.",
+					Expected: expected,
+					Source:   "NSS 계정 목록",
+				})
 				accountCounts[account.Name] = 0
 			}
 			continue
@@ -82,6 +91,12 @@ func evaluateSessionTimeout(ctx context.Context, rule model.ResolvedRule, enviro
 		evidence = append(evidence, startupEvidence...)
 		if !supported {
 			unknowns = append(unknowns, account.Name+": 지원하지 않는 로그인 셸 "+account.Shell)
+			unknownDetails = append(unknownDetails, model.ResultDetail{
+				Label:    account.Name,
+				Current:  "지원하지 않는 로그인 셸: " + account.Shell,
+				Expected: expected,
+				Source:   "NSS 계정 목록",
+			})
 			continue
 		}
 		for _, startupContext := range contexts {
@@ -93,6 +108,12 @@ func evaluateSessionTimeout(ctx context.Context, rule model.ResolvedRule, enviro
 			}
 			if len(startupContext.Unknowns) > 0 {
 				unknowns = append(unknowns, label+": "+strings.Join(startupContext.Unknowns, ", "))
+				unknownDetails = append(unknownDetails, model.ResultDetail{
+					Label:    label,
+					Current:  compactSessionTimeoutItems(startupContext.Unknowns, 3),
+					Expected: expected,
+					Source:   compactSessionTimeoutSource(startupContext.Paths),
+				})
 				fact["deterministic"] = false
 				contextFacts = append(contextFacts, fact)
 				continue
@@ -101,6 +122,12 @@ func evaluateSessionTimeout(ctx context.Context, rule model.ResolvedRule, enviro
 			state, exists := startupContext.Variables["TMOUT"]
 			if !exists || !state.Defined {
 				violations = append(violations, label+": TMOUT 없음")
+				violationDetails = append(violationDetails, model.ResultDetail{
+					Label:    label,
+					Current:  "TMOUT이 설정되어 있지 않습니다.",
+					Expected: expected,
+					Source:   compactSessionTimeoutSource(startupContext.Paths),
+				})
 				fact["tmout_defined"] = false
 				contextFacts = append(contextFacts, fact)
 				continue
@@ -113,6 +140,12 @@ func evaluateSessionTimeout(ctx context.Context, rule model.ResolvedRule, enviro
 			value, parseErr := strconv.Atoi(strings.TrimSpace(state.Value))
 			if parseErr != nil {
 				unknowns = append(unknowns, label+": TMOUT 숫자 값을 확정할 수 없음")
+				unknownDetails = append(unknownDetails, model.ResultDetail{
+					Label:    label,
+					Current:  "TMOUT 숫자 값을 확정할 수 없습니다.",
+					Expected: expected,
+					Source:   sessionTimeoutStateSource(state.Path, state.Line),
+				})
 				fact["numeric"] = false
 				contextFacts = append(contextFacts, fact)
 				continue
@@ -132,6 +165,12 @@ func evaluateSessionTimeout(ctx context.Context, rule model.ResolvedRule, enviro
 			}
 			if len(problems) > 0 {
 				violations = append(violations, label+": "+strings.Join(problems, ", "))
+				violationDetails = append(violationDetails, model.ResultDetail{
+					Label:    label,
+					Current:  strings.Join(problems, ", "),
+					Expected: expected,
+					Source:   sessionTimeoutStateSource(state.Path, state.Line),
+				})
 			}
 		}
 	}
@@ -141,13 +180,13 @@ func evaluateSessionTimeout(ctx context.Context, rule model.ResolvedRule, enviro
 	}))
 	sort.Strings(violations)
 	sort.Strings(unknowns)
-	expected := fmt.Sprintf("지원되는 모든 대화형 shell에서 export·readonly TMOUT이 1~%d초여야 합니다.", maximum)
 	if len(violations) > 0 {
 		return evaluator.Outcome{
 			Status:   model.StatusFail,
 			Summary:  "잠금된 세션 종료 시간이 가이드 기준을 충족하지 않습니다.",
 			Expected: expected,
 			Observed: strings.Join(violations, "; "),
+			Details:  compactSessionTimeoutDetails(violationDetails, expected),
 			Evidence: evidence,
 		}
 	}
@@ -158,14 +197,73 @@ func evaluateSessionTimeout(ctx context.Context, rule model.ResolvedRule, enviro
 			Summary:       "모든 대화형 shell의 최종 세션 종료 시간을 정적으로 확정할 수 없습니다.",
 			Expected:      expected,
 			Observed:      strings.Join(uniqueSorted(unknowns), "; "),
+			Details:       compactSessionTimeoutDetails(unknownDetails, expected),
 			Evidence:      evidence,
 		}
 	}
 	return evaluator.Outcome{
 		Status:   model.StatusPass,
-		Summary:  "지원되는 로그인 및 비로그인 대화형 shell에 세션 종료 시간이 강제됩니다.",
+		Summary:  "로그인 및 비로그인 대화형 shell에 세션 종료 시간이 강제됩니다.",
 		Expected: expected,
 		Observed: fmt.Sprintf("%d개 시작 컨텍스트의 최종 TMOUT이 1~%d초이고 export·readonly입니다.", len(contextFacts), maximum),
 		Evidence: evidence,
 	}
+}
+
+func compactSessionTimeoutItems(items []string, limit int) string {
+	items = uniqueSorted(append([]string(nil), items...))
+	if limit < 1 {
+		limit = 1
+	}
+	visible := items
+	if len(visible) > limit {
+		visible = visible[:limit]
+	}
+	lines := append([]string(nil), visible...)
+	if remaining := len(items) - len(visible); remaining > 0 {
+		lines = append(lines, fmt.Sprintf("외 %d건은 증적에서 확인할 수 있습니다.", remaining))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func compactSessionTimeoutSource(paths []string) string {
+	const limit = 3
+	paths = uniqueSorted(append([]string(nil), paths...))
+	visible := paths
+	if len(visible) > limit {
+		visible = visible[:limit]
+	}
+	value := strings.Join(visible, ", ")
+	if remaining := len(paths) - len(visible); remaining > 0 {
+		value += fmt.Sprintf(" 외 %d개", remaining)
+	}
+	if value == "" {
+		return "시작 스크립트 분석"
+	}
+	return value
+}
+
+func compactSessionTimeoutDetails(details []model.ResultDetail, expected string) []model.ResultDetail {
+	const limit = 8
+	if len(details) <= limit {
+		return details
+	}
+	result := append([]model.ResultDetail(nil), details[:limit]...)
+	result = append(result, model.ResultDetail{
+		Label:    "추가 확인 항목",
+		Current:  fmt.Sprintf("외 %d개 계정·컨텍스트는 증적에서 확인할 수 있습니다.", len(details)-limit),
+		Expected: expected,
+		Source:   "session-timeout-startup-analysis",
+	})
+	return result
+}
+
+func sessionTimeoutStateSource(path string, line int) string {
+	if line > 0 {
+		return fmt.Sprintf("%s:%d", path, line)
+	}
+	if strings.TrimSpace(path) != "" {
+		return path
+	}
+	return "시작 스크립트 분석"
 }

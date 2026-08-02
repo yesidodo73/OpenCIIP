@@ -61,7 +61,11 @@ func evaluateUnnecessaryAccounts(ctx context.Context, rule model.ResolvedRule, e
 			Summary:       "계정의 업무상 필요성을 자동으로 판단할 수 없습니다.",
 			Expected:      "유효 계정을 승인된 계정 대장 및 계정 상태·사용 근거와 대조해야 합니다.",
 			Observed:      observed,
-			Evidence:      evidence,
+			Details: []model.ResultDetail{{
+				Label: "계정 승인 정책", Current: fmt.Sprintf("NSS 계정 %d개, 승인 목록 없음", len(accounts)),
+				Expected: "모든 유효 계정이 approved_accounts에 등록됨", Source: "NSS, /etc/shadow",
+			}},
+			Evidence: evidence,
 		}
 	}
 	approvedSet, listErr := normalizedNameSet(approved)
@@ -169,7 +173,11 @@ func evaluateAdminMembership(ctx context.Context, _ model.ResolvedRule, environm
 		Summary:       "관리자 권한 보유 계정의 필요성을 수동으로 확인해야 합니다.",
 		Expected:      "root·wheel·sudoers·외부 권한 그룹의 구성원이 승인 관리자 목록과 일치해야 합니다.",
 		Observed:      strings.Join(observed, "; ") + "; 승인 관리자 목록과 외부 그룹 증적이 필요합니다.",
-		Evidence:      evidence,
+		Details: []model.ResultDetail{{
+			Label: "관리자 그룹 구성원", Current: strings.Join(observed, ", "),
+			Expected: "승인 관리자 목록과 일치", Source: "root, wheel, sudoers",
+		}},
+		Evidence: evidence,
 	}
 }
 
@@ -203,7 +211,11 @@ func evaluateUnnecessaryGroups(ctx context.Context, _ model.ResolvedRule, enviro
 		Summary:       "그룹의 서비스·파일 소유 목적과 필요성을 수동으로 확인해야 합니다.",
 		Expected:      "구성원이 없는 그룹도 파일 소유와 서비스 목적 및 승인 목록을 확인해야 합니다.",
 		Observed:      observed,
-		Evidence:      []model.Evidence{groupEvidence, accountEvidence},
+		Details: []model.ResultDetail{{
+			Label: "미사용 가능 그룹", Current: fmt.Sprintf("검토 후보 %d개", len(candidates)),
+			Expected: "서비스·파일 소유 목적 또는 승인 근거 확인", Source: "NSS 그룹 및 primary GID",
+		}},
+		Evidence: []model.Evidence{groupEvidence, accountEvidence},
 	}
 }
 
@@ -241,7 +253,11 @@ func evaluateServiceShell(ctx context.Context, rule model.ResolvedRule, environm
 			Summary:       "계정 역할을 알 수 없어 대화형 shell의 필요성을 확정할 수 없습니다.",
 			Expected:      "nonlogin_required_accounts 정책으로 로그인 불필요 계정을 명시해야 합니다.",
 			Observed:      observed,
-			Evidence:      allEvidence,
+			Details: []model.ResultDetail{{
+				Label: "대화형 shell 계정", Current: observed,
+				Expected: "로그인 불필요 계정을 정책으로 지정", Source: "NSS 계정, /etc/login.defs UID_MIN",
+			}},
+			Evidence: allEvidence,
 		}
 	}
 	_, listErr := normalizedNameSet(required)

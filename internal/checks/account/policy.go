@@ -15,11 +15,13 @@ import (
 	"github.com/yesidodo73/OpenCIIP/internal/evaluator"
 	"github.com/yesidodo73/OpenCIIP/internal/executor"
 	"github.com/yesidodo73/OpenCIIP/internal/model"
+	"github.com/yesidodo73/OpenCIIP/internal/system"
 )
 
 const (
 	EvaluatorLockoutThreshold = "unix.account.lockout_threshold"
 	EvaluatorPasswordHash     = "unix.account.password_hash"
+	unmanagedRHELSSHProbeUser = "openciip-audit"
 )
 
 func policyImplementations() map[string]evaluator.Func {
@@ -38,6 +40,21 @@ func evaluateLockoutThreshold(ctx context.Context, rule model.ResolvedRule, envi
 	if err != nil {
 		return checkError("invalid_rule_parameter", err)
 	}
+	if environment.Platform.Family == "debian" {
+		return evaluateDebianLockoutThreshold(ctx, environment)
+	}
+	if environment.Platform.Family != "rhel" {
+		return evaluator.Outcome{
+			Status:        model.StatusUnknown,
+			UnknownReason: model.UnknownUnsupportedConfiguration,
+			Summary:       "이 Linux 계열의 계정 잠금 적용 경로를 자동 확정할 수 없습니다.",
+			Expected:      "지원되는 PAM 계정 잠금 경로를 확인할 수 있어야 합니다.",
+			Observed:      fmt.Sprintf("family=%s id=%s version=%s", environment.Platform.Family, environment.Platform.ID, environment.Platform.VersionID),
+			Evidence: []model.Evidence{support.FactEvidence("platform", map[string]any{
+				"family": environment.Platform.Family, "id": environment.Platform.ID, "version_id": environment.Platform.VersionID,
+			})},
+		}
+	}
 	currentSpec := executor.Spec{Name: "authselect", Arguments: []string{"current"}, Timeout: 10 * time.Second}
 	current, err := environment.Commands.Run(ctx, currentSpec)
 	if err != nil {
@@ -45,14 +62,24 @@ func evaluateLockoutThreshold(ctx context.Context, rule model.ResolvedRule, envi
 	}
 	evidence := []model.Evidence{support.CommandEvidence(currentSpec, current)}
 	if current.Truncated {
-		return checkError("authselect_output_truncated", fmt.Errorf("authselect current output exceeded the limit"))
+		return evaluator.Outcome{
+			Status:        model.StatusUnknown,
+			UnknownReason: model.UnknownInsufficientEvidence,
+			Summary:       "authselect 관리 상태를 완전히 확인하지 못했습니다.",
+			Expected:      "지원되는 authselect 프로필 또는 확정 가능한 실제 인증 경로를 확인할 수 있어야 합니다.",
+			Observed:      "authselect current output truncated",
+			Evidence:      evidence,
+		}
 	}
 	if current.ExitCode != 0 {
+		if authselectReportsNoConfiguration(current) {
+			return evaluateUnmanagedRHELLockout(ctx, environment, evidence)
+		}
 		return evaluator.Outcome{
 			Status:        model.StatusUnknown,
 			UnknownReason: model.UnknownUnsupportedConfiguration,
-			Summary:       "authselect가 관리하지 않는 인증 구성은 자동 확정할 수 없습니다.",
-			Expected:      "지원되는 authselect 프로필에서 pam_faillock이 활성화되어야 합니다.",
+			Summary:       "authselect 관리 상태를 확정할 수 없어 계정 잠금 정책을 자동 판정하지 않습니다.",
+			Expected:      "지원되는 authselect 프로필 또는 확정 가능한 실제 인증 경로를 확인할 수 있어야 합니다.",
 			Observed:      fmt.Sprintf("authselect current exit=%d", current.ExitCode),
 			Evidence:      evidence,
 		}
@@ -63,6 +90,10 @@ func evaluateLockoutThreshold(ctx context.Context, rule model.ResolvedRule, envi
 			Summary:  "authselect 프로필에 계정 잠금 기능이 활성화되어 있지 않습니다.",
 			Expected: "with-faillock 기능과 10회 이하의 deny 값이 적용되어야 합니다.",
 			Observed: "with-faillock 없음",
+			Details: []model.ResultDetail{{
+				Label: "계정 잠금", Current: "비활성 (with-faillock 없음)",
+				Expected: "활성, 실패 허용 횟수 1~10회", Source: "authselect 프로필",
+			}},
 			Evidence: evidence,
 		}
 	}
@@ -134,6 +165,752 @@ func evaluateLockoutThreshold(ctx context.Context, rule model.ResolvedRule, envi
 		Expected: "실패 횟수 deny가 1회 이상 10회 이하여야 합니다.",
 		Observed: strings.Join(uniqueSorted(effective), "; "),
 		Evidence: evidence,
+	}
+}
+
+func authselectReportsNoConfiguration(result executor.Result) bool {
+	const message = "No existing configuration detected."
+	if result.ExitCode != 2 || result.Truncated || result.TimedOut {
+		return false
+	}
+	stdout := strings.TrimSpace(string(result.Stdout))
+	stderr := strings.TrimSpace(string(result.Stderr))
+	return (stdout == message && stderr == "") || (stderr == message && stdout == "")
+}
+
+func evaluateUnmanagedRHELLockout(
+	ctx context.Context,
+	environment evaluator.Environment,
+	evidence []model.Evidence,
+) evaluator.Outcome {
+	unknown := func(summary, observed string) evaluator.Outcome {
+		return unmanagedRHELLockoutUnknown(summary, observed, evidence)
+	}
+	if environment.Platform.InitSystem != "systemd" {
+		initSystem := strings.TrimSpace(environment.Platform.InitSystem)
+		if initSystem == "" {
+			initSystem = "unknown"
+		}
+		return unknown(
+			"authselect 미구성 환경의 실제 SSH 인증 경로를 확정할 수 없습니다.",
+			"init="+initSystem,
+		)
+	}
+
+	sshActive, _, unitStates, serviceEvidence, err := inspectRemoteService(
+		ctx,
+		environment,
+		sshRemoteUnitNames(),
+		[]string{"sshd"},
+		22,
+	)
+	evidence = append(evidence, serviceEvidence...)
+	if err != nil {
+		return checkErrorWithEvidence("unmanaged_rhel_ssh_target_failed", err, evidence)
+	}
+	if !sshActive {
+		return unknown(
+			"활성 SSH 비밀번호 인증 경로를 확인할 수 없어 다른 PAM 엔트리포인트의 잠금 정책을 수동으로 확인해야 합니다.",
+			"활성 SSH unit, sshd 프로세스 또는 TCP 22 리스너 없음",
+		)
+	}
+
+	launchUnits, launchEvidence, launchUnknowns, err := resolveSSHLaunchUnits(ctx, environment, unitStates)
+	evidence = append(evidence, launchEvidence...)
+	if err != nil {
+		return checkErrorWithEvidence("unmanaged_rhel_ssh_launch_units_failed", err, evidence)
+	}
+	if len(launchUnknowns) > 0 || len(launchUnits) == 0 {
+		return unknown(
+			"활성 SSH 서비스의 실제 실행 구성을 확정할 수 없습니다.",
+			strings.Join(uniqueSorted(launchUnknowns), "; "),
+		)
+	}
+
+	profiles := make([]sshLaunchProfile, 0, len(launchUnits))
+	profileUnknowns := make([]string, 0)
+	for _, unitName := range launchUnits {
+		profile, profileEvidence, reason, profileErr := inspectSSHDLaunchProfile(ctx, environment, unitName)
+		evidence = append(evidence, profileEvidence...)
+		if profileErr != nil {
+			return checkErrorWithEvidence("unmanaged_rhel_ssh_launch_profile_failed", profileErr, evidence)
+		}
+		if reason != "" {
+			profileUnknowns = append(profileUnknowns, unitName+": "+reason)
+			continue
+		}
+		if profile.CustomConfiguration {
+			profileUnknowns = append(profileUnknowns, unitName+": 사용자 지정 SSH 실행 구성을 사용함")
+			continue
+		}
+		profiles = append(profiles, profile)
+	}
+	if len(profileUnknowns) > 0 || len(profiles) == 0 {
+		return unknown(
+			"활성 SSH 서비스의 표준 실행 구성을 확정할 수 없습니다.",
+			strings.Join(uniqueSorted(profileUnknowns), "; "),
+		)
+	}
+
+	configAmbiguous, unsafeMatch, _, configEvidence, err := inspectSSHDMatchOverrides(ctx, environment)
+	evidence = append(evidence, configEvidence...)
+	if err != nil {
+		return unknown(
+			"SSH Match 또는 Include 구성을 해석하지 못해 비밀번호 인증 경로를 확정할 수 없습니다.",
+			err.Error(),
+		)
+	}
+	if configAmbiguous || unsafeMatch {
+		return unknown(
+			"SSH Match 또는 사용자 지정 Include 조건 때문에 모든 비밀번호 인증 경로를 확정할 수 없습니다.",
+			fmt.Sprintf("match_or_include_ambiguous=%t unsafe_match=%t", configAmbiguous, unsafeMatch),
+		)
+	}
+
+	host := strings.TrimSpace(environment.Platform.Hostname)
+	if host == "" || strings.ContainsAny(host, ",=\x00\r\n") {
+		host = "localhost"
+	}
+	addresses := []string{"127.0.0.1", "192.0.2.1", "::1", "2001:db8::1"}
+	effectivePaths := make([]string, 0, len(profiles)*len(addresses))
+	effectiveAuthenticationPaths := make([]string, 0, len(profiles)*len(addresses))
+	for _, profile := range profiles {
+		for _, address := range addresses {
+			arguments := append([]string(nil), profile.ConfigurationArguments...)
+			arguments = append(arguments, "-T", "-C", "user="+unmanagedRHELSSHProbeUser+",host="+host+",addr="+address)
+			spec := executor.Spec{
+				Name:      "sshd",
+				Arguments: arguments,
+				Timeout:   15 * time.Second,
+				MaxOutput: 2 << 20,
+			}
+			result, runErr := environment.Commands.Run(ctx, spec)
+			resultEvidence := support.CommandSummaryEvidence("sshd-effective-password-pam", spec, result, map[string]any{
+				"unit":           profile.Unit,
+				"address":        address,
+				"context_user":   unmanagedRHELSSHProbeUser,
+				"synthetic_user": true,
+				"non_root":       true,
+			})
+			evidence = append(evidence, resultEvidence)
+			if runErr != nil {
+				return checkErrorWithEvidence("unmanaged_rhel_sshd_effective_failed", runErr, evidence)
+			}
+			if result.ExitCode != 0 || result.Truncated {
+				return unknown(
+					"SSH 실효 비밀번호 인증 설정을 완전히 확인하지 못했습니다.",
+					fmt.Sprintf("%s %s exit=%d truncated=%t", profile.Unit, address, result.ExitCode, result.Truncated),
+				)
+			}
+			settings, parseErr := parseSSHDTestOutput(string(result.Stdout))
+			if parseErr != nil {
+				return unknown(
+					"SSH 실효 비밀번호 인증 설정을 해석하지 못했습니다.",
+					profile.Unit+" "+address+": "+parseErr.Error(),
+				)
+			}
+			usePAM, hasUsePAM := settings["usepam"]
+			resultEvidence.Fact["use_pam"] = usePAM
+			if passwordAuthentication, exists := settings["passwordauthentication"]; exists {
+				resultEvidence.Fact["password_authentication"] = passwordAuthentication
+			}
+			if keyboardInteractive, exists := settings["kbdinteractiveauthentication"]; exists {
+				resultEvidence.Fact["kbd_interactive_authentication"] = keyboardInteractive
+			} else if challengeResponse, exists := settings["challengeresponseauthentication"]; exists {
+				resultEvidence.Fact["challenge_response_authentication"] = challengeResponse
+			}
+			if authenticationMethods, exists := settings["authenticationmethods"]; exists {
+				resultEvidence.Fact["authentication_methods"] = authenticationMethods
+			}
+			if !hasUsePAM {
+				return unknown(
+					"SSH 실효 설정에서 PAM 기반 비밀번호 인증 여부를 확인할 수 없습니다.",
+					fmt.Sprintf("%s %s usepam_present=false", profile.Unit, address),
+				)
+			}
+			if !strings.EqualFold(usePAM, "yes") {
+				return unknown(
+					"SSH가 PAM을 사용하지 않아 이 경로만으로 계정 잠금 정책을 확정할 수 없습니다.",
+					fmt.Sprintf("%s %s usepam=%s", profile.Unit, address, usePAM),
+				)
+			}
+			for _, settingName := range []string{"allowusers", "denyusers", "allowgroups", "denygroups"} {
+				if strings.TrimSpace(settings[settingName]) == "" {
+					continue
+				}
+				resultEvidence.Fact["access_restriction"] = settingName
+				return unknown(
+					"SSH 전역 사용자 또는 그룹 제한 때문에 합성 비-root 사용자의 실제 인증 도달성을 확정할 수 없습니다.",
+					fmt.Sprintf("%s %s access_restriction=%s", profile.Unit, address, settingName),
+				)
+			}
+			pamAuthenticationPath, reason := inspectSSHPAMPasswordPath(settings)
+			if reason != "" {
+				return unknown(
+					"SSH의 실제 PAM 비밀번호 인증 순서를 확정할 수 없습니다.",
+					fmt.Sprintf("%s %s %s", profile.Unit, address, reason),
+				)
+			}
+			resultEvidence.Fact["pam_password_path"] = pamAuthenticationPath
+			effectivePaths = append(effectivePaths, profile.Unit+" "+address)
+			effectiveAuthenticationPaths = append(effectiveAuthenticationPaths, pamAuthenticationPath)
+		}
+	}
+
+	_, pamEvidence, err := support.ReadPAMService(ctx, environment.Files, "sshd")
+	evidence = append(evidence, pamEvidence...)
+	if err != nil {
+		return unknown(
+			"SSH PAM include 및 substack 경로를 완전히 해석하지 못했습니다.",
+			err.Error(),
+		)
+	}
+	pamUnixSource, pamReason := inspectUnmanagedRHELLocalPAMPath(ctx, environment.Files, pamEvidence)
+	if pamReason != "" {
+		return unknown(
+			"SSH PAM 경로에서 로컬 계정 잠금 정책의 부재를 확정할 수 없습니다.",
+			pamReason,
+		)
+	}
+
+	sort.Strings(effectivePaths)
+	effectiveUnits := make([]string, 0, len(profiles))
+	for _, profile := range profiles {
+		effectiveUnits = append(effectiveUnits, profile.Unit)
+	}
+	effectiveUnits = uniqueSorted(effectiveUnits)
+	pathSource := strings.Join(effectiveUnits, ", ") + " → /etc/pam.d/sshd → " + pamUnixSource
+	return evaluator.Outcome{
+		Status:   model.StatusFail,
+		Summary:  "활성 SSH 비밀번호 인증 경로에 계정 잠금 정책이 적용되어 있지 않습니다.",
+		Expected: "실패 허용 횟수가 1회 이상 10회 이하가 되도록 실제 PAM 인증 경로에 계정 잠금 모듈이 적용되어야 합니다.",
+		Observed: strings.Join([]string{
+			"authselect 미구성",
+			fmt.Sprintf("도달 가능한 SSH PAM 비밀번호 인증 조건=%d개", len(effectivePaths)),
+			"SSH 인증 방식=" + strings.Join(uniqueSorted(effectiveAuthenticationPaths), ", "),
+			"로컬 pam_unix.so 인증 경로=" + pamUnixSource,
+			"pam_faillock.so/pam_tally2.so 없음",
+		}, "; "),
+		Details: []model.ResultDetail{{
+			Label:    "SSH 계정 잠금",
+			Current:  "활성 로컬 비밀번호 인증 경로에 잠금 모듈 없음",
+			Expected: "실패 허용 횟수 1~10회",
+			Source:   pathSource,
+		}},
+		Evidence: evidence,
+	}
+}
+
+func inspectSSHPAMPasswordPath(settings map[string]string) (string, string) {
+	authenticationMethods, exists := settings["authenticationmethods"]
+	authenticationMethods = strings.ToLower(strings.TrimSpace(authenticationMethods))
+	if !exists || authenticationMethods == "" {
+		return "", "authenticationmethods 누락"
+	}
+
+	passwordEnabled := strings.EqualFold(strings.TrimSpace(settings["passwordauthentication"]), "yes")
+	keyboardInteractive := settings["kbdinteractiveauthentication"]
+	if strings.TrimSpace(keyboardInteractive) == "" {
+		keyboardInteractive = settings["challengeresponseauthentication"]
+	}
+	keyboardInteractiveEnabled := strings.EqualFold(strings.TrimSpace(keyboardInteractive), "yes")
+
+	alternatives := strings.Fields(authenticationMethods)
+	if len(alternatives) == 1 && alternatives[0] == "any" {
+		switch {
+		case passwordEnabled:
+			return "AuthenticationMethods=any → password", ""
+		case keyboardInteractiveEnabled:
+			return "AuthenticationMethods=any → keyboard-interactive(PAM)", ""
+		default:
+			return "", fmt.Sprintf(
+				"authenticationmethods=any passwordauthentication=%s kbdinteractiveauthentication=%s",
+				sshdSettingValue(settings, "passwordauthentication"),
+				sshdKeyboardInteractiveSettingValue(settings),
+			)
+		}
+	}
+	for _, alternative := range alternatives {
+		if alternative == "any" {
+			return "", "authenticationmethods에서 any와 다른 인증 순서를 함께 사용함"
+		}
+	}
+
+	for _, alternative := range alternatives {
+		methods := strings.Split(alternative, ",")
+		if len(methods) == 0 {
+			continue
+		}
+		switch strings.TrimSpace(methods[0]) {
+		case "password":
+			if !passwordEnabled {
+				continue
+			}
+			return "AuthenticationMethods=" + alternative, ""
+		case "keyboard-interactive", "keyboard-interactive:pam":
+			if !keyboardInteractiveEnabled {
+				continue
+			}
+			return "AuthenticationMethods=" + alternative, ""
+		}
+	}
+
+	return "", fmt.Sprintf(
+		"authenticationmethods=%s passwordauthentication=%s kbdinteractiveauthentication=%s; 도달 가능한 PAM 비밀번호 인증 순서 없음",
+		authenticationMethods,
+		sshdSettingValue(settings, "passwordauthentication"),
+		sshdKeyboardInteractiveSettingValue(settings),
+	)
+}
+
+func sshdSettingValue(settings map[string]string, name string) string {
+	value, exists := settings[name]
+	value = strings.TrimSpace(value)
+	if !exists || value == "" {
+		return "missing"
+	}
+	return strings.ToLower(value)
+}
+
+func sshdKeyboardInteractiveSettingValue(settings map[string]string) string {
+	if value := sshdSettingValue(settings, "kbdinteractiveauthentication"); value != "missing" {
+		return value
+	}
+	return sshdSettingValue(settings, "challengeresponseauthentication")
+}
+
+type unmanagedPAMEntry struct {
+	Path          string
+	Line          int
+	Type          string
+	Control       string
+	Module        string
+	IgnoreMissing bool
+}
+
+type unmanagedPAMExpectation struct {
+	Control string
+	Module  string
+}
+
+func inspectUnmanagedRHELLocalPAMPath(
+	ctx context.Context,
+	files system.Reader,
+	evidence []model.Evidence,
+) (string, string) {
+	allowedServices := map[string]bool{
+		"/etc/pam.d/sshd":          true,
+		"/etc/pam.d/password-auth": true,
+		"/etc/pam.d/system-auth":   true,
+		"/etc/pam.d/postlogin":     true,
+	}
+	for _, item := range evidence {
+		source := filepath.ToSlash(strings.TrimSpace(item.Source))
+		if strings.HasPrefix(source, "/etc/pam.d/") && !allowedServices[source] {
+			return "", "사용자 지정 PAM include/substack 경로: " + source
+		}
+	}
+
+	entriesByPath := make(map[string][]unmanagedPAMEntry, 3)
+	for _, path := range []string{
+		"/etc/pam.d/sshd",
+		"/etc/pam.d/password-auth",
+		"/etc/pam.d/postlogin",
+	} {
+		entries, err := readUnmanagedPAMEntries(ctx, files, path)
+		if err != nil {
+			return "", err.Error()
+		}
+		entriesByPath[path] = entries
+		for _, entry := range entries {
+			if entry.Type == "@include" {
+				return "", fmt.Sprintf(
+					"%s:%d 전역 @include 경계는 자동 확정하지 않음: %s",
+					entry.Path,
+					entry.Line,
+					entry.Module,
+				)
+			}
+			switch entry.Type {
+			case "auth", "account", "password", "session":
+			default:
+				return "", fmt.Sprintf(
+					"%s:%d 알 수 없는 PAM type=%s",
+					entry.Path,
+					entry.Line,
+					entry.Type,
+				)
+			}
+		}
+	}
+
+	sshdAuth := unmanagedPAMEntriesOfType(entriesByPath["/etc/pam.d/sshd"], "auth")
+	if reason := requireUnmanagedPAMSequence(
+		"/etc/pam.d/sshd",
+		"auth",
+		sshdAuth,
+		[]unmanagedPAMExpectation{
+			{Control: "substack", Module: "password-auth"},
+			{Control: "include", Module: "postlogin"},
+		},
+	); reason != "" {
+		return "", reason
+	}
+	sshdAccount := unmanagedPAMEntriesOfType(entriesByPath["/etc/pam.d/sshd"], "account")
+	if reason := requireUnmanagedPAMSequence(
+		"/etc/pam.d/sshd",
+		"account",
+		sshdAccount,
+		[]unmanagedPAMExpectation{
+			{Control: "required", Module: "pam_sepermit.so"},
+			{Control: "required", Module: "pam_nologin.so"},
+			{Control: "include", Module: "password-auth"},
+		},
+	); reason != "" {
+		return "", reason
+	}
+
+	passwordAuth := unmanagedPAMEntriesOfType(entriesByPath["/etc/pam.d/password-auth"], "auth")
+	if reason := validateUnmanagedPasswordAuthOrder(passwordAuth); reason != "" {
+		return "", reason
+	}
+	if reason := requireUnmanagedPAMSequence(
+		"/etc/pam.d/password-auth",
+		"auth",
+		passwordAuth,
+		[]unmanagedPAMExpectation{
+			{Control: "required", Module: "pam_env.so"},
+			{Control: "sufficient", Module: "pam_unix.so"},
+			{Control: "required", Module: "pam_deny.so"},
+		},
+	); reason != "" {
+		return "", reason
+	}
+	passwordAccount := unmanagedPAMEntriesOfType(entriesByPath["/etc/pam.d/password-auth"], "account")
+	if reason := requireUnmanagedPAMSequence(
+		"/etc/pam.d/password-auth",
+		"account",
+		passwordAccount,
+		[]unmanagedPAMExpectation{{Control: "required", Module: "pam_unix.so"}},
+	); reason != "" {
+		return "", reason
+	}
+
+	for _, ruleType := range []string{"auth", "account"} {
+		postlogin := unmanagedPAMEntriesOfType(entriesByPath["/etc/pam.d/postlogin"], ruleType)
+		if len(postlogin) > 0 {
+			return "", fmt.Sprintf(
+				"/etc/pam.d/postlogin %s 경로가 비어 있지 않음: %s",
+				ruleType,
+				summarizeUnmanagedPAMEntries(postlogin),
+			)
+		}
+	}
+
+	return fmt.Sprintf("%s:%d", passwordAuth[1].Path, passwordAuth[1].Line), ""
+}
+
+func validateUnmanagedPasswordAuthOrder(entries []unmanagedPAMEntry) string {
+	pamUnixIndex := -1
+	pamDenyIndex := -1
+	pamUnixCount := 0
+	pamDenyCount := 0
+	for index, entry := range entries {
+		switch entry.Module {
+		case "pam_unix.so":
+			pamUnixCount++
+			pamUnixIndex = index
+		case "pam_deny.so":
+			pamDenyCount++
+			pamDenyIndex = index
+		}
+	}
+	summary := summarizeUnmanagedPAMEntries(entries)
+	if pamUnixCount != 1 {
+		return fmt.Sprintf(
+			"/etc/pam.d/password-auth auth에서 pam_unix.so 경로 수=%d, 예상=1: %s",
+			pamUnixCount,
+			summary,
+		)
+	}
+	if pamDenyCount != 1 {
+		return fmt.Sprintf(
+			"/etc/pam.d/password-auth auth에서 pam_unix.so 이후 단일 pam_deny.so 인증 종료 경로가 없음(count=%d): %s",
+			pamDenyCount,
+			summary,
+		)
+	}
+	if pamDenyIndex < pamUnixIndex {
+		return fmt.Sprintf(
+			"%s:%d pam_deny.so가 pam_unix.so보다 먼저 실행됨: %s",
+			entries[pamDenyIndex].Path,
+			entries[pamDenyIndex].Line,
+			summary,
+		)
+	}
+	if entries[pamUnixIndex].Path != entries[pamDenyIndex].Path {
+		return fmt.Sprintf(
+			"pam_unix.so와 pam_deny.so가 서로 다른 PAM 파일에 있음: %s",
+			summary,
+		)
+	}
+	return ""
+}
+
+func readUnmanagedPAMEntries(
+	ctx context.Context,
+	files system.Reader,
+	path string,
+) ([]unmanagedPAMEntry, error) {
+	metadata, err := files.Lstat(path)
+	if err != nil {
+		return nil, fmt.Errorf("lstat %s topology: %w", path, err)
+	}
+	if metadata.FileType != "regular" {
+		return nil, fmt.Errorf("%s topology file type=%s, regular 필요", path, metadata.FileType)
+	}
+	data, _, err := files.ReadFile(ctx, path, 2<<20)
+	if err != nil {
+		return nil, fmt.Errorf("read %s topology: %w", path, err)
+	}
+
+	entries := make([]unmanagedPAMEntry, 0)
+	for index, raw := range strings.Split(strings.ReplaceAll(string(data), "\r\n", "\n"), "\n") {
+		lineNumber := index + 1
+		line := strings.TrimSpace(raw)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if strings.HasSuffix(line, "\\") {
+			return nil, fmt.Errorf("%s:%d PAM continuation은 자동 확정하지 않음", path, lineNumber)
+		}
+		if comment := strings.IndexByte(line, '#'); comment >= 0 {
+			line = strings.TrimSpace(line[:comment])
+		}
+		if line == "" {
+			continue
+		}
+
+		fields := strings.Fields(line)
+		if len(fields) > 0 && strings.TrimPrefix(fields[0], "-") == "@include" {
+			if len(fields) != 2 || strings.HasPrefix(fields[0], "-") {
+				return nil, fmt.Errorf("%s:%d @include 구조를 확정할 수 없음", path, lineNumber)
+			}
+			entries = append(entries, unmanagedPAMEntry{
+				Path: path, Line: lineNumber, Type: "@include", Control: "include", Module: fields[1],
+			})
+			continue
+		}
+		if len(fields) < 3 {
+			return nil, fmt.Errorf("%s:%d PAM 규칙 구조를 확정할 수 없음", path, lineNumber)
+		}
+
+		controlEnd := 1
+		if strings.HasPrefix(fields[1], "[") {
+			for controlEnd < len(fields) && !strings.HasSuffix(fields[controlEnd], "]") {
+				controlEnd++
+			}
+			if controlEnd >= len(fields) || !strings.HasSuffix(fields[controlEnd], "]") {
+				return nil, fmt.Errorf("%s:%d 복합 PAM 제어가 닫히지 않음", path, lineNumber)
+			}
+		}
+		moduleIndex := controlEnd + 1
+		if moduleIndex >= len(fields) {
+			return nil, fmt.Errorf("%s:%d PAM module이 없음", path, lineNumber)
+		}
+		entries = append(entries, unmanagedPAMEntry{
+			Path:          path,
+			Line:          lineNumber,
+			Type:          strings.TrimPrefix(fields[0], "-"),
+			Control:       strings.Join(fields[1:moduleIndex], " "),
+			Module:        fields[moduleIndex],
+			IgnoreMissing: strings.HasPrefix(fields[0], "-"),
+		})
+	}
+	return entries, nil
+}
+
+func unmanagedPAMEntriesOfType(entries []unmanagedPAMEntry, ruleType string) []unmanagedPAMEntry {
+	filtered := make([]unmanagedPAMEntry, 0)
+	for _, entry := range entries {
+		if entry.Type == ruleType {
+			filtered = append(filtered, entry)
+		}
+	}
+	return filtered
+}
+
+func requireUnmanagedPAMSequence(
+	path string,
+	ruleType string,
+	entries []unmanagedPAMEntry,
+	expected []unmanagedPAMExpectation,
+) string {
+	if len(entries) != len(expected) {
+		return fmt.Sprintf(
+			"%s %s topology 항목 수=%d, 예상=%d: %s",
+			path,
+			ruleType,
+			len(entries),
+			len(expected),
+			summarizeUnmanagedPAMEntries(entries),
+		)
+	}
+	for index, want := range expected {
+		entry := entries[index]
+		if entry.IgnoreMissing {
+			return fmt.Sprintf(
+				"%s:%d auth/account PAM type의 '-' 접두어는 자동 확정하지 않음",
+				entry.Path,
+				entry.Line,
+			)
+		}
+		if strings.HasPrefix(entry.Control, "[") {
+			return fmt.Sprintf("%s:%d 복합 PAM 제어=%s", entry.Path, entry.Line, entry.Control)
+		}
+		if entry.Control != want.Control || entry.Module != want.Module {
+			return fmt.Sprintf(
+				"%s %s topology 순서 %d 불일치: %s:%d %s %s, 예상=%s %s",
+				path,
+				ruleType,
+				index+1,
+				entry.Path,
+				entry.Line,
+				entry.Control,
+				entry.Module,
+				want.Control,
+				want.Module,
+			)
+		}
+	}
+	return ""
+}
+
+func summarizeUnmanagedPAMEntries(entries []unmanagedPAMEntry) string {
+	if len(entries) == 0 {
+		return "없음"
+	}
+	summary := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		summary = append(summary, fmt.Sprintf(
+			"%s:%d %s %s",
+			entry.Path,
+			entry.Line,
+			entry.Control,
+			entry.Module,
+		))
+	}
+	return strings.Join(summary, "; ")
+}
+
+func unmanagedRHELLockoutUnknown(summary, observed string, evidence []model.Evidence) evaluator.Outcome {
+	if strings.TrimSpace(observed) == "" {
+		observed = "확정 가능한 활성 SSH PAM 경로 없음"
+	}
+	return evaluator.Outcome{
+		Status:        model.StatusUnknown,
+		UnknownReason: model.UnknownUnsupportedConfiguration,
+		Summary:       summary,
+		Expected:      "활성 비밀번호 인증 엔트리포인트의 PAM 경로에서 실패 허용 횟수 1~10회를 확인할 수 있어야 합니다.",
+		Observed:      observed,
+		Evidence:      append([]model.Evidence(nil), evidence...),
+	}
+}
+
+func checkErrorWithEvidence(code string, err error, evidence []model.Evidence) evaluator.Outcome {
+	outcome := checkError(code, err)
+	outcome.Evidence = append([]model.Evidence(nil), evidence...)
+	return outcome
+}
+
+func evaluateDebianLockoutThreshold(ctx context.Context, environment evaluator.Environment) evaluator.Outcome {
+	stackNames := []string{"common-auth", "common-account"}
+	stacks, evidence, err := readPolicyPAMStacks(ctx, environment, stackNames...)
+	if err != nil {
+		return checkError("pam_lockout_stack_failed", err)
+	}
+	evidence = append([]model.Evidence{support.FactEvidence("PAM policy platform", map[string]any{
+		"family":         environment.Platform.Family,
+		"id":             environment.Platform.ID,
+		"version_id":     environment.Platform.VersionID,
+		"lockout_stacks": append([]string(nil), stackNames...),
+	})}, evidence...)
+
+	modules := make([]string, 0)
+	for _, stack := range stackNames {
+		for _, pamRule := range stacks[stack] {
+			module := strings.ToLower(filepath.Base(pamRule.Module))
+			if module != "pam_faillock.so" && module != "pam_tally2.so" {
+				continue
+			}
+			modules = append(modules, fmt.Sprintf("%s %s:%d %s %s",
+				stack, pamRule.Path, pamRule.Line, module, strings.Join(pamRule.Args, " ")))
+		}
+	}
+	if len(modules) == 0 {
+		unresolvedPaths := unresolvedDebianLockoutPaths(stackNames, stacks)
+		if len(unresolvedPaths) > 0 {
+			return evaluator.Outcome{
+				Status:        model.StatusUnknown,
+				UnknownReason: model.UnknownUnsupportedConfiguration,
+				Summary:       "외부 또는 사용자 정의 PAM 인증 경로가 있어 계정 잠금 정책의 실효 적용 상태를 확정할 수 없습니다.",
+				Expected:      "모든 적용 인증 경로에서 실패 허용 횟수가 1~10회여야 합니다.",
+				Observed:      "공통 PAM 잠금 모듈 없음; 확인이 필요한 인증 경로: " + strings.Join(unresolvedPaths, "; "),
+				Evidence:      evidence,
+			}
+		}
+		return evaluator.Outcome{
+			Status:   model.StatusFail,
+			Summary:  "공통 PAM 인증 경로에 계정 잠금 정책이 적용되어 있지 않습니다.",
+			Expected: "인증 실패 횟수가 10회 이하가 되도록 공통 PAM 경로에 계정 잠금 모듈이 적용되어야 합니다.",
+			Observed: "common-auth와 common-account에 pam_faillock.so 또는 pam_tally2.so 없음",
+			Details: []model.ResultDetail{{
+				Label: "계정 잠금", Current: "공통 PAM 잠금 모듈 없음",
+				Expected: "실패 허용 횟수 1~10회", Source: "/etc/pam.d/common-auth, /etc/pam.d/common-account",
+			}},
+			Evidence: evidence,
+		}
+	}
+	sort.Strings(modules)
+	return evaluator.Outcome{
+		Status:        model.StatusUnknown,
+		UnknownReason: model.UnknownUnsupportedConfiguration,
+		Summary:       "Debian 계열 PAM 잠금 모듈의 전체 실효 제어 흐름을 아직 자동 확정할 수 없습니다.",
+		Expected:      "모든 적용 인증 경로에서 실패 허용 횟수가 1~10회여야 합니다.",
+		Observed:      strings.Join(uniqueSorted(modules), "; "),
+		Evidence:      evidence,
+	}
+}
+
+func unresolvedDebianLockoutPaths(stackNames []string, stacks map[string][]support.PAMRule) []string {
+	paths := make([]string, 0)
+	for _, stack := range stackNames {
+		for _, pamRule := range stacks[stack] {
+			if pamRule.Type != "auth" && pamRule.Type != "account" {
+				continue
+			}
+			module := strings.ToLower(filepath.Base(pamRule.Module))
+			if knownLocalDebianLockoutModule(module) {
+				continue
+			}
+			paths = append(paths, fmt.Sprintf("%s %s:%d %s", stack, pamRule.Path, pamRule.Line, module))
+		}
+	}
+	return uniqueSorted(paths)
+}
+
+func knownLocalDebianLockoutModule(module string) bool {
+	switch module {
+	case "pam_unix.so", "pam_faillock.so", "pam_tally2.so",
+		"pam_deny.so", "pam_permit.so", "pam_cap.so", "pam_env.so",
+		"pam_faildelay.so", "pam_securetty.so", "pam_nologin.so", "pam_rootok.so",
+		"pam_localuser.so", "pam_usertype.so", "pam_succeed_if.so",
+		"pam_warn.so", "pam_debug.so", "pam_echo.so", "pam_access.so",
+		"pam_time.so", "pam_shells.so", "pam_group.so", "pam_listfile.so",
+		"pam_issue.so", "pam_limits.so":
+		return true
+	default:
+		return false
 	}
 }
 
@@ -619,6 +1396,24 @@ func evaluatePasswordHash(ctx context.Context, rule model.ResolvedRule, environm
 		}
 		return checkError("invalid_rule_parameter", err)
 	}
+	pamStackNames := make([]string, 0, 2)
+	switch environment.Platform.Family {
+	case "rhel":
+		pamStackNames = append(pamStackNames, "system-auth", "password-auth")
+	case "debian":
+		pamStackNames = append(pamStackNames, "common-password")
+	default:
+		return evaluator.Outcome{
+			Status:        model.StatusUnknown,
+			UnknownReason: model.UnknownUnsupportedConfiguration,
+			Summary:       "이 Linux 계열의 비밀번호 해시 적용 경로를 자동 확정할 수 없습니다.",
+			Expected:      "지원되는 PAM 비밀번호 스택과 해시 정책을 확인할 수 있어야 합니다.",
+			Observed:      fmt.Sprintf("family=%s id=%s version=%s", environment.Platform.Family, environment.Platform.ID, environment.Platform.VersionID),
+			Evidence: []model.Evidence{support.FactEvidence("platform", map[string]any{
+				"family": environment.Platform.Family, "id": environment.Platform.ID, "version_id": environment.Platform.VersionID,
+			})},
+		}
+	}
 	method, line, loginEvidence, err := readLoginDefsMethod(ctx, environment)
 	if err != nil {
 		return checkError("login_defs_read_failed", err)
@@ -627,11 +1422,17 @@ func evaluatePasswordHash(ctx context.Context, rule model.ResolvedRule, environm
 	if err != nil {
 		return checkError("shadow_read_failed", err)
 	}
-	pamStacks, pamEvidence, err := readPolicyPAMStacks(ctx, environment, "system-auth", "password-auth")
+	pamStacks, pamEvidence, err := readPolicyPAMStacks(ctx, environment, pamStackNames...)
 	if err != nil {
 		return checkError("pam_password_hash_stack_failed", err)
 	}
 	evidence := []model.Evidence{loginEvidence, shadowEvidence}
+	evidence = append(evidence, support.FactEvidence("PAM policy platform", map[string]any{
+		"family":          environment.Platform.Family,
+		"id":              environment.Platform.ID,
+		"version_id":      environment.Platform.VersionID,
+		"password_stacks": append([]string(nil), pamStackNames...),
+	}))
 	evidence = append(evidence, pamEvidence...)
 	activeAlgorithms := make(map[string][]string)
 	for name, entry := range shadow {
@@ -661,7 +1462,7 @@ func evaluatePasswordHash(ctx context.Context, rule model.ResolvedRule, environm
 		unknown = append(unknown, "ENCRYPT_METHOD="+method)
 	}
 	effectiveMethods := []string{fmt.Sprintf("ENCRYPT_METHOD=%s line=%d", method, line)}
-	for _, stack := range []string{"system-auth", "password-auth"} {
+	for _, stack := range pamStackNames {
 		stackMethods, stackUnsafe, stackUnknown := inspectPAMUnixHashMethods(stack, pamStacks[stack], method, safeMethods)
 		effectiveMethods = append(effectiveMethods, stackMethods...)
 		unsafe = append(unsafe, stackUnsafe...)
@@ -733,7 +1534,7 @@ func inspectPAMUnixHashMethods(stack string, rules []support.PAMRule, fallbackMe
 		rule := match.rule
 		unknown = append(unknown, assessPAMUnixHashReachability(stack, rules, match.index)...)
 		control := strings.ToLower(strings.TrimSpace(rule.Control))
-		if control != "required" && control != "requisite" && control != "sufficient" {
+		if !supportedPAMUnixHashControl(control) {
 			unknown = append(unknown, fmt.Sprintf("%s %s:%d pam_unix PAM 제어 흐름을 확정할 수 없음", stack, rule.Path, rule.Line))
 		}
 		method, overridden, err := pamUnixHashMethod(rule.Args, fallbackMethod)
@@ -757,6 +1558,18 @@ func inspectPAMUnixHashMethods(stack string, rules []support.PAMRule, fallbackMe
 		}
 	}
 	return effective, unsafe, unknown
+}
+
+func supportedPAMUnixHashControl(control string) bool {
+	switch control {
+	case "required", "requisite", "sufficient", "optional":
+		return true
+	}
+	if !strings.HasPrefix(control, "[") || !strings.HasSuffix(control, "]") {
+		return false
+	}
+	_, valid := pamControlActions(control)
+	return valid
 }
 
 func assessPAMUnixHashReachability(stack string, rules []support.PAMRule, pamUnixIndex int) []string {
