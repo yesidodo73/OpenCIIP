@@ -42,7 +42,7 @@ func evaluateLogPolicy(ctx context.Context, rule model.ResolvedRule, environment
 		return evaluator.Outcome{
 			Status:        model.StatusUnknown,
 			UnknownReason: model.UnknownUnsupportedConfiguration,
-			Summary:       "지원되는 방식으로 시스템 로깅 백엔드 상태를 확인할 수 없습니다.",
+			Summary:       "시스템 로깅 서비스의 현재 상태를 확인할 수 없습니다.",
 			Expected:      expected,
 			Observed:      environment.Platform.InitSystem,
 		}
@@ -87,7 +87,9 @@ func evaluateLogPolicy(ctx context.Context, rule model.ResolvedRule, environment
 	if journalActive {
 		journalSettings, journalComplete, err = inspectJournaldEffectiveConfig(ctx, environment, &evidence)
 		if err != nil {
-			return logPolicyError("journald_config_inspection_failed", err)
+			outcome := logPolicyError("journald_config_inspection_failed", err)
+			outcome.Evidence = evidence
+			return outcome
 		}
 	}
 
@@ -194,11 +196,24 @@ func evaluateLogPolicy(ctx context.Context, rule model.ResolvedRule, environment
 }
 
 func standardLoggingUnit(unit support.UnitState) bool {
-	fragment := strings.ReplaceAll(strings.TrimSpace(unit.FragmentPath), "\\", "/")
-	if !strings.HasPrefix(fragment, "/usr/lib/systemd/system/") && !strings.HasPrefix(fragment, "/lib/systemd/system/") {
+	if !vendorSystemdUnitPath(unit.FragmentPath) {
 		return false
 	}
-	return strings.TrimSpace(unit.DropInPaths) == ""
+	for _, dropInPath := range strings.Fields(unit.DropInPaths) {
+		if !vendorSystemdUnitPath(dropInPath) {
+			return false
+		}
+	}
+	return true
+}
+
+func vendorSystemdUnitPath(rawPath string) bool {
+	unitPath := strings.ReplaceAll(strings.TrimSpace(rawPath), "\\", "/")
+	if unitPath == "" || !path.IsAbs(unitPath) || path.Clean(unitPath) != unitPath {
+		return false
+	}
+	return strings.HasPrefix(unitPath, "/usr/lib/systemd/system/") ||
+		strings.HasPrefix(unitPath, "/lib/systemd/system/")
 }
 
 func inspectRsyslogStartupConfig(ctx context.Context, files system.Reader) (bool, *model.Evidence, error) {
@@ -312,7 +327,13 @@ func inspectJournaldEffectiveConfig(
 		return nil, false, err
 	}
 	*evidence = append(*evidence, support.CommandEvidence(spec, result))
-	if result.ExitCode != 0 || result.Truncated {
+	if result.Truncated {
+		return nil, false, fmt.Errorf("systemd-analyze cat-config exit=%d truncated=%t", result.ExitCode, result.Truncated)
+	}
+	if result.ExitCode != 0 {
+		if systemdAnalyzeCatConfigUnsupported(result) {
+			return nil, false, nil
+		}
 		return nil, false, fmt.Errorf("systemd-analyze cat-config exit=%d truncated=%t", result.ExitCode, result.Truncated)
 	}
 	settings, complete := parseJournaldConfig(string(result.Stdout))
@@ -320,6 +341,13 @@ func inspectJournaldEffectiveConfig(
 		settings["storage"] = "auto"
 	}
 	return settings, complete, nil
+}
+
+func systemdAnalyzeCatConfigUnsupported(result executor.Result) bool {
+	diagnostic := strings.ToLower(strings.TrimSpace(string(result.Stderr)))
+	return strings.Contains(diagnostic, "unknown operation cat-config") ||
+		strings.Contains(diagnostic, "unknown operation 'cat-config'") ||
+		strings.Contains(diagnostic, `unknown operation "cat-config"`)
 }
 
 func parseJournaldConfig(content string) (map[string]string, bool) {

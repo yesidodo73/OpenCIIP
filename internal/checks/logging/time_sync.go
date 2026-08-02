@@ -33,22 +33,43 @@ func evaluateTimeSync(ctx context.Context, rule model.ResolvedRule, environment 
 		return evaluator.Outcome{
 			Status:        model.StatusUnknown,
 			UnknownReason: model.UnknownUnsupportedConfiguration,
-			Summary:       "지원되는 방식으로 시각 동기화 서비스 상태를 확인할 수 없습니다.",
+			Summary:       "시각 동기화 서비스의 현재 상태와 부팅 시 활성 상태를 함께 확인할 수 없습니다.",
 			Expected:      "systemd 환경에서 chronyd 상태를 확인할 수 있어야 합니다.",
 			Observed:      environment.Platform.InitSystem,
 		}
 	}
-	units, unitEvidence, err := support.InspectUnits(ctx, environment, []string{"chronyd.service"})
+	units, unitEvidence, err := support.InspectUnits(ctx, environment, []string{"chronyd.service", "systemd-timesyncd.service"})
 	if err != nil {
-		return logError("chronyd_service_failed", err)
+		return logError("time_sync_service_failed", err, unitEvidence...)
 	}
 	evidence := append([]model.Evidence(nil), unitEvidence...)
-	if len(units) != 1 || !support.UnitInstalled(units[0]) {
+	if len(units) != 2 {
+		return logError("time_sync_service_failed", fmt.Errorf("time synchronization unit inventory is incomplete"), evidence...)
+	}
+	if support.UnitInstalled(units[0]) && support.UnitActive(units[0]) &&
+		support.UnitInstalled(units[1]) && support.UnitActive(units[1]) {
+		return evaluator.Outcome{
+			Status:        model.StatusUnknown,
+			UnknownReason: model.UnknownAmbiguousResult,
+			Summary:       "둘 이상의 시각 동기화 서비스가 동시에 실행 중이어서 실효 관리자를 확정할 수 없습니다.",
+			Expected:      "실효 시각 동기화 관리자와 시간원을 하나의 일관된 상태로 확인할 수 있어야 합니다.",
+			Observed:      "chronyd.service=active, systemd-timesyncd.service=active",
+			Evidence:      evidence,
+		}
+	}
+	if support.UnitInstalled(units[1]) && support.UnitActive(units[1]) &&
+		(!support.UnitInstalled(units[0]) || !support.UnitActive(units[0])) {
+		return evaluateSystemdTimesyncd(ctx, rule, environment, units[1], evidence)
+	}
+	if !support.UnitInstalled(units[0]) {
+		if support.UnitInstalled(units[1]) {
+			return evaluateSystemdTimesyncd(ctx, rule, environment, units[1], evidence)
+		}
 		return evaluator.Outcome{
 			Status:   model.StatusFail,
 			Summary:  "시각 동기화 서비스가 설치되어 있지 않습니다.",
-			Expected: "chronyd가 설치되어 활성화되고 승인된 시간원과 동기화되어야 합니다.",
-			Observed: "chronyd.service not found",
+			Expected: "지원되는 시각 동기화 서비스가 설치되어 활성화되고 승인된 시간원과 동기화되어야 합니다.",
+			Observed: "chronyd.service 및 systemd-timesyncd.service not found",
 			Evidence: evidence,
 		}
 	}
@@ -64,7 +85,7 @@ func evaluateTimeSync(ctx context.Context, rule model.ResolvedRule, environment 
 
 	configuredSources, hasDynamicIncludes, configEvidence, err := readChronySources(ctx, environment)
 	if err != nil {
-		return logError("chrony_config_failed", err)
+		return logError("chrony_config_failed", err, evidence...)
 	}
 	evidence = append(evidence, configEvidence)
 	if len(configuredSources) == 0 && !hasDynamicIncludes {
@@ -80,7 +101,7 @@ func evaluateTimeSync(ctx context.Context, rule model.ResolvedRule, environment 
 	trackingSpec := executor.Spec{Name: "chronyc", Arguments: []string{"tracking"}, Timeout: 10 * time.Second}
 	tracking, err := environment.Commands.Run(ctx, trackingSpec)
 	if err != nil {
-		return logError("chronyc_tracking_failed", err)
+		return logError("chronyc_tracking_failed", err, evidence...)
 	}
 	evidence = append(evidence, support.CommandEvidence(trackingSpec, tracking))
 	if tracking.ExitCode != 0 || tracking.Truncated {
@@ -107,7 +128,7 @@ func evaluateTimeSync(ctx context.Context, rule model.ResolvedRule, environment 
 	sourcesSpec := executor.Spec{Name: "chronyc", Arguments: []string{"-N", "-c", "sources"}, Timeout: 10 * time.Second, MaxOutput: 1 << 20}
 	runtimeResult, err := environment.Commands.Run(ctx, sourcesSpec)
 	if err != nil {
-		return logError("chronyc_sources_failed", err)
+		return logError("chronyc_sources_failed", err, evidence...)
 	}
 	evidence = append(evidence, support.CommandEvidence(sourcesSpec, runtimeResult))
 	if runtimeResult.ExitCode != 0 || runtimeResult.Truncated {
@@ -122,7 +143,7 @@ func evaluateTimeSync(ctx context.Context, rule model.ResolvedRule, environment 
 	}
 	runtimeSources, selectedSources, err := parseChronySourcesCSV(runtimeResult.Stdout)
 	if err != nil {
-		return logError("chronyc_sources_parse_failed", err)
+		return logError("chronyc_sources_parse_failed", err, evidence...)
 	}
 	evidence = append(evidence, support.FactEvidence("chronyc runtime sources", map[string]any{
 		"runtime_source_count": len(runtimeSources), "selected_source_count": len(selectedSources), "source_names": runtimeSources,
@@ -140,7 +161,7 @@ func evaluateTimeSync(ctx context.Context, rule model.ResolvedRule, environment 
 
 	approved, hasApproved, err := support.StringSliceParameter(rule.Parameters, "approved_sources")
 	if err != nil {
-		return logError("invalid_rule_parameter", err)
+		return logError("invalid_rule_parameter", err, evidence...)
 	}
 	if hasDynamicIncludes {
 		return evaluator.Outcome{
@@ -148,7 +169,7 @@ func evaluateTimeSync(ctx context.Context, rule model.ResolvedRule, environment 
 			UnknownReason: model.UnknownUnsupportedConfiguration,
 			Summary:       "동적으로 포함되는 chrony 설정을 모두 해석하지 못했습니다.",
 			Expected:      "모든 실효 시간원과 include 경로를 확인할 수 있어야 합니다.",
-			Observed:      strings.Join(configuredSources, ", "),
+			Observed:      chronyDynamicIncludeObservation(configuredSources, runtimeSources, selectedSources),
 			Evidence:      evidence,
 		}
 	}
@@ -192,6 +213,205 @@ func evaluateTimeSync(ctx context.Context, rule model.ResolvedRule, environment 
 	}
 }
 
+func evaluateSystemdTimesyncd(
+	ctx context.Context,
+	rule model.ResolvedRule,
+	environment evaluator.Environment,
+	unit support.UnitState,
+	evidence []model.Evidence,
+) evaluator.Outcome {
+	if !support.UnitActive(unit) || !support.UnitEnabled(unit) {
+		return evaluator.Outcome{
+			Status:   model.StatusFail,
+			Summary:  "시각 동기화 서비스가 활성화되어 있지 않습니다.",
+			Expected: "systemd-timesyncd가 실행 중이며 부팅 시 활성화되어야 합니다.",
+			Observed: fmt.Sprintf("active=%s unit_file=%s", unit.ActiveState, unit.UnitFileState),
+			Evidence: evidence,
+		}
+	}
+
+	statusSpec := executor.Spec{Name: "timedatectl", Arguments: []string{"status"}, Timeout: 10 * time.Second}
+	statusResult, err := environment.Commands.Run(ctx, statusSpec)
+	if err != nil {
+		return logError("timedatectl_status_failed", err, evidence...)
+	}
+	evidence = append(evidence, support.CommandEvidence(statusSpec, statusResult))
+	if statusResult.ExitCode != 0 || statusResult.Truncated {
+		return evaluator.Outcome{
+			Status:        model.StatusUnknown,
+			UnknownReason: model.UnknownInsufficientEvidence,
+			Summary:       "현재 시스템 시계의 동기화 상태를 확인하지 못했습니다.",
+			Expected:      "systemd가 시스템 시계 동기화 완료 상태를 보고해야 합니다.",
+			Observed:      fmt.Sprintf("exit=%d truncated=%t", statusResult.ExitCode, statusResult.Truncated),
+			Evidence:      evidence,
+		}
+	}
+	statusValues, err := parseTimedatectlStatus(statusResult.Stdout)
+	if err != nil {
+		return logError("timedatectl_status_parse_failed", err, evidence...)
+	}
+	synchronized := strings.ToLower(statusValues["system clock synchronized"])
+	if synchronized == "" {
+		return evaluator.Outcome{
+			Status:        model.StatusUnknown,
+			UnknownReason: model.UnknownInsufficientEvidence,
+			Summary:       "현재 시스템 시계의 동기화 완료 여부를 확인하지 못했습니다.",
+			Expected:      "timedatectl이 시스템 시계 동기화 여부를 보고해야 합니다.",
+			Observed:      "System clock synchronized 항목 없음",
+			Evidence:      evidence,
+		}
+	}
+	if synchronized != "yes" {
+		return evaluator.Outcome{
+			Status:        model.StatusUnknown,
+			UnknownReason: model.UnknownAmbiguousResult,
+			Summary:       "systemd-timesyncd가 실행 중이지만 현재 동기화 완료 상태가 아닙니다.",
+			Expected:      "System clock synchronized가 yes여야 합니다.",
+			Observed:      "System clock synchronized=" + synchronized,
+			Evidence:      evidence,
+		}
+	}
+
+	showSpec := executor.Spec{Name: "timedatectl", Arguments: []string{"show-timesync", "--all"}, Timeout: 10 * time.Second}
+	showResult, err := environment.Commands.Run(ctx, showSpec)
+	if err != nil {
+		return logError("timedatectl_timesync_failed", err, evidence...)
+	}
+	evidence = append(evidence, support.CommandEvidence(showSpec, showResult))
+	sourcesSupported := showResult.ExitCode == 0 && !showResult.Truncated
+	configuredSources := make([]string, 0)
+	runtimeSource := ""
+	if sourcesSupported {
+		properties, parseErr := support.ParseKeyValueOutput(string(showResult.Stdout))
+		if parseErr != nil {
+			return logError("timedatectl_timesync_parse_failed", parseErr, evidence...)
+		}
+		activeTierSources := make([]string, 0)
+		for _, key := range []string{"LinkNTPServers", "SystemNTPServers", "RuntimeNTPServers"} {
+			activeTierSources = append(activeTierSources, strings.Fields(properties[key])...)
+		}
+		sort.Strings(activeTierSources)
+		activeTierSources = uniqueStrings(activeTierSources)
+		fallbackSources := strings.Fields(properties["FallbackNTPServers"])
+		sort.Strings(fallbackSources)
+		fallbackSources = uniqueStrings(fallbackSources)
+		sourceTier := "active"
+		configuredSources = append(configuredSources, activeTierSources...)
+		if len(activeTierSources) == 0 {
+			sourceTier = "fallback"
+			configuredSources = append(configuredSources, fallbackSources...)
+		}
+		runtimeSource = strings.TrimSpace(properties["ServerName"])
+		if runtimeSource != "" {
+			configuredSources = append(configuredSources, runtimeSource)
+		}
+		sort.Strings(configuredSources)
+		configuredSources = uniqueStrings(configuredSources)
+		evidence = append(evidence, support.FactEvidence("systemd-timesyncd sources", map[string]any{
+			"active_tier_sources":  activeTierSources,
+			"fallback_sources":     fallbackSources,
+			"approval_source_tier": sourceTier,
+			"configured_sources":   configuredSources,
+			"runtime_source":       runtimeSource,
+		}))
+	} else if showResult.Truncated {
+		return evaluator.Outcome{
+			Status:        model.StatusUnknown,
+			UnknownReason: model.UnknownInsufficientEvidence,
+			Summary:       "systemd-timesyncd 시간원 정보를 완전히 수집하지 못했습니다.",
+			Expected:      "실효 시간원 목록과 현재 사용 중인 시간원을 확인할 수 있어야 합니다.",
+			Observed:      "timedatectl show-timesync output truncated",
+			Evidence:      evidence,
+		}
+	} else if !timedatectlTimesyncUnsupported(showResult) {
+		return evaluator.Outcome{
+			Status:        model.StatusUnknown,
+			UnknownReason: model.UnknownInsufficientEvidence,
+			Summary:       "systemd-timesyncd 시간원 정보를 확인하지 못했습니다.",
+			Expected:      "실효 시간원 목록과 현재 사용 중인 시간원을 확인할 수 있어야 합니다.",
+			Observed:      fmt.Sprintf("timedatectl show-timesync exit=%d", showResult.ExitCode),
+			Evidence:      evidence,
+		}
+	}
+
+	approved, hasApproved, err := support.StringSliceParameter(rule.Parameters, "approved_sources")
+	if err != nil {
+		return logError("invalid_rule_parameter", err, evidence...)
+	}
+	observed := "System clock synchronized=yes"
+	if runtimeSource != "" {
+		observed += "; runtime source=" + runtimeSource
+	}
+	if !hasApproved || len(approved) == 0 {
+		return evaluator.Outcome{
+			Status:        model.StatusUnknown,
+			UnknownReason: model.UnknownManualVerification,
+			Summary:       "현재 시각 동기화는 정상이나 승인된 시간원 목록이 없어 정책 적합성을 확정할 수 없습니다.",
+			Expected:      "구성된 모든 시간원이 기관의 승인 목록에 포함되어야 합니다.",
+			Observed:      observed,
+			Evidence:      evidence,
+		}
+	}
+	if !sourcesSupported || runtimeSource == "" || len(configuredSources) == 0 {
+		return evaluator.Outcome{
+			Status:        model.StatusUnknown,
+			UnknownReason: model.UnknownInsufficientEvidence,
+			Summary:       "현재 동기화는 정상이나 실효 시간원 전체를 승인 목록과 대조하지 못했습니다.",
+			Expected:      "구성된 모든 시간원과 현재 사용 중인 시간원이 기관의 승인 목록에 포함되어야 합니다.",
+			Observed:      observed,
+			Evidence:      evidence,
+		}
+	}
+	if unapproved := differenceFold(configuredSources, approved); len(unapproved) > 0 {
+		return evaluator.Outcome{
+			Status:   model.StatusFail,
+			Summary:  "승인 목록에 없는 시간원이 구성되어 있습니다.",
+			Expected: "구성된 모든 시간원이 기관의 승인 목록에 포함되어야 합니다.",
+			Observed: strings.Join(unapproved, ", "),
+			Evidence: evidence,
+		}
+	}
+	return evaluator.Outcome{
+		Status:   model.StatusPass,
+		Summary:  "시각 동기화 서비스와 시간원이 정책 기준을 충족합니다.",
+		Expected: "systemd-timesyncd가 활성화되고 승인된 시간원과 정상 동기화되어야 합니다.",
+		Observed: observed,
+		Evidence: evidence,
+	}
+}
+
+func parseTimedatectlStatus(data []byte) (map[string]string, error) {
+	const synchronizedKey = "system clock synchronized"
+
+	values := make(map[string]string)
+	for lineNumber, raw := range strings.Split(strings.ReplaceAll(string(data), "\r\n", "\n"), "\n") {
+		line := strings.TrimSpace(raw)
+		if line == "" {
+			continue
+		}
+		key, value, found := strings.Cut(line, ":")
+		key = strings.ToLower(strings.TrimSpace(key))
+		if !found || key != synchronizedKey {
+			continue
+		}
+		if _, duplicate := values[key]; duplicate {
+			return nil, fmt.Errorf("timedatectl status line %d repeats %s", lineNumber+1, key)
+		}
+		values[key] = strings.TrimSpace(value)
+	}
+	return values, nil
+}
+
+func timedatectlTimesyncUnsupported(result executor.Result) bool {
+	if result.ExitCode == 0 {
+		return false
+	}
+	message := strings.ToLower(string(result.Stderr) + "\n" + string(result.Stdout))
+	return strings.Contains(message, "unknown operation") ||
+		strings.Contains(message, "unrecognized option") ||
+		strings.Contains(message, "unknown command")
+}
+
 func parseChronySourcesCSV(data []byte) ([]string, []string, error) {
 	reader := csv.NewReader(strings.NewReader(string(data)))
 	reader.FieldsPerRecord = -1
@@ -229,7 +449,8 @@ func parseChronySourcesCSV(data []byte) ([]string, []string, error) {
 }
 
 func readChronySources(ctx context.Context, environment evaluator.Environment) ([]string, bool, model.Evidence, error) {
-	data, _, err := environment.Files.ReadFile(ctx, "/etc/chrony.conf", 2<<20)
+	configPath := chronyConfigurationPath(environment.Platform)
+	data, _, err := environment.Files.ReadFile(ctx, configPath, 2<<20)
 	if err != nil {
 		return nil, false, model.Evidence{}, err
 	}
@@ -272,10 +493,17 @@ func readChronySources(ctx context.Context, environment evaluator.Environment) (
 		}
 	}
 	sort.Strings(sources)
-	return uniqueStrings(sources), dynamic, support.FactEvidence("/etc/chrony.conf", map[string]any{
+	return uniqueStrings(sources), dynamic, support.FactEvidence(configPath, map[string]any{
 		"directives":       facts,
 		"dynamic_includes": dynamic,
 	}), nil
+}
+
+func chronyConfigurationPath(platform model.PlatformInfo) string {
+	if platform.Family == "debian" {
+		return "/etc/chrony/chrony.conf"
+	}
+	return "/etc/chrony.conf"
 }
 
 func inspectChronyIncludeDirectory(environment evaluator.Environment, directory, suffix string) (int, bool, error) {
@@ -326,6 +554,22 @@ func differenceFold(values, allowed []string) []string {
 	return result
 }
 
+func chronyDynamicIncludeObservation(configuredSources, runtimeSources, selectedSources []string) string {
+	return strings.Join([]string{
+		"동적 include: 있음",
+		"정적으로 확인한 시간원: " + chronySourceList(configuredSources),
+		"runtime 시간원: " + chronySourceList(runtimeSources),
+		"선택 시간원: " + chronySourceList(selectedSources),
+	}, "\n")
+}
+
+func chronySourceList(sources []string) string {
+	if len(sources) == 0 {
+		return "없음"
+	}
+	return strings.Join(sources, ", ")
+}
+
 func uniqueStrings(values []string) []string {
 	result := make([]string, 0, len(values))
 	for _, value := range values {
@@ -345,10 +589,11 @@ func firstNonEmpty(values ...string) string {
 	return "unknown"
 }
 
-func logError(code string, err error) evaluator.Outcome {
+func logError(code string, err error, evidence ...model.Evidence) evaluator.Outcome {
 	return evaluator.Outcome{
 		Status:       model.StatusError,
 		Summary:      "시각 동기화 설정을 수집하거나 해석하지 못했습니다.",
+		Evidence:     append([]model.Evidence(nil), evidence...),
 		ErrorCode:    code,
 		ErrorMessage: err.Error(),
 	}
