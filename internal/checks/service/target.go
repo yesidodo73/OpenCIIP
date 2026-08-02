@@ -24,6 +24,18 @@ type serviceTarget struct {
 	signals  []string
 }
 
+type serviceTargetOptions struct {
+	ignoreSystemdResolvedStub bool
+}
+
+type serviceTargetOption func(*serviceTargetOptions)
+
+func withSystemdResolvedStubExclusion() serviceTargetOption {
+	return func(options *serviceTargetOptions) {
+		options.ignoreSystemdResolvedStub = true
+	}
+}
+
 func inspectServiceTarget(
 	ctx context.Context,
 	environment evaluator.Environment,
@@ -31,12 +43,19 @@ func inspectServiceTarget(
 	products []serviceProduct,
 	ports []int,
 	protocol string,
+	optionFunctions ...serviceTargetOption,
 ) (serviceTarget, *evaluator.Outcome) {
+	options := serviceTargetOptions{}
+	for _, configure := range optionFunctions {
+		if configure != nil {
+			configure(&options)
+		}
+	}
 	if environment.Platform.InitSystem != "systemd" {
 		outcome := evaluator.Outcome{
 			Status:        model.StatusUnknown,
 			UnknownReason: model.UnknownUnsupportedConfiguration,
-			Summary:       fmt.Sprintf("%s 적용 대상을 지원하는 방식으로 확인할 수 없습니다.", label),
+			Summary:       fmt.Sprintf("%s의 활성 서비스와 수신 포트를 함께 확인할 수 없습니다.", label),
 			Expected:      "systemd 기반 Linux 환경이 필요합니다.",
 			Observed:      environment.Platform.InitSystem,
 		}
@@ -115,6 +134,7 @@ func inspectServiceTarget(
 	}
 
 	listenerFound := false
+	listenerLines := make([]string, 0)
 	if len(ports) > 0 {
 		var (
 			listeners        map[int][]string
@@ -137,7 +157,23 @@ func inspectServiceTarget(
 		for _, lines := range listeners {
 			if len(lines) > 0 {
 				listenerFound = true
+				listenerLines = append(listenerLines, lines...)
 			}
+		}
+	}
+
+	resolvedStubOnly := false
+	if len(active) == 0 && listenerFound && options.ignoreSystemdResolvedStub {
+		assessment, err := support.InspectSystemdResolvedStub(ctx, environment, listenerLines)
+		if err != nil {
+			outcome := serviceError("systemd_resolved_stub_inspection_failed", label, err)
+			outcome.Evidence = append(evidence, assessment.Evidence...)
+			return serviceTarget{}, &outcome
+		}
+		evidence = append(evidence, assessment.Evidence...)
+		if assessment.Confirmed {
+			listenerFound = false
+			resolvedStubOnly = true
 		}
 	}
 
@@ -150,6 +186,8 @@ func inspectServiceTarget(
 		observed := "활성 unit, 프로세스 및 리스닝 포트가 없습니다."
 		if len(installed) > 0 {
 			observed = "설치되었지만 비활성인 unit: " + strings.Join(installed, ", ")
+		} else if resolvedStubOnly {
+			observed = "authoritative DNS unit과 프로세스는 없고 systemd-resolved 로컬 stub 리스너만 있습니다."
 		}
 		outcome := evaluator.Outcome{
 			Status:   model.StatusNotApplicable,

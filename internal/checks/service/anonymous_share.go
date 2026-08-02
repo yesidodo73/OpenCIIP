@@ -283,8 +283,7 @@ func sambaBoolean(value string) (bool, bool) {
 func inspectAnonymousNFS(ctx context.Context, rule model.ResolvedRule, environment evaluator.Environment) warningFinding {
 	finding := warningFinding{Endpoint: "nfs"}
 	if !environment.Commands.Available("exportfs") {
-		finding.State, finding.Reason = "unknown", "exportfs가 없어 NFS export 부재를 확정할 수 없음"
-		return finding
+		return anonymousNFSWithoutExportfs(evaluateNFSDisabled(ctx, rule, environment))
 	}
 	spec := executor.Spec{Name: "exportfs", Arguments: []string{"-v"}, Timeout: 20 * time.Second, MaxOutput: 4 << 20}
 	result, err := environment.Commands.Run(ctx, spec)
@@ -368,6 +367,31 @@ func inspectAnonymousNFS(ctx context.Context, rule model.ResolvedRule, environme
 		return finding
 	}
 	finding.State, finding.Reason = "pass", "모든 NFS export가 승인 client와 security flavor로 제한됨"
+	return finding
+}
+
+func anonymousNFSWithoutExportfs(presence evaluator.Outcome) warningFinding {
+	finding := warningFinding{
+		Endpoint: "nfs",
+		Reason:   presence.Observed,
+		Evidence: append([]model.Evidence(nil), presence.Evidence...),
+	}
+	if finding.Reason == "" {
+		finding.Reason = presence.Summary
+	}
+	switch presence.Status {
+	case model.StatusNotApplicable, model.StatusPass:
+		// U-39 proves that no NFS activation path remains. Installed but
+		// inactive components do not create an active anonymous share.
+		finding.State = "not_applicable"
+	case model.StatusError:
+		finding.State = "error"
+	default:
+		// An active or indeterminate NFS server is not automatically an
+		// anonymous share. Without exportfs its effective client policy
+		// remains unknown.
+		finding.State = "unknown"
+	}
 	return finding
 }
 

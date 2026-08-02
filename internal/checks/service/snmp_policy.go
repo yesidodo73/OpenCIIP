@@ -249,7 +249,7 @@ func collectNetSNMPAccess(ctx context.Context, environment evaluator.Environment
 		return nil, nil, &outcome
 	}
 	if !graph.complete {
-		outcome := evaluator.Outcome{Status: model.StatusUnknown, UnknownReason: model.UnknownUnsupportedConfiguration, Summary: "Net-SNMP include 또는 동적 VACM 구성을 완전히 해석할 수 없습니다.", Expected: "모든 접근 설정 파일과 VACM 경로를 확인할 수 있어야 합니다.", Observed: "지원하지 않는 include 또는 access 모듈", Evidence: evidence}
+		outcome := evaluator.Outcome{Status: model.StatusUnknown, UnknownReason: model.UnknownUnsupportedConfiguration, Summary: "Net-SNMP include 또는 동적 VACM 구성을 완전히 해석할 수 없습니다.", Expected: "모든 접근 설정 파일과 VACM 경로를 확인할 수 있어야 합니다.", Observed: "해석할 수 없는 include 또는 access 모듈", Evidence: evidence}
 		return nil, nil, &outcome
 	}
 	evidence = append(evidence, support.FactEvidence("Net-SNMP 실효 기본 설정", map[string]any{

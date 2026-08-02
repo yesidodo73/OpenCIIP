@@ -404,5 +404,5 @@ func uniqueStrings(values []string) []string {
 }
 
 func unsupportedConditionalService(label, initSystem string) evaluator.Outcome {
-	return evaluator.Outcome{Status: model.StatusUnknown, UnknownReason: model.UnknownUnsupportedConfiguration, Summary: label + " 서비스 상태를 지원하는 방식으로 확인할 수 없습니다.", Expected: "systemd 기반 Linux 환경이 필요합니다.", Observed: "init=" + initSystem}
+	return evaluator.Outcome{Status: model.StatusUnknown, UnknownReason: model.UnknownUnsupportedConfiguration, Summary: label + " 서비스의 현재 상태와 부팅 시 활성 상태를 함께 확인할 수 없습니다.", Expected: "서비스의 현재 상태와 부팅 시 활성 상태를 모두 확인할 수 있어야 합니다.", Observed: "init=" + initSystem}
 }

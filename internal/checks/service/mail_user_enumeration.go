@@ -51,7 +51,7 @@ func evaluateMailUserEnumeration(ctx context.Context, _ model.ResolvedRule, envi
 		return evaluator.Outcome{
 			Status:        model.StatusUnknown,
 			UnknownReason: model.UnknownUnsupportedConfiguration,
-			Summary:       "활성 메일 제품의 VRFY 및 EXPN 실효 설정을 지원하지 않습니다.",
+			Summary:       "활성 메일 제품에서 VRFY와 EXPN의 실효 상태를 확인할 수 없습니다.",
 			Expected:      "VRFY와 EXPN 사용자 열거 기능이 모두 비활성화되어야 합니다.",
 			Observed:      target.product.label,
 			Evidence:      target.evidence,
@@ -85,7 +85,7 @@ func evaluatePostfixUserEnumeration(ctx context.Context, environment evaluator.E
 		return mailEnumerationError("postfix_effective_config_failed", err)
 	}
 	evidence = append(evidence, settingEvidence)
-	expected := "Postfix의 VRFY가 비활성화되어야 하며 구현되지 않은 EXPN 경로가 없어야 합니다."
+	expected := "Postfix의 VRFY가 비활성화되고 EXPN 명령을 제공하지 않아야 합니다."
 	switch strings.ToLower(disableVRFY) {
 	case "yes":
 		return evaluator.Outcome{

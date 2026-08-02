@@ -42,7 +42,7 @@ func evaluateMailPatchLevel(ctx context.Context, _ model.ResolvedRule, environme
 		return unsupportedTargetOutcome("메일 서비스", "지원하지 않는 MTA의 vendor 패치 수준입니다.", evidence)
 	}
 	if !environment.Commands.Available("dnf") || !environment.Commands.Available("rpm") {
-		return evaluator.Outcome{Status: model.StatusUnknown, UnknownReason: model.UnknownUnsupportedConfiguration, Summary: "MTA 패키지와 vendor 권고를 수집할 도구가 없습니다.", Expected: "RPM NEVRA와 최신 Rocky 보안 metadata를 대조해야 합니다.", Observed: target.product.label, Evidence: evidence}
+		return evaluator.Outcome{Status: model.StatusUnknown, UnknownReason: model.UnknownUnsupportedConfiguration, Summary: "MTA 패키지와 배포판 보안 권고를 수집할 도구가 없습니다.", Expected: "RPM NEVRA와 최신 배포판 보안 메타데이터를 대조해야 합니다.", Observed: target.product.label, Evidence: evidence}
 	}
 	specs = append(specs, executor.Spec{Name: "dnf", Arguments: []string{"--cacheonly", "--setopt=metadata_expire=never", "-q", "updateinfo", "list", "--security"}, Timeout: 2 * time.Minute, MaxOutput: 8 << 20})
 	for _, spec := range specs {
@@ -52,6 +52,16 @@ func evaluateMailPatchLevel(ctx context.Context, _ model.ResolvedRule, environme
 		}
 		evidence = append(evidence, privateCommandSummary(spec, result))
 		if result.ExitCode != 0 || result.Truncated {
+			if spec.Name == "dnf" && support.DNFCacheUnavailable(result) {
+				return evaluator.Outcome{
+					Status:        model.StatusUnknown,
+					UnknownReason: model.UnknownInsufficientEvidence,
+					Summary:       "캐시된 저장소 메타데이터가 없어 MTA 보안 패치 상태를 확인할 수 없습니다.",
+					Expected:      "신뢰 가능한 최신 벤더 저장소 메타데이터와 로컬 MTA 패키지를 대조해야 합니다.",
+					Observed:      "오프라인 DNF 캐시에 필요한 저장소 메타데이터가 없습니다.",
+					Evidence:      evidence,
+				}
+			}
 			return mailPolicyError("mail_patch_evidence_failed", fmt.Errorf("%s exit=%d truncated=%t", spec.Name, result.ExitCode, result.Truncated), evidence)
 		}
 	}
@@ -59,7 +69,7 @@ func evaluateMailPatchLevel(ctx context.Context, _ model.ResolvedRule, environme
 		Status:        model.StatusUnknown,
 		UnknownReason: model.UnknownManualVerification,
 		Summary:       "활성 MTA의 버전과 캐시된 보안 권고를 수집했으며 최신 패치 여부는 수동 확인이 필요합니다.",
-		Expected:      "신뢰 가능한 최신 Rocky metadata와 기관 패치 절차를 기준으로 MTA 보안 권고가 모두 반영되어야 합니다.",
+		Expected:      "신뢰 가능한 최신 배포판 보안 메타데이터와 기관 패치 절차를 기준으로 MTA 보안 권고가 모두 반영되어야 합니다.",
 		Observed:      target.product.label + " upstream 버전 문자열만으로 vendor backport 상태를 판정하지 않았습니다.",
 		Evidence:      evidence,
 	}
@@ -100,7 +110,7 @@ func evaluateMailQueueRestriction(ctx context.Context, _ model.ResolvedRule, env
 		if metadata.UID != 0 || metadata.Mode.Perm()&0o022 != 0 || metadata.Mode&(os.ModeSetuid|os.ModeSetgid) != 0 {
 			return evaluator.Outcome{Status: model.StatusFail, Summary: "Postfix queue 관리 도구에 명백히 위험한 소유자 또는 권한이 있습니다.", Expected: "root 소유이고 비소유자 쓰기와 setuid/setgid가 없어야 합니다.", Observed: fmt.Sprintf("uid=%d mode=%s", metadata.UID, metadata.Mode.String()), Evidence: evidence}
 		}
-		return evaluator.Outcome{Status: model.StatusUnknown, UnknownReason: model.UnknownUnsupportedConfiguration, Summary: "Postfix 자체 queue 권한 모델과 Rocky 기본 실행 비트를 VM에서 확인해야 합니다.", Expected: "일반 사용자가 postsuper queue 관리 작업을 수행하지 못해야 합니다.", Observed: fmt.Sprintf("uid=%d mode=%s", metadata.UID, metadata.Mode.String()), Evidence: evidence}
+		return evaluator.Outcome{Status: model.StatusUnknown, UnknownReason: model.UnknownUnsupportedConfiguration, Summary: "Postfix 패키지의 queue 권한 모델만으로 일반 계정의 관리 작업 가능 여부를 확정할 수 없습니다.", Expected: "일반 사용자가 postsuper queue 관리 작업을 수행하지 못해야 합니다.", Observed: fmt.Sprintf("uid=%d mode=%s", metadata.UID, metadata.Mode.String()), Evidence: evidence}
 	default:
 		return unsupportedTargetOutcome("메일 서비스", "지원하지 않는 MTA queue 권한 모델입니다.", target.evidence)
 	}

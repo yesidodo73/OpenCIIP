@@ -362,6 +362,19 @@ func sudoersSELinuxState(ctx context.Context, environment evaluator.Environment)
 	if !errors.Is(readErr, os.ErrNotExist) {
 		return false, false, evidence, readErr
 	}
+	lsmData, lsmMetadata, lsmErr := environment.Files.ReadFile(ctx, "/sys/kernel/security/lsm", 4<<10)
+	if lsmErr == nil {
+		active, valid := parseActiveLSMs(string(lsmData))
+		evidence = append(evidence, support.FactEvidence(lsmMetadata.Path, map[string]any{"active_lsms": active}))
+		absent, conclusive := selinuxAbsentFromActiveLSMs(active, valid)
+		if !conclusive || !absent {
+			return false, false, evidence, nil
+		}
+		return false, true, evidence, nil
+	}
+	if !errors.Is(lsmErr, os.ErrNotExist) {
+		return false, false, evidence, lsmErr
+	}
 	config, metadata, configErr := environment.Files.ReadFile(ctx, "/etc/selinux/config", 1<<20)
 	if configErr != nil {
 		if errors.Is(configErr, os.ErrNotExist) {
@@ -386,6 +399,40 @@ func sudoersSELinuxState(ctx context.Context, environment evaluator.Environment)
 		return false, true, evidence, nil
 	}
 	return false, false, evidence, nil
+}
+
+func parseActiveLSMs(content string) ([]string, bool) {
+	value := strings.TrimSpace(content)
+	if value == "" {
+		return nil, false
+	}
+	items := strings.Split(value, ",")
+	active := make([]string, 0, len(items))
+	seen := make(map[string]struct{}, len(items))
+	for _, raw := range items {
+		name := strings.TrimSpace(raw)
+		if name == "" || strings.ToLower(name) != name || strings.ContainsAny(name, " \t\r\n\x00") {
+			return nil, false
+		}
+		if _, duplicate := seen[name]; duplicate {
+			return nil, false
+		}
+		seen[name] = struct{}{}
+		active = append(active, name)
+	}
+	return active, true
+}
+
+func selinuxAbsentFromActiveLSMs(active []string, valid bool) (absent, conclusive bool) {
+	if !valid {
+		return false, false
+	}
+	for _, name := range active {
+		if name == "selinux" {
+			return false, true
+		}
+	}
+	return true, true
 }
 
 func appendPermissionFindings(objectPath string, assessment support.PermissionAssessment, violations, unknowns *[]string) {

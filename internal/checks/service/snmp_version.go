@@ -38,7 +38,7 @@ func evaluateSNMPVersion(ctx context.Context, _ model.ResolvedRule, environment 
 		return evaluator.Outcome{
 			Status:        model.StatusUnknown,
 			UnknownReason: model.UnknownUnsupportedConfiguration,
-			Summary:       "활성 SNMP agent 제품의 버전 접근 경로를 지원하지 않습니다.",
+			Summary:       "활성 SNMP 제품의 실행 버전을 확인할 수 없습니다.",
 			Expected:      "SNMP v3 접근 경로만 활성화되어야 합니다.",
 			Observed:      target.product.label,
 			Evidence:      target.evidence,

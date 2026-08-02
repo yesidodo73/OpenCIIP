@@ -110,8 +110,44 @@ func inspectFTPComponents(ctx context.Context, environment evaluator.Environment
 		explicitlyDisabled = explicitlyDisabled && ftpUnitExplicitlyDisabled(unit)
 	}
 	if !environment.Commands.Available("rpm") {
+		if environment.Platform.Family == "debian" && environment.Commands.Available("dpkg-query") {
+			packages, packageEvidence, inspectErr := support.InspectDPKGInventory(ctx, environment)
+			evidence = append(evidence, packageEvidence)
+			if inspectErr != nil {
+				return false, false, false, evidence, inspectErr
+			}
+			absenceKnown = true
+			installedPackages := 0
+			debianPackages := map[string][]string{
+				"vsftpd":    {"vsftpd"},
+				"proftpd":   {"proftpd-basic", "proftpd-core"},
+				"pure-ftpd": {"pure-ftpd", "pure-ftpd-common"},
+			}
+			for productID, packageNames := range debianPackages {
+				productInstalled := false
+				for _, packageName := range packageNames {
+					if support.DPKGPackageInstalled(packages, packageName) {
+						installedPackages++
+						productInstalled = true
+					}
+				}
+				if !productInstalled {
+					continue
+				}
+				present = true
+				if !installedUnitProducts[productID] {
+					explicitlyDisabled = false
+				}
+			}
+			evidence = append(evidence, support.FactEvidence("ftp-package-inventory-summary", map[string]any{
+				"package_manager": "dpkg", "installed_package_count": installedPackages,
+				"installed_unit_count": installedUnits, "component_present": present,
+				"explicitly_disabled": present && explicitlyDisabled,
+			}))
+			return present, absenceKnown, present && explicitlyDisabled, evidence, nil
+		}
 		evidence = append(evidence, support.FactEvidence("ftp-package-inventory-summary", map[string]any{
-			"rpm_available": false, "component_present": present,
+			"package_manager": "unavailable", "component_present": present,
 			"installed_unit_count": installedUnits, "explicitly_disabled": present && explicitlyDisabled,
 		}))
 		return present, present, present && explicitlyDisabled, evidence, nil
@@ -144,7 +180,7 @@ func inspectFTPComponents(ctx context.Context, environment evaluator.Environment
 		}
 	}
 	evidence = append(evidence, support.FactEvidence("ftp-package-inventory-summary", map[string]any{
-		"rpm_available": true, "installed_package_count": installedPackages, "installed_unit_count": installedUnits,
+		"package_manager": "rpm", "installed_package_count": installedPackages, "installed_unit_count": installedUnits,
 		"component_present": present, "explicitly_disabled": present && explicitlyDisabled,
 	}))
 	return present, absenceKnown, present && explicitlyDisabled, evidence, nil

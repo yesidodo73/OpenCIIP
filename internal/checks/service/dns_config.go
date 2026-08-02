@@ -206,7 +206,15 @@ func evaluateDNSDynamicUpdate(ctx context.Context, rule model.ResolvedRule, envi
 }
 
 func inspectBINDConfig(ctx context.Context, environment evaluator.Environment) ([]bindNode, []bindZone, []model.Evidence, *evaluator.Outcome) {
-	target, terminal := inspectServiceTarget(ctx, environment, "DNS 서비스", bindProducts, []int{53}, "")
+	target, terminal := inspectServiceTarget(
+		ctx,
+		environment,
+		"DNS 서비스",
+		bindProducts,
+		[]int{53},
+		"",
+		withSystemdResolvedStubExclusion(),
+	)
 	if terminal != nil {
 		return nil, nil, nil, terminal
 	}
@@ -248,7 +256,7 @@ func inspectBINDConfig(ctx context.Context, environment evaluator.Environment) (
 	}
 	zones, complete := collectBINDZones(root)
 	if !complete {
-		outcome := evaluator.Outcome{Status: model.StatusUnknown, UnknownReason: model.UnknownUnsupportedConfiguration, Summary: "BIND zone 계층을 결정적으로 해석할 수 없습니다.", Expected: "options, view와 zone별 실효 설정을 확인할 수 있어야 합니다.", Observed: "중복 또는 지원하지 않는 zone type", Evidence: evidence}
+		outcome := evaluator.Outcome{Status: model.StatusUnknown, UnknownReason: model.UnknownUnsupportedConfiguration, Summary: "BIND zone 계층을 결정적으로 해석할 수 없습니다.", Expected: "options, view와 zone별 실효 설정을 확인할 수 있어야 합니다.", Observed: "중복되거나 해석할 수 없는 zone type", Evidence: evidence}
 		return nil, nil, nil, &outcome
 	}
 	if containsBINDDynamicZoneBackend(root) {

@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -31,14 +32,36 @@ func evaluateLoginWarning(ctx context.Context, rule model.ResolvedRule, environm
 	if err != nil {
 		return loginWarningError("invalid_rule_parameter", err, nil)
 	}
+	knownInadequateIssueHashes, err := configuredWarningHashes(rule.Parameters, "known_inadequate_issue_hashes")
+	if err != nil {
+		return loginWarningError("invalid_rule_parameter", err, nil)
+	}
+	for digest := range knownInadequateIssueHashes {
+		if _, conflict := approved[digest]; conflict {
+			return loginWarningError(
+				"invalid_rule_parameter",
+				fmt.Errorf("known_inadequate_issue_hashes conflicts with approved_login_warnings"),
+				nil,
+			)
+		}
+	}
 	findings := make([]warningFinding, 0, 8)
 
-	issue, err := inspectWarningFile(ctx, environment, "local-console-pre-auth", "/etc/issue", approved, policySet, true)
+	issue, err := inspectWarningFile(
+		ctx,
+		environment,
+		"local-console-pre-auth",
+		"/etc/issue",
+		approved,
+		policySet,
+		true,
+		knownInadequateIssueHashes,
+	)
 	if err != nil {
 		return loginWarningError("issue_inspection_failed", err, nil)
 	}
 	findings = append(findings, issue)
-	motd, err := inspectWarningFile(ctx, environment, "local-login-post-auth", "/etc/motd", approved, policySet, false)
+	motd, err := inspectWarningFile(ctx, environment, "local-login-post-auth", "/etc/motd", approved, policySet, false, nil)
 	if err != nil {
 		return loginWarningError("motd_inspection_failed", err, issue.Evidence)
 	}
@@ -71,7 +94,7 @@ func evaluateLoginWarning(ctx context.Context, rule model.ResolvedRule, environm
 
 	evidence := make([]model.Evidence, 0)
 	counts := map[string]int{"pass": 0, "fail": 0, "unknown": 0, "not_applicable": 0, "error": 0}
-	reasons := make([]string, 0)
+	reasons := map[string][]string{"fail": {}, "unknown": {}, "error": {}}
 	for _, finding := range findings {
 		if finding.State == "" {
 			continue
@@ -79,17 +102,19 @@ func evaluateLoginWarning(ctx context.Context, rule model.ResolvedRule, environm
 		evidence = append(evidence, finding.Evidence...)
 		counts[finding.State]++
 		if finding.State == "fail" || finding.State == "unknown" || finding.State == "error" {
-			reasons = append(reasons, finding.Endpoint+": "+finding.Reason)
+			reasons[finding.State] = append(reasons[finding.State], finding.Endpoint+": "+finding.Reason)
 		}
 	}
-	sort.Strings(reasons)
+	for state := range reasons {
+		sort.Strings(reasons[state])
+	}
 	evidence = append(evidence, support.FactEvidence("로그인 경고 메시지 파생 정보", map[string]any{
 		"endpoint_count": len(findings), "pass_count": counts["pass"], "fail_count": counts["fail"],
 		"unknown_count": counts["unknown"], "not_applicable_count": counts["not_applicable"],
 		"error_count": counts["error"], "approved_policy_set": policySet, "content_redacted": true,
 	}))
 	if counts["error"] > 0 {
-		return evaluator.Outcome{Status: model.StatusError, Summary: "일부 로그인 endpoint의 경고 메시지를 수집하거나 해석하지 못했습니다.", ErrorCode: "login_warning_endpoint_failed", ErrorMessage: strings.Join(reasons, "; "), Evidence: evidence}
+		return evaluator.Outcome{Status: model.StatusError, Summary: "일부 로그인 endpoint의 경고 메시지를 수집하거나 해석하지 못했습니다.", ErrorCode: "login_warning_endpoint_failed", ErrorMessage: strings.Join(reasons["error"], "; "), Evidence: evidence}
 	}
 	if counts["fail"] > 0 {
 		return evaluator.Outcome{
@@ -97,6 +122,7 @@ func evaluateLoginWarning(ctx context.Context, rule model.ResolvedRule, environm
 			Summary:  "적용 로그인 endpoint에 경고 메시지가 없거나 승인된 문구와 일치하지 않습니다.",
 			Expected: rule.Criteria.Pass,
 			Observed: fmt.Sprintf("명백한 위반 endpoint %d개", counts["fail"]),
+			Details:  loginWarningDetails(reasons["fail"], reasons["unknown"], rule.Criteria.Pass),
 			Evidence: evidence,
 		}
 	}
@@ -111,6 +137,7 @@ func evaluateLoginWarning(ctx context.Context, rule model.ResolvedRule, environm
 			Summary:       "일부 endpoint의 실제 경고 문구 또는 기관 승인 여부를 확정할 수 없습니다.",
 			Expected:      rule.Criteria.Pass,
 			Observed:      fmt.Sprintf("확정 불가 endpoint %d개", counts["unknown"]),
+			Details:       loginWarningDetails(nil, reasons["unknown"], rule.Criteria.Pass),
 			Evidence:      evidence,
 		}
 	}
@@ -124,6 +151,23 @@ func evaluateLoginWarning(ctx context.Context, rule model.ResolvedRule, environm
 		Observed: fmt.Sprintf("승인 문구와 일치한 endpoint %d개", counts["pass"]),
 		Evidence: evidence,
 	}
+}
+
+func loginWarningDetails(failures, unknowns []string, expected string) []model.ResultDetail {
+	details := make([]model.ResultDetail, 0, 2)
+	if len(failures) > 0 {
+		details = append(details, model.ResultDetail{
+			Label: "취약 endpoint", Current: strings.Join(failures, "; "),
+			Expected: expected, Source: "활성 로그인 endpoint",
+		})
+	}
+	if len(unknowns) > 0 {
+		details = append(details, model.ResultDetail{
+			Label: "수동 확인 endpoint", Current: strings.Join(unknowns, "; "),
+			Expected: "실효 경고 문구와 기관 승인 여부 확인", Source: "활성 로그인 endpoint",
+		})
+	}
+	return details
 }
 
 func approvedWarningHashes(parameters map[string]any) (map[string]struct{}, bool, error) {
@@ -146,7 +190,39 @@ func approvedWarningHashes(parameters map[string]any) (map[string]struct{}, bool
 	return hashes, exists && len(hashes) > 0, nil
 }
 
-func inspectWarningFile(ctx context.Context, environment evaluator.Environment, endpoint, filePath string, approved map[string]struct{}, policySet, issueEscapes bool) (warningFinding, error) {
+func configuredWarningHashes(parameters map[string]any, key string) (map[string]struct{}, error) {
+	values, _, err := support.StringSliceParameter(parameters, key)
+	if err != nil {
+		return nil, err
+	}
+	hashes := make(map[string]struct{}, len(values))
+	for index, value := range values {
+		if value != strings.TrimSpace(value) ||
+			value != strings.ToLower(value) ||
+			len(value) != sha256.Size*2 {
+			return nil, fmt.Errorf("%s item %d must be a lowercase SHA-256 digest", key, index)
+		}
+		if _, err := hex.DecodeString(value); err != nil {
+			return nil, fmt.Errorf("%s item %d must be a lowercase SHA-256 digest", key, index)
+		}
+		if _, duplicate := hashes[value]; duplicate {
+			return nil, fmt.Errorf("%s contains a duplicate digest", key)
+		}
+		hashes[value] = struct{}{}
+	}
+	return hashes, nil
+}
+
+func inspectWarningFile(
+	ctx context.Context,
+	environment evaluator.Environment,
+	endpoint,
+	filePath string,
+	approved map[string]struct{},
+	policySet,
+	issueEscapes bool,
+	knownInadequate map[string]struct{},
+) (warningFinding, error) {
 	finding := warningFinding{Endpoint: endpoint}
 	data, metadata, err := environment.Files.ReadFile(ctx, filePath, 2<<20)
 	if err != nil {
@@ -160,36 +236,50 @@ func inspectWarningFile(ctx context.Context, environment evaluator.Environment, 
 	}
 	canonical := canonicalWarningText(string(data))
 	digest := warningDigest(canonical)
+	_, knownInadequateMatch := knownInadequate[digest]
 	finding.Evidence = append(finding.Evidence,
 		support.FileMetadataEvidence(metadata),
 		support.FactEvidence(filePath, map[string]any{
 			"content_sha256": digest, "content_bytes": len(data), "canonical_empty": canonical == "",
 			"dynamic_escape_present": issueEscapes && strings.Contains(canonical, "\\"), "content_redacted": true,
+			"known_inadequate_digest_match": knownInadequateMatch,
 		}),
 	)
+	finding.State, finding.Reason = classifyWarningContent(
+		canonical,
+		digest,
+		approved,
+		policySet,
+		issueEscapes,
+		knownInadequate,
+	)
+	return finding, nil
+}
+
+func classifyWarningContent(
+	canonical,
+	digest string,
+	approved map[string]struct{},
+	policySet,
+	issueEscapes bool,
+	knownInadequate map[string]struct{},
+) (string, string) {
 	if canonical == "" {
-		finding.State = "fail"
-		finding.Reason = "경고 문구가 비어 있음"
-		return finding, nil
+		return "fail", "경고 문구가 비어 있음"
+	}
+	if _, rejected := knownInadequate[digest]; rejected {
+		return "fail", "검증된 배포판 기본 식별 배너이며 로그인 경고 문구가 아님"
 	}
 	if issueEscapes && strings.Contains(canonical, "\\") {
-		finding.State = "unknown"
-		finding.Reason = "로그인 시 동적으로 확장되는 issue escape가 있음"
-		return finding, nil
+		return "unknown", "로그인 시 동적으로 확장되는 issue escape가 있음"
 	}
 	if !policySet {
-		finding.State = "unknown"
-		finding.Reason = "승인된 기관 경고 문구가 제공되지 않음"
-		return finding, nil
+		return "unknown", "승인된 기관 경고 문구가 제공되지 않음"
 	}
 	if _, accepted := approved[digest]; !accepted {
-		finding.State = "fail"
-		finding.Reason = "승인된 경고 문구와 불일치"
-		return finding, nil
+		return "fail", "승인된 경고 문구와 불일치"
 	}
-	finding.State = "pass"
-	finding.Reason = "승인 문구 일치"
-	return finding, nil
+	return "pass", "승인 문구 일치"
 }
 
 func dynamicMOTDPresent(environment evaluator.Environment) (bool, []model.Evidence, error) {
@@ -262,7 +352,7 @@ func inspectSSHWarning(ctx context.Context, environment evaluator.Environment, a
 		bannerPaths[banner] = struct{}{}
 	}
 	for bannerPath := range bannerPaths {
-		fileFinding, readErr := inspectWarningFile(ctx, environment, "ssh", bannerPath, approved, policySet, false)
+		fileFinding, readErr := inspectWarningFile(ctx, environment, "ssh", bannerPath, approved, policySet, false, nil)
 		if readErr != nil {
 			finding.State, finding.Reason = "error", readErr.Error()
 			return finding
@@ -287,7 +377,7 @@ func inspectTelnetWarning(ctx context.Context, environment evaluator.Environment
 		return warningFindingFromOutcome("telnet", *terminal)
 	}
 	finding := warningFinding{Endpoint: "telnet", Evidence: append([]model.Evidence(nil), target.evidence...)}
-	fileFinding, err := inspectWarningFile(ctx, environment, "telnet", "/etc/issue.net", approved, policySet, true)
+	fileFinding, err := inspectWarningFile(ctx, environment, "telnet", "/etc/issue.net", approved, policySet, true, nil)
 	if err != nil {
 		finding.State, finding.Reason = "error", err.Error()
 		return finding

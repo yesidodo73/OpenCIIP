@@ -166,3 +166,81 @@ func TestLeadingWhitespaceUsesTabStops(t *testing.T) {
 		}
 	}
 }
+
+func TestFirewalldConfigurationHashKeepsDefaultZoneInterfaceDifference(t *testing.T) {
+	runtime := firewalldSnapshot{
+		defaultZone: "public",
+		zones: map[string]firewalldObject{
+			"public": {
+				"interfaces": {"ens18"},
+				"services":   {"ssh"},
+			},
+		},
+	}
+	permanent := firewalldSnapshot{
+		defaultZone: "public",
+		zones: map[string]firewalldObject{
+			"public": {
+				"interfaces": nil,
+				"services":   {"ssh"},
+			},
+		},
+	}
+
+	if runtime.configurationHash() == permanent.configurationHash() {
+		t.Fatal("default-zone interface difference was ignored without persistent network profile evidence")
+	}
+}
+
+func TestFirewalldConfigurationHashKeepsMaterialZoneDifferences(t *testing.T) {
+	base := firewalldSnapshot{
+		defaultZone: "public",
+		zones: map[string]firewalldObject{
+			"public": {"services": {"ssh"}, "sources": {"192.0.2.0/24"}},
+			"work":   {"interfaces": {"ens19"}},
+		},
+	}
+	tests := []struct {
+		name  string
+		other firewalldSnapshot
+	}{
+		{
+			name: "non-default interface",
+			other: firewalldSnapshot{
+				defaultZone: "public",
+				zones: map[string]firewalldObject{
+					"public": {"services": {"ssh"}, "sources": {"192.0.2.0/24"}},
+					"work":   {"interfaces": {"ens20"}},
+				},
+			},
+		},
+		{
+			name: "default-zone service",
+			other: firewalldSnapshot{
+				defaultZone: "public",
+				zones: map[string]firewalldObject{
+					"public": {"services": {"ssh", "https"}, "sources": {"192.0.2.0/24"}},
+					"work":   {"interfaces": {"ens19"}},
+				},
+			},
+		},
+		{
+			name: "default-zone source",
+			other: firewalldSnapshot{
+				defaultZone: "public",
+				zones: map[string]firewalldObject{
+					"public": {"services": {"ssh"}, "sources": {"198.51.100.0/24"}},
+					"work":   {"interfaces": {"ens19"}},
+				},
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if base.configurationHash() == test.other.configurationHash() {
+				t.Fatal("material firewalld zone difference was ignored")
+			}
+		})
+	}
+}

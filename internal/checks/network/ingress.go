@@ -54,7 +54,7 @@ func evaluateIngressRestriction(ctx context.Context, rule model.ResolvedRule, en
 		return evaluator.Outcome{
 			Status:        model.StatusUnknown,
 			UnknownReason: model.UnknownUnsupportedConfiguration,
-			Summary:       "지원되는 방식으로 방화벽의 현재 및 부팅 시 상태를 함께 확인할 수 없습니다.",
+			Summary:       "방화벽 서비스의 현재 상태와 부팅 시 활성 상태를 함께 확인할 수 없습니다.",
 			Expected:      rule.Criteria.Pass,
 			Observed:      fmt.Sprintf("원격 수신 소켓 %d개, init system=%s", listeners.total, nonEmpty(environment.Platform.InitSystem, "unknown")),
 			Evidence:      evidence,
@@ -174,7 +174,7 @@ func evaluateIngressRestriction(ctx context.Context, rule model.ResolvedRule, en
 		return evaluator.Outcome{
 			Status:        model.StatusUnknown,
 			UnknownReason: model.UnknownUnsupportedConfiguration,
-			Summary:       "레거시 iptables 서비스가 정책을 관리하여 현재 구현으로 전체 실효 규칙을 확정할 수 없습니다.",
+			Summary:       "레거시 iptables 서비스가 정책을 관리하고 있어 전체 실효 규칙을 확정할 수 없습니다.",
 			Expected:      rule.Criteria.Pass,
 			Observed:      fmt.Sprintf("원격 수신 소켓 %d개, 레거시 방화벽 관리자 사용", listeners.total),
 			Evidence:      evidence,
@@ -186,9 +186,9 @@ func evaluateIngressRestriction(ctx context.Context, rule model.ResolvedRule, en
 			return evaluator.Outcome{
 				Status:        model.StatusUnknown,
 				UnknownReason: model.UnknownAmbiguousResult,
-				Summary:       "firewalld 런타임 구성과 재부팅 후 적용될 영구 구성이 일치하지 않습니다.",
+				Summary:       "firewalld 런타임 구성과 영구 구성의 동등성을 확정할 수 없습니다.",
 				Expected:      rule.Criteria.Pass,
-				Observed:      fmt.Sprintf("원격 수신 소켓 %d개, firewalld 런타임/영구 구성 불일치", listeners.total),
+				Observed:      fmt.Sprintf("원격 수신 소켓 %d개, firewalld 런타임/영구 구성 차이 감지", listeners.total),
 				Evidence:      evidence,
 			}
 		}
@@ -262,7 +262,7 @@ func inspectRemoteListeners(ctx context.Context, environment evaluator.Environme
 		if protocol != "tcp" && protocol != "udp" {
 			return listenerInventory{}, model.Evidence{}, fmt.Errorf("parse ss output line %d: unsupported transport", lineNumber+1)
 		}
-		address, port, wildcard, parseErr := parseListenerEndpoint(fields[4])
+		address, port, wildcard, scope, parseErr := parseListenerEndpoint(fields[4])
 		if parseErr != nil {
 			return listenerInventory{}, model.Evidence{}, fmt.Errorf("parse ss output line %d: %w", lineNumber+1, parseErr)
 		}
@@ -282,7 +282,11 @@ func inspectRemoteListeners(ctx context.Context, environment evaluator.Environme
 		} else {
 			inventory.specific++
 		}
-		inventory.configuration = append(inventory.configuration, protocol+"\x00"+address.String()+"\x00"+strconv.Itoa(port))
+		canonicalAddress := address.String()
+		if scope != "" {
+			canonicalAddress += "%" + scope
+		}
+		inventory.configuration = append(inventory.configuration, protocol+"\x00"+canonicalAddress+"\x00"+strconv.Itoa(port))
 	}
 	sort.Strings(inventory.configuration)
 
@@ -298,32 +302,40 @@ func inspectRemoteListeners(ctx context.Context, environment evaluator.Environme
 	return inventory, support.FactEvidence("ss-listener-summary", facts), nil
 }
 
-func parseListenerEndpoint(endpoint string) (netip.Addr, int, bool, error) {
+func parseListenerEndpoint(endpoint string) (netip.Addr, int, bool, string, error) {
 	index := strings.LastIndexByte(endpoint, ':')
 	if index < 0 || index+1 >= len(endpoint) {
-		return netip.Addr{}, 0, false, fmt.Errorf("listener endpoint has no numeric port")
+		return netip.Addr{}, 0, false, "", fmt.Errorf("listener endpoint has no numeric port")
 	}
 	port, err := strconv.Atoi(strings.Trim(endpoint[index+1:], "[]"))
 	if err != nil || port < 1 || port > 65535 {
-		return netip.Addr{}, 0, false, fmt.Errorf("listener endpoint has an invalid port")
+		return netip.Addr{}, 0, false, "", fmt.Errorf("listener endpoint has an invalid port")
 	}
 	addressText := strings.TrimSpace(endpoint[:index])
 	if addressText == "" || addressText == "*" {
-		return netip.IPv6Unspecified(), port, true, nil
+		return netip.IPv6Unspecified(), port, true, "", nil
 	}
 	if strings.HasPrefix(addressText, "[") {
 		closingBracket := strings.IndexByte(addressText, ']')
 		if closingBracket < 0 {
-			return netip.Addr{}, 0, false, fmt.Errorf("listener endpoint has an invalid numeric address")
+			return netip.Addr{}, 0, false, "", fmt.Errorf("listener endpoint has an invalid numeric address")
 		}
 		addressText = addressText[1:closingBracket] + addressText[closingBracket+1:]
 	}
+	scope := ""
+	if numericAddress, value, found := strings.Cut(addressText, "%"); found {
+		if numericAddress == "" || value == "" || strings.ContainsAny(value, "%[]:\x00\r\n\t ") {
+			return netip.Addr{}, 0, false, "", fmt.Errorf("listener endpoint has an invalid scope")
+		}
+		addressText = numericAddress
+		scope = value
+	}
 	address, err := netip.ParseAddr(addressText)
 	if err != nil {
-		return netip.Addr{}, 0, false, fmt.Errorf("listener endpoint has an invalid numeric address")
+		return netip.Addr{}, 0, false, "", fmt.Errorf("listener endpoint has an invalid numeric address")
 	}
 	address = address.Unmap()
-	return address, port, address.IsUnspecified(), nil
+	return address, port, address.IsUnspecified(), scope, nil
 }
 
 func nonstandardFirewallUnit(unit support.UnitState) bool {

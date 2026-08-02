@@ -51,7 +51,7 @@ func evaluateFTPRootLogin(ctx context.Context, _ model.ResolvedRule, environment
 		return evaluator.Outcome{
 			Status:        model.StatusUnknown,
 			UnknownReason: model.UnknownUnsupportedConfiguration,
-			Summary:       "활성 FTP 제품의 root 로그인 실효 설정을 지원하지 않습니다.",
+			Summary:       "활성 FTP 제품의 root 로그인 실효 설정을 확인할 수 없습니다.",
 			Expected:      "모든 실제 FTP 인증 경로에서 root 로그인이 차단되어야 합니다.",
 			Observed:      target.product.label,
 			Evidence:      target.evidence,
@@ -75,7 +75,7 @@ func evaluateVSFTPRootLogin(ctx context.Context, environment evaluator.Environme
 		return evaluator.Outcome{
 			Status:        model.StatusUnknown,
 			UnknownReason: model.UnknownUnsupportedConfiguration,
-			Summary:       "vsftpd 설정에 지원하지 않는 include 구성이 있습니다.",
+			Summary:       "vsftpd 설정의 include 경로를 완전히 해석할 수 없습니다.",
 			Expected:      "vsftpd의 전체 실효 설정과 PAM 인증 경로를 확인할 수 있어야 합니다.",
 			Observed:      "include 또는 외부 설정 참조가 있습니다.",
 			Evidence:      evidence,

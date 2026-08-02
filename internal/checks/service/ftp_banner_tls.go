@@ -233,7 +233,7 @@ func evaluatePlaintextFTPDisabled(ctx context.Context, rule model.ResolvedRule, 
 					UnknownReason: model.UnknownInsufficientEvidence,
 					Summary:       "FTP 서버 구성요소의 설치 여부를 확정할 수 없습니다.",
 					Expected:      rule.Criteria.Pass,
-					Observed:      "RPM과 표준 systemd unit에서 구성요소 부재를 모두 확인하지 못했습니다.",
+					Observed:      "배포판 패키지 데이터베이스와 표준 systemd unit에서 구성요소 부재를 모두 확인하지 못했습니다.",
 					Evidence:      terminal.Evidence,
 				}
 			}
@@ -503,7 +503,7 @@ func unsupportedFTPProduct(check string, target serviceTarget) evaluator.Outcome
 	return evaluator.Outcome{
 		Status:        model.StatusUnknown,
 		UnknownReason: model.UnknownUnsupportedConfiguration,
-		Summary:       "활성 FTP 제품의 " + check + " 설정 해석을 지원하지 않습니다.",
+		Summary:       "활성 FTP 제품의 " + check + " 실효 설정을 확인할 수 없습니다.",
 		Expected:      "지원되는 FTP 서버의 전체 실효 설정을 확인할 수 있어야 합니다.",
 		Observed:      target.product.label,
 		Evidence:      target.evidence,
