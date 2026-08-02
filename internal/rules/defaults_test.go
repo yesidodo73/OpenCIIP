@@ -25,8 +25,8 @@ func TestLoadDefaultsPreservesEmbeddedUnixContract(t *testing.T) {
 	if len(bundle.Profiles.Profiles) != 6 {
 		t.Fatalf("profile count = %d, want 6", len(bundle.Profiles.Profiles))
 	}
-	if len(bundle.Layers) != 3 {
-		t.Fatalf("binding layer count = %d, want 3", len(bundle.Layers))
+	if len(bundle.Layers) < 14 {
+		t.Fatalf("binding layer count = %d, want at least the 14 baseline layers", len(bundle.Layers))
 	}
 	if len(bundle.Version) != len("sha256:")+64 || !strings.HasPrefix(bundle.Version, "sha256:") {
 		t.Fatalf("bundle version = %q, want a sha256-prefixed digest", bundle.Version)
@@ -65,6 +65,7 @@ func TestDefaultRockyLinux98ResolutionUsesAllApplicableLayers(t *testing.T) {
 	}
 
 	byID := make(map[string]model.ResolvedRule, len(resolved))
+	remediationRules := map[string]bool{"U-19": true, "U-22": true, "U-29": true}
 	for index, rule := range resolved {
 		wantID := fmt.Sprintf("U-%02d", index+1)
 		if rule.ID != wantID {
@@ -76,21 +77,73 @@ func TestDefaultRockyLinux98ResolutionUsesAllApplicableLayers(t *testing.T) {
 		if !rule.Applicable {
 			t.Fatalf("resolved rule %s unexpectedly became inapplicable", rule.ID)
 		}
-		if rule.Verification.State != model.VerificationPending ||
-			!reflect.DeepEqual(rule.Verification.Environments, []string{"Rocky Linux 9.8 amd64"}) {
-			t.Fatalf("resolved rule %s verification = %#v, want Rocky Linux 9.8 amd64 pending", rule.ID, rule.Verification)
+		wantState := model.VerificationPending
+		wantEnvironments := []string(nil)
+		wantVerifiedAt := ""
+		if remediationRules[rule.ID] {
+			wantState = model.VerificationVerified
+			wantEnvironments = []string{"Rocky Linux 9.8 amd64"}
+			wantVerifiedAt = "2026-08-02T14:58:30.339056Z"
+		}
+		if rule.Verification.State != wantState {
+			t.Fatalf("resolved rule %s verification state = %q, want %q", rule.ID, rule.Verification.State, wantState)
+		}
+		if !reflect.DeepEqual(rule.Verification.Environments, wantEnvironments) {
+			t.Fatalf("resolved rule %s verification environments = %#v, want %#v", rule.ID, rule.Verification.Environments, wantEnvironments)
+		}
+		if rule.Verification.VerifiedAt != wantVerifiedAt {
+			t.Fatalf("resolved rule %s verified_at = %q, want %q", rule.ID, rule.Verification.VerifiedAt, wantVerifiedAt)
 		}
 		byID[rule.ID] = rule
 	}
 
-	if got := byID["U-01"].BindingSources; !reflect.DeepEqual(got, []string{"linux-common", "rocky-linux-9.8"}) {
-		t.Fatalf("U-01 binding sources = %v, want common and exact Rocky layers", got)
+	if got := byID["U-01"].BindingSources; !reflect.DeepEqual(got, []string{"linux-common"}) {
+		t.Fatalf("U-01 binding sources = %v, want the common layer", got)
 	}
-	if got := byID["U-02"].BindingSources; !reflect.DeepEqual(got, []string{"linux-common", "rhel-9", "rocky-linux-9.8"}) {
-		t.Fatalf("U-02 binding sources = %v, want common, RHEL 9, and exact Rocky layers", got)
+	if got := byID["U-02"].BindingSources; !reflect.DeepEqual(got, []string{"linux-common", "rhel-9"}) {
+		t.Fatalf("U-02 binding sources = %v, want common and RHEL 9 layers", got)
 	}
 	if got := byID["U-02"].Parameters["min_password_length"]; got != 8 {
 		t.Fatalf("U-02 min_password_length = %#v, want 8 from the RHEL 9 layer", got)
+	}
+	if got := byID["U-19"].BindingSources; !reflect.DeepEqual(got, []string{"linux-common", "rocky-linux-9.8"}) {
+		t.Fatalf("U-19 binding sources = %v, want common and exact Rocky layers", got)
+	}
+}
+
+func TestDefaultDebianResolutionUsesPlatformParameters(t *testing.T) {
+	t.Parallel()
+
+	bundle, err := LoadDefaults()
+	if err != nil {
+		t.Fatalf("LoadDefaults() error = %v", err)
+	}
+	resolved, err := bundle.Resolve(model.PlatformInfo{
+		OS: "linux", Family: "debian", ID: "ubuntu", VersionID: "24.04", Architecture: "amd64",
+	})
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	byID := make(map[string]model.ResolvedRule, len(resolved))
+	for _, rule := range resolved {
+		byID[rule.ID] = rule
+	}
+	if got := byID["U-02"].BindingSources; !reflect.DeepEqual(got, []string{"linux-common", "debian-common"}) {
+		t.Fatalf("U-02 binding sources = %v, want common and Debian layers", got)
+	}
+	if got := byID["U-02"].Parameters["min_password_length"]; got != 8 {
+		t.Fatalf("U-02 min_password_length = %#v, want 8", got)
+	}
+	if got := byID["U-06"].Parameters["allowed_su_groups"]; !reflect.DeepEqual(got, []any{"sudo"}) {
+		t.Fatalf("U-06 allowed_su_groups = %#v, want sudo", got)
+	}
+	if got := byID["U-62"].BindingSources; !reflect.DeepEqual(got, []string{"linux-common", "ubuntu-24.04"}) {
+		t.Fatalf("U-62 binding sources = %v, want common and exact Ubuntu layers", got)
+	}
+	if got := byID["U-62"].Parameters["known_inadequate_issue_hashes"]; !reflect.DeepEqual(got, []any{
+		"0f42739b4fee9ba3ea7768ddf304853467e394265dc2dfde4a9531156e57ceb8",
+	}) {
+		t.Fatalf("U-62 known_inadequate_issue_hashes = %#v, want the tested Ubuntu default digest", got)
 	}
 }
 
@@ -159,13 +212,31 @@ func assertDefaultLayers(t *testing.T, bundle Bundle) {
 		selector model.PlatformSelector
 	}{
 		{id: "linux-common", priority: 100, selector: model.PlatformSelector{OS: "linux"}},
+		{id: "debian-common", priority: 200, selector: model.PlatformSelector{Family: "debian"}},
+		{id: "rhel-8", priority: 200, selector: model.PlatformSelector{Family: "rhel", VersionMajor: "8"}},
 		{id: "rhel-9", priority: 200, selector: model.PlatformSelector{Family: "rhel", VersionMajor: "9"}},
+		{id: "centos-linux-8.5.2111", priority: 300, selector: model.PlatformSelector{ID: "centos", Version: "8.5.2111", Architecture: "amd64"}},
+		{id: "rocky-linux-9.5", priority: 300, selector: model.PlatformSelector{ID: "rocky", Version: "9.5", Architecture: "amd64"}},
+		{id: "rocky-linux-9.6", priority: 300, selector: model.PlatformSelector{ID: "rocky", Version: "9.6", Architecture: "amd64"}},
+		{id: "rocky-linux-9.7", priority: 300, selector: model.PlatformSelector{ID: "rocky", Version: "9.7", Architecture: "amd64"}},
 		{id: "rocky-linux-9.8", priority: 300, selector: model.PlatformSelector{ID: "rocky", Version: "9.8", Architecture: "amd64"}},
+		{id: "ubuntu-18.04", priority: 300, selector: model.PlatformSelector{ID: "ubuntu", Version: "18.04", Architecture: "amd64"}},
+		{id: "ubuntu-20.04", priority: 300, selector: model.PlatformSelector{ID: "ubuntu", Version: "20.04", Architecture: "amd64"}},
+		{id: "ubuntu-22.04", priority: 300, selector: model.PlatformSelector{ID: "ubuntu", Version: "22.04", Architecture: "amd64"}},
+		{id: "ubuntu-24.04", priority: 300, selector: model.PlatformSelector{ID: "ubuntu", Version: "24.04", Architecture: "amd64"}},
+		{id: "ubuntu-26.04", priority: 300, selector: model.PlatformSelector{ID: "ubuntu", Version: "26.04", Architecture: "amd64"}},
 	}
-	for index, expected := range want {
-		layer := bundle.Layers[index]
+	byID := make(map[string]model.BindingLayer, len(bundle.Layers))
+	for _, layer := range bundle.Layers {
+		byID[layer.ID] = layer
+	}
+	for _, expected := range want {
+		layer, exists := byID[expected.id]
+		if !exists {
+			t.Fatalf("default bindings are missing baseline layer %s", expected.id)
+		}
 		if layer.ID != expected.id || layer.Priority != expected.priority || !reflect.DeepEqual(layer.Selector, expected.selector) {
-			t.Fatalf("layer %d = %#v, want id=%s priority=%d selector=%#v", index, layer, expected.id, expected.priority, expected.selector)
+			t.Fatalf("layer %s = %#v, want priority=%d selector=%#v", expected.id, layer, expected.priority, expected.selector)
 		}
 	}
 }

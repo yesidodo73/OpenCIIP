@@ -1,0 +1,15 @@
+schema_version: 1
+selector:
+  id: ubuntu
+  version: "22.04"
+  architecture: amd64
+family: debian
+display_name: Ubuntu
+display_version: 22.04 LTS
+os_release: |
+  PRETTY_NAME="Ubuntu 22.04.5 LTS"
+  NAME="Ubuntu"
+  VERSION_ID="22.04"
+  VERSION_CODENAME=jammy
+  ID=ubuntu
+  ID_LIKE=debian

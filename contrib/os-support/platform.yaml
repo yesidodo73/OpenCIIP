@@ -1,0 +1,11 @@
+schema_version: 1
+id: example-linux-1.0
+priority: 300
+selector:
+  id: example
+  version: "1.0"
+  architecture: amd64
+scan_support: supported
+
+# 공통 또는 계열 계층과 실제로 다른 값만 추가하세요.
+bindings: []

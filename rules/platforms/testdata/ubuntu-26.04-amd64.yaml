@@ -1,0 +1,15 @@
+schema_version: 1
+selector:
+  id: ubuntu
+  version: "26.04"
+  architecture: amd64
+family: debian
+display_name: Ubuntu
+display_version: 26.04 LTS
+os_release: |
+  PRETTY_NAME="Ubuntu 26.04 LTS"
+  NAME="Ubuntu"
+  VERSION_ID="26.04"
+  VERSION_CODENAME=resolute
+  ID=ubuntu
+  ID_LIKE=debian

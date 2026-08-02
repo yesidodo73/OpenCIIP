@@ -201,8 +201,7 @@ type RuleBinding struct {
 }
 
 type BindingDefaults struct {
-	Applicable   *bool         `json:"applicable,omitempty" yaml:"applicable,omitempty"`
-	Verification *Verification `json:"verification,omitempty" yaml:"verification,omitempty"`
+	Applicable *bool `json:"applicable,omitempty" yaml:"applicable,omitempty"`
 }
 
 type BindingLayer struct {

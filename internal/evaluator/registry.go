@@ -24,6 +24,7 @@ type Outcome struct {
 	Summary       string
 	Expected      string
 	Observed      string
+	Details       []model.ResultDetail
 	Evidence      []model.Evidence
 	ErrorCode     string
 	ErrorMessage  string
@@ -124,10 +125,43 @@ func (r *Registry) Evaluate(ctx context.Context, rule model.ResolvedRule, enviro
 	result.Summary = outcome.Summary
 	result.Expected = outcome.Expected
 	result.Observed = outcome.Observed
+	result.DisplayDetails = append([]model.ResultDetail(nil), outcome.Details...)
+	if len(result.DisplayDetails) == 0 && strings.TrimSpace(outcome.Observed) != "" {
+		result.DisplayDetails = defaultDisplayDetails(outcome)
+	}
 	result.Evidence = append([]model.Evidence(nil), outcome.Evidence...)
 	result.ErrorCode = outcome.ErrorCode
 	result.ErrorMessage = outcome.ErrorMessage
 	return result
+}
+
+func defaultDisplayDetails(outcome Outcome) []model.ResultDetail {
+	sources := make([]string, 0, 3)
+	seen := make(map[string]struct{})
+	remaining := 0
+	for _, evidence := range outcome.Evidence {
+		source := strings.TrimSpace(evidence.Source)
+		if source == "" {
+			continue
+		}
+		if _, exists := seen[source]; exists {
+			continue
+		}
+		seen[source] = struct{}{}
+		if len(sources) < 3 {
+			sources = append(sources, source)
+		} else {
+			remaining++
+		}
+	}
+	source := strings.Join(sources, ", ")
+	if remaining > 0 {
+		source += fmt.Sprintf(" 외 %d개", remaining)
+	}
+	return []model.ResultDetail{{
+		Label: "판정 결과", Current: outcome.Observed,
+		Expected: outcome.Expected, Source: source,
+	}}
 }
 
 func normalizeResult(result *model.CheckResult) {

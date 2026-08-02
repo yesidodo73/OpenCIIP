@@ -13,10 +13,8 @@ func (b Bundle) ResolvePlatformSupport(platform model.PlatformInfo) (model.Platf
 	resolved.ScanSupport = model.ScanSupportUnsupported
 	resolved.RemediationSupport = model.RemediationSupportUnsupported
 
-	for _, layer := range b.Layers {
-		if err := validateBindingLayer(layer); err != nil {
-			return model.PlatformInfo{}, fmt.Errorf("validate platform support layer %s: %w", layer.ID, err)
-		}
+	if err := validateRemediationSelectorSet(b.Layers); err != nil {
+		return model.PlatformInfo{}, fmt.Errorf("validate platform support layers: %w", err)
 	}
 
 	matching, err := matchingLayers(b.Layers, platform)

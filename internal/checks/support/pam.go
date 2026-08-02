@@ -24,10 +24,17 @@ type PAMRule struct {
 
 func ReadPAMService(ctx context.Context, files system.Reader, service string) ([]PAMRule, []model.Evidence, error) {
 	visited := make(map[string]bool)
-	return readPAMService(ctx, files, service, visited, 0)
+	return readPAMService(ctx, files, service, "", visited, 0)
 }
 
-func readPAMService(ctx context.Context, files system.Reader, service string, stack map[string]bool, depth int) ([]PAMRule, []model.Evidence, error) {
+func readPAMService(
+	ctx context.Context,
+	files system.Reader,
+	service string,
+	requestedType string,
+	stack map[string]bool,
+	depth int,
+) ([]PAMRule, []model.Evidence, error) {
 	if depth > maxPAMIncludeDepth {
 		return nil, nil, fmt.Errorf("PAM include depth exceeds %d", maxPAMIncludeDepth)
 	}
@@ -61,14 +68,29 @@ func readPAMService(ctx context.Context, files system.Reader, service string, st
 			continue
 		}
 		evidenceLines = append(evidenceLines, map[string]any{
-			"line":    parsed.Line,
-			"type":    parsed.Type,
-			"control": parsed.Control,
-			"module":  filepath.Base(parsed.Module),
-			"args":    append([]string(nil), parsed.Args...),
+			"line":               parsed.Line,
+			"type":               parsed.Type,
+			"control":            parsed.Control,
+			"module":             filepath.Base(parsed.Module),
+			"argument_count":     len(parsed.Args),
+			"arguments_redacted": true,
 		})
+		if parsed.Type != "@include" && requestedType != "" && !strings.EqualFold(parsed.Type, requestedType) {
+			continue
+		}
 		if parsed.Control == "include" || parsed.Control == "substack" {
-			included, includedEvidence, includeErr := readPAMService(ctx, files, parsed.Module, stack, depth+1)
+			includedType := requestedType
+			if parsed.Type != "@include" {
+				includedType = parsed.Type
+			}
+			included, includedEvidence, includeErr := readPAMService(
+				ctx,
+				files,
+				parsed.Module,
+				includedType,
+				stack,
+				depth+1,
+			)
 			if includeErr != nil {
 				return nil, nil, includeErr
 			}
@@ -129,6 +151,19 @@ func pamLogicalLines(content string) ([]logicalLine, error) {
 
 func parsePAMLine(service, path string, line int, content string) (*PAMRule, error) {
 	fields := strings.Fields(content)
+	if len(fields) > 0 && strings.EqualFold(strings.TrimPrefix(fields[0], "-"), "@include") {
+		if len(fields) != 2 {
+			return nil, fmt.Errorf("parse %s line %d: @include requires one service name", path, line)
+		}
+		return &PAMRule{
+			Service: service,
+			Path:    path,
+			Line:    line,
+			Type:    "@include",
+			Control: "include",
+			Module:  fields[1],
+		}, nil
+	}
 	if len(fields) < 3 {
 		return nil, fmt.Errorf("parse %s line %d: expected at least 3 fields", path, line)
 	}

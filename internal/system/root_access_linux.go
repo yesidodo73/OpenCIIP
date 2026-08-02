@@ -3,6 +3,7 @@
 package system
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"sync"
@@ -21,6 +22,14 @@ type linuxRootAccess struct {
 }
 
 func newRootedAccess(path string) (rootedAccess, error) {
+	supported, err := rootedOpenat2Supported()
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrRootedAccessUnsupported, err)
+	}
+	if !supported {
+		return newLegacyRootedAccess(path)
+	}
+
 	fd, err := unix.Open(path, unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return nil, &os.PathError{Op: "open", Path: path, Err: err}
@@ -43,6 +52,20 @@ func newRootedAccess(path string) (rootedAccess, error) {
 	return access, nil
 }
 
+func rootedOpenat2Supported() (bool, error) {
+	fd, err := unix.Openat2(unix.AT_FDCWD, ".", &unix.OpenHow{
+		Flags:   uint64(unix.O_PATH | unix.O_DIRECTORY | unix.O_CLOEXEC),
+		Resolve: rootedResolveFlags,
+	})
+	if errors.Is(err, unix.ENOSYS) {
+		return false, nil
+	}
+	if err != nil {
+		return false, &os.PathError{Op: "openat2", Path: ".", Err: err}
+	}
+	return true, unix.Close(fd)
+}
+
 func (r *linuxRootAccess) Close() error {
 	if r == nil {
 		return nil
@@ -61,6 +84,10 @@ func (r *linuxRootAccess) Open(name string) (*os.File, error) {
 	// O_NONBLOCK prevents a path race to a FIFO or device from blocking before
 	// ReadFile can verify that the opened descriptor is a regular file.
 	return r.openWithFlags(name, uint64(unix.O_RDONLY|unix.O_NOCTTY|unix.O_NONBLOCK))
+}
+
+func (r *linuxRootAccess) OpenNoFollow(name string) (*os.File, error) {
+	return r.openWithFlags(name, uint64(unix.O_RDONLY|unix.O_NOCTTY|unix.O_NONBLOCK|unix.O_NOFOLLOW))
 }
 
 func (r *linuxRootAccess) OpenDir(name string) (*os.File, error) {

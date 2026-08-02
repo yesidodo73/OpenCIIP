@@ -182,13 +182,17 @@ func (r *Runner) Run(ctx context.Context, spec Spec) (Result, error) {
 }
 
 func (r *Runner) resolve(name string) (string, error) {
-	for _, directory := range r.searchPaths {
+	searchPaths := r.searchPathsFor(name)
+	for _, directory := range searchPaths {
 		candidate := filepath.Join(directory, name)
 		resolved, err := filepath.EvalSymlinks(candidate)
 		if err != nil {
 			continue
 		}
-		if !withinTrustedPath(resolved, r.searchPaths) {
+		if !withinTrustedPath(resolved, searchPaths) {
+			continue
+		}
+		if !trustedParentDirectories(candidate) || !trustedParentDirectories(resolved) {
 			continue
 		}
 		info, err := os.Stat(resolved)
@@ -200,6 +204,14 @@ func (r *Runner) resolve(name string) (string, error) {
 	return "", fmt.Errorf("%w: %s", ErrCommandNotFound, name)
 }
 
+func (r *Runner) searchPathsFor(name string) []string {
+	searchPaths := append([]string(nil), r.searchPaths...)
+	if name == "visudo" {
+		searchPaths = append(searchPaths, "/usr/lib/cargo/bin")
+	}
+	return searchPaths
+}
+
 func withinTrustedPath(path string, directories []string) bool {
 	path = filepath.Clean(path)
 	for _, directory := range directories {
@@ -209,6 +221,21 @@ func withinTrustedPath(path string, directories []string) bool {
 		}
 	}
 	return false
+}
+
+func trustedParentDirectories(executable string) bool {
+	directory := filepath.Dir(filepath.Clean(executable))
+	for {
+		info, err := os.Stat(directory)
+		if err != nil || !trustedDirectory(info) {
+			return false
+		}
+		parent := filepath.Dir(directory)
+		if parent == directory {
+			return true
+		}
+		directory = parent
+	}
 }
 
 func trustedEnvironment() []string {

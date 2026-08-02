@@ -83,6 +83,12 @@ func (e *Engine) Scan(ctx context.Context, options Options) (model.ScanRun, erro
 	if err != nil {
 		return model.ScanRun{}, err
 	}
+	identityContext, cancelIdentity := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	executableSHA256, err := buildinfo.ExecutableSHA256(identityContext)
+	cancelIdentity()
+	if err != nil {
+		return model.ScanRun{}, fmt.Errorf("identify scan executable: %w", err)
+	}
 
 	results := make([]model.CheckResult, 0, len(selected))
 	complete := true
@@ -125,22 +131,23 @@ func (e *Engine) Scan(ctx context.Context, options Options) (model.ScanRun, erro
 		exitStatus = exitcode.Error
 	}
 	metadata := model.RunMetadata{
-		SchemaVersion:  model.RunMetadataSchemaVersion,
-		RunID:          id,
-		ToolVersion:    info.Version,
-		ToolCommit:     info.Commit,
-		GuideYear:      e.bundle.Catalog.Guide.Year,
-		RuleSetVersion: e.bundle.Version,
-		StartedAt:      startedAt,
-		CompletedAt:    completedAt,
-		DurationMS:     completedAt.Sub(startedAt).Milliseconds(),
-		Platform:       e.environment.Platform,
-		Selection:      selection,
-		Counts:         counts,
-		EvidenceMode:   evidenceMode,
-		Redaction:      !options.NoRedact,
-		Complete:       complete,
-		ExitCode:       exitStatus,
+		SchemaVersion:        model.RunMetadataSchemaVersion,
+		RunID:                id,
+		ToolVersion:          info.Version,
+		ToolCommit:           info.Commit,
+		ToolExecutableSHA256: executableSHA256,
+		GuideYear:            e.bundle.Catalog.Guide.Year,
+		RuleSetVersion:       e.bundle.Version,
+		StartedAt:            startedAt,
+		CompletedAt:          completedAt,
+		DurationMS:           completedAt.Sub(startedAt).Milliseconds(),
+		Platform:             e.environment.Platform,
+		Selection:            selection,
+		Counts:               counts,
+		EvidenceMode:         evidenceMode,
+		Redaction:            !options.NoRedact,
+		Complete:             complete,
+		ExitCode:             exitStatus,
 	}
 	return model.ScanRun{Metadata: metadata, Results: results}, nil
 }

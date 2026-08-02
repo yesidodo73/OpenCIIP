@@ -1,0 +1,9 @@
+schema_version: 1
+id: example-family-common
+priority: 200
+selector:
+  family: example-family
+scan_support: supported
+
+# 같은 계열의 여러 배포판에 공통으로 적용되는 차이만 추가하세요.
+bindings: []

@@ -31,7 +31,7 @@ func ReadEffectiveGroups(ctx context.Context, commands executor.CommandRunner) (
 		if len(fields) != 4 {
 			return nil, model.Evidence{}, fmt.Errorf("parse getent group line %d: expected 4 fields", lineNumber+1)
 		}
-		if fields[0] == "" || strings.ContainsAny(fields[0], " \t/\\:") {
+		if !validIdentityName(fields[0]) {
 			return nil, model.Evidence{}, fmt.Errorf("parse getent group line %d: invalid group name", lineNumber+1)
 		}
 		if _, exists := seen[fields[0]]; exists {
@@ -46,7 +46,7 @@ func ReadEffectiveGroups(ctx context.Context, commands executor.CommandRunner) (
 		if fields[3] != "" {
 			for _, rawMember := range strings.Split(fields[3], ",") {
 				member := strings.TrimSpace(rawMember)
-				if member == "" || strings.ContainsAny(member, " \t/\\:") {
+				if !validIdentityName(member) {
 					return nil, model.Evidence{}, fmt.Errorf("parse getent group line %d: invalid member", lineNumber+1)
 				}
 				members = append(members, member)

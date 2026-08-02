@@ -1,0 +1,15 @@
+schema_version: 1
+selector:
+  id: rocky
+  version: "9.5"
+  architecture: amd64
+family: rhel
+display_name: Rocky Linux
+display_version: "9.5"
+os_release: |
+  NAME="Rocky Linux"
+  VERSION="9.5 (Blue Onyx)"
+  ID="rocky"
+  ID_LIKE="rhel centos fedora"
+  VERSION_ID="9.5"
+  PRETTY_NAME="Rocky Linux 9.5 (Blue Onyx)"

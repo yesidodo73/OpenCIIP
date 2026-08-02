@@ -1,0 +1,15 @@
+schema_version: 1
+selector:
+  id: ubuntu
+  version: "24.04"
+  architecture: amd64
+family: debian
+display_name: Ubuntu
+display_version: 24.04 LTS
+os_release: |
+  PRETTY_NAME="Ubuntu 24.04.4 LTS"
+  NAME="Ubuntu"
+  VERSION_ID="24.04"
+  VERSION_CODENAME=noble
+  ID=ubuntu
+  ID_LIKE=debian

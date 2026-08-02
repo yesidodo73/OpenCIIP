@@ -1,0 +1,32 @@
+schema_version: 1
+id: ubuntu-20.04
+priority: 300
+selector:
+  id: ubuntu
+  version: "20.04"
+  architecture: amd64
+scan_support: tested
+platform_verification:
+  state: verified
+  environments:
+    - Ubuntu 20.04 LTS amd64
+  verified_at: "2026-08-02T14:58:30.339056Z"
+bindings:
+  - rule_id: U-19
+    verification:
+      state: verified
+      environments:
+        - Ubuntu 20.04 LTS amd64
+      verified_at: "2026-08-02T14:58:30.339056Z"
+  - rule_id: U-22
+    verification:
+      state: verified
+      environments:
+        - Ubuntu 20.04 LTS amd64
+      verified_at: "2026-08-02T14:58:30.339056Z"
+  - rule_id: U-29
+    verification:
+      state: verified
+      environments:
+        - Ubuntu 20.04 LTS amd64
+      verified_at: "2026-08-02T14:58:30.339056Z"

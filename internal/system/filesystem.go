@@ -19,6 +19,7 @@ var (
 	ErrReadLimit               = errors.New("file exceeds the configured read limit")
 	ErrFileChanged             = errors.New("file changed while being read")
 	ErrRootedAccessUnsupported = errors.New("required rooted path resolution is not supported")
+	ErrXAttrUnsupported        = errors.New("extended attribute inspection is not supported")
 )
 
 type FileMetadata struct {
@@ -31,6 +32,7 @@ type FileMetadata struct {
 	Device     uint64
 	Inode      uint64
 	ModTime    time.Time
+	ChangeTime time.Time
 	LinkTarget string
 }
 
@@ -40,6 +42,43 @@ type Reader interface {
 	Lstat(string) (FileMetadata, error)
 	ReadDir(string) ([]os.DirEntry, error)
 	Exists(string) (bool, error)
+}
+
+// BoundedFilePrefixReader is an optional capability for callers that only
+// need a stable prefix of a regular file. ReadFilePrefix returns at most limit
+// bytes and does not reject a file merely because the complete file is larger
+// than limit. The returned metadata and bytes come from the same opened file
+// descriptor.
+type BoundedFilePrefixReader interface {
+	ReadFilePrefix(context.Context, string, int64) ([]byte, FileMetadata, error)
+}
+
+// BoundedDirectoryReader is an optional capability for callers that must not
+// materialize an unbounded directory in memory. ReadDirBounded returns at most
+// limit entries. The truncated result is true only when at least one additional
+// entry exists. A zero limit is valid and can be used to test whether a
+// directory is empty without returning an entry.
+type BoundedDirectoryReader interface {
+	ReadDirBounded(string, int) (entries []os.DirEntry, truncated bool, err error)
+}
+
+// BoundedDirectorySnapshotReader extends bounded directory enumeration with a
+// stable metadata snapshot. The expected metadata, when provided, must match
+// the directory opened for enumeration. Implementations must compare metadata
+// captured from the same opened directory before and after reading entries.
+type BoundedDirectorySnapshotReader interface {
+	ReadDirBoundedSnapshot(
+		string,
+		int,
+		*FileMetadata,
+	) (entries []os.DirEntry, metadata FileMetadata, truncated bool, err error)
+}
+
+// XAttrReader is an optional capability implemented by readers that can take a
+// stable, rooted snapshot of extended attributes. A missing key means that the
+// requested attribute did not exist at capture time.
+type XAttrReader interface {
+	ReadXAttrs(context.Context, string, []string, int64, bool) (map[string][]byte, FileMetadata, error)
 }
 
 // OSReader exposes a rooted, read-only view of the target system.
@@ -89,6 +128,26 @@ func (r *OSReader) ReadFile(ctx context.Context, path string, limit int64) ([]by
 	return readOpenedFile(ctx, path, limit, file, nil)
 }
 
+func (r *OSReader) ReadFilePrefix(
+	ctx context.Context,
+	path string,
+	limit int64,
+) ([]byte, FileMetadata, error) {
+	if limit <= 0 {
+		limit = DefaultReadLimit
+	}
+	name, err := rootedName(path)
+	if err != nil {
+		return nil, FileMetadata{}, err
+	}
+	file, err := r.root.Open(name)
+	if err != nil {
+		return nil, FileMetadata{}, err
+	}
+	defer file.Close()
+	return readOpenedFilePrefix(ctx, path, limit, file, nil)
+}
+
 func readOpenedFile(ctx context.Context, path string, limit int64, file *os.File, afterRead func() error) ([]byte, FileMetadata, error) {
 	before, err := file.Stat()
 	if err != nil {
@@ -107,6 +166,45 @@ func readOpenedFile(ctx context.Context, path string, limit int64, file *os.File
 	}
 	if int64(len(data)) > limit {
 		return nil, FileMetadata{}, fmt.Errorf("%w: %s changed while being read", ErrReadLimit, path)
+	}
+	if afterRead != nil {
+		if err := afterRead(); err != nil {
+			return nil, FileMetadata{}, err
+		}
+	}
+	after, err := file.Stat()
+	if err != nil {
+		return nil, FileMetadata{}, err
+	}
+	if !sameFileSnapshot(before, after) {
+		return nil, FileMetadata{}, fmt.Errorf("%w: %s", ErrFileChanged, path)
+	}
+	return data, metadata(path, after, ""), nil
+}
+
+func readOpenedFilePrefix(
+	ctx context.Context,
+	path string,
+	limit int64,
+	file *os.File,
+	afterRead func() error,
+) ([]byte, FileMetadata, error) {
+	if limit <= 0 {
+		limit = DefaultReadLimit
+	}
+	before, err := file.Stat()
+	if err != nil {
+		return nil, FileMetadata{}, err
+	}
+	if !before.Mode().IsRegular() {
+		return nil, FileMetadata{}, fmt.Errorf("%w: %s", ErrNotRegularFile, path)
+	}
+	data, err := io.ReadAll(io.LimitReader(
+		&contextReader{ctx: ctx, reader: file},
+		limit,
+	))
+	if err != nil {
+		return nil, FileMetadata{}, err
 	}
 	if afterRead != nil {
 		if err := afterRead(); err != nil {
@@ -160,6 +258,75 @@ func (r *OSReader) ReadDir(path string) ([]os.DirEntry, error) {
 	return directory.ReadDir(-1)
 }
 
+func (r *OSReader) ReadDirBounded(path string, limit int) ([]os.DirEntry, bool, error) {
+	entries, _, truncated, err := r.ReadDirBoundedSnapshot(path, limit, nil)
+	return entries, truncated, err
+}
+
+func (r *OSReader) ReadDirBoundedSnapshot(
+	path string,
+	limit int,
+	expected *FileMetadata,
+) ([]os.DirEntry, FileMetadata, bool, error) {
+	if limit < 0 {
+		return nil, FileMetadata{}, false, fmt.Errorf("directory entry limit must not be negative")
+	}
+	if limit == int(^uint(0)>>1) {
+		return nil, FileMetadata{}, false, fmt.Errorf("directory entry limit is too large")
+	}
+	name, err := rootedName(path)
+	if err != nil {
+		return nil, FileMetadata{}, false, err
+	}
+	directory, err := r.root.OpenDir(name)
+	if err != nil {
+		return nil, FileMetadata{}, false, err
+	}
+	defer directory.Close()
+	return readOpenedDirectoryBoundedSnapshot(path, limit, directory, expected, nil)
+}
+
+func readOpenedDirectoryBoundedSnapshot(
+	path string,
+	limit int,
+	directory *os.File,
+	expected *FileMetadata,
+	afterRead func() error,
+) ([]os.DirEntry, FileMetadata, bool, error) {
+	before, err := directory.Stat()
+	if err != nil {
+		return nil, FileMetadata{}, false, err
+	}
+	if !before.IsDir() {
+		return nil, FileMetadata{}, false, fmt.Errorf("path is not a directory: %s", path)
+	}
+	beforeMetadata := metadata(path, before, "")
+	if expected != nil && !sameMetadataSnapshot(*expected, beforeMetadata) {
+		return nil, FileMetadata{}, false, fmt.Errorf("%w: %s", ErrFileChanged, path)
+	}
+	entries, err := directory.ReadDir(limit + 1)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return nil, FileMetadata{}, false, err
+	}
+	if afterRead != nil {
+		if err := afterRead(); err != nil {
+			return nil, FileMetadata{}, false, err
+		}
+	}
+	after, err := directory.Stat()
+	if err != nil {
+		return nil, FileMetadata{}, false, err
+	}
+	if !sameFileSnapshot(before, after) {
+		return nil, FileMetadata{}, false, fmt.Errorf("%w: %s", ErrFileChanged, path)
+	}
+	afterMetadata := metadata(path, after, "")
+	if len(entries) <= limit {
+		return entries, afterMetadata, false, nil
+	}
+	return entries[:limit], afterMetadata, true, nil
+}
+
 func (r *OSReader) Exists(path string) (bool, error) {
 	_, err := r.Lstat(path)
 	if err == nil {
@@ -202,6 +369,20 @@ func sameFileSnapshot(left, right os.FileInfo) bool {
 		samePlatformSnapshot(left, right)
 }
 
+func sameMetadataSnapshot(left, right FileMetadata) bool {
+	return left.Path == right.Path &&
+		left.FileType == right.FileType &&
+		left.Mode == right.Mode &&
+		left.Size == right.Size &&
+		left.UID == right.UID &&
+		left.GID == right.GID &&
+		left.Device == right.Device &&
+		left.Inode == right.Inode &&
+		left.ModTime.Equal(right.ModTime) &&
+		left.ChangeTime.Equal(right.ChangeTime) &&
+		left.LinkTarget == right.LinkTarget
+}
+
 type rootedAccess interface {
 	Close() error
 	Open(string) (*os.File, error)
@@ -222,6 +403,7 @@ func metadata(path string, info os.FileInfo, linkTarget string) FileMetadata {
 		Device:     device,
 		Inode:      inode,
 		ModTime:    info.ModTime().UTC(),
+		ChangeTime: platformChangeTime(info),
 		LinkTarget: linkTarget,
 	}
 }

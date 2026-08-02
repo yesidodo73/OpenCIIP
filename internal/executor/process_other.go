@@ -19,3 +19,7 @@ func configureCommand(command *exec.Cmd) {
 func trustedExecutable(info os.FileInfo) bool {
 	return info.Mode().IsRegular() && info.Mode().Perm()&0o111 != 0 && info.Mode().Perm()&0o022 == 0
 }
+
+func trustedDirectory(info os.FileInfo) bool {
+	return info.IsDir() && info.Mode().Perm()&0o022 == 0
+}

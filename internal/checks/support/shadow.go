@@ -36,7 +36,7 @@ func ReadShadowSummary(ctx context.Context, files system.Reader) (map[string]Sha
 			return nil, model.Evidence{}, fmt.Errorf("parse /etc/shadow line %d: expected 9 fields", index+1)
 		}
 		name := fields[0]
-		if name == "" || strings.ContainsAny(name, " \t/\\") {
+		if !validIdentityName(name) {
 			return nil, model.Evidence{}, fmt.Errorf("parse /etc/shadow line %d: invalid account name", index+1)
 		}
 		if _, exists := entries[name]; exists {

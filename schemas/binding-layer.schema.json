@@ -60,14 +60,24 @@
           "selector": {
             "required": [
               "id",
-              "version"
+              "version",
+              "architecture"
             ],
             "properties": {
+              "os": {
+                "const": ""
+              },
+              "family": {
+                "const": ""
+              },
               "id": {
-                "$ref": "#/$defs/canonicalNonBlankString"
+                "$ref": "#/$defs/exactSelectorString"
               },
               "version": {
-                "$ref": "#/$defs/canonicalNonBlankString"
+                "$ref": "#/$defs/exactSelectorString"
+              },
+              "architecture": {
+                "$ref": "#/$defs/exactSelectorString"
               },
               "version_major": {
                 "const": ""
@@ -95,7 +105,75 @@
               "id",
               "version",
               "architecture"
-            ]
+            ],
+            "properties": {
+              "os": {
+                "const": ""
+              },
+              "family": {
+                "const": ""
+              },
+              "id": {
+                "$ref": "#/$defs/exactSelectorString"
+              },
+              "version": {
+                "$ref": "#/$defs/exactSelectorString"
+              },
+              "architecture": {
+                "$ref": "#/$defs/exactSelectorString"
+              },
+              "version_major": {
+                "const": ""
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "bindings": {
+            "contains": {
+              "type": "object",
+              "required": [
+                "verification"
+              ]
+            }
+          }
+        },
+        "required": [
+          "bindings"
+        ]
+      },
+      "then": {
+        "properties": {
+          "selector": {
+            "required": [
+              "id",
+              "version",
+              "architecture"
+            ],
+            "properties": {
+              "os": {
+                "const": ""
+              },
+              "family": {
+                "const": ""
+              },
+              "id": {
+                "$ref": "#/$defs/exactSelectorString"
+              },
+              "version": {
+                "$ref": "#/$defs/exactSelectorString"
+              },
+              "architecture": {
+                "$ref": "#/$defs/exactSelectorString"
+              },
+              "version_major": {
+                "const": ""
+              }
+            }
           }
         }
       }
@@ -122,6 +200,13 @@
           "$ref": "#/$defs/canonicalNonBlankString"
         }
       ]
+    },
+    "exactSelectorString": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._+-]{0,127}$",
+      "not": {
+        "pattern": "[\\r\\n]"
+      }
     },
     "jsonValue": {
       "oneOf": [
@@ -314,9 +399,6 @@
       "properties": {
         "applicable": {
           "type": "boolean"
-        },
-        "verification": {
-          "$ref": "#/$defs/verification"
         }
       }
     },

@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/yesidodo73/OpenCIIP/internal/executor"
 	"github.com/yesidodo73/OpenCIIP/internal/model"
@@ -89,7 +91,7 @@ func parsePasswd(data []byte, source string) ([]PasswdEntry, error) {
 		if err != nil {
 			return nil, fmt.Errorf("parse %s line %d gid: %w", source, index+1, err)
 		}
-		if fields[0] == "" || strings.ContainsAny(fields[0], " \t/\\") {
+		if !validIdentityName(fields[0]) {
 			return nil, fmt.Errorf("parse %s line %d: invalid account name", source, index+1)
 		}
 		if previousLine, duplicate := seenNames[fields[0]]; duplicate {
@@ -111,6 +113,22 @@ func parsePasswd(data []byte, source string) ([]PasswdEntry, error) {
 		return nil, fmt.Errorf("parse %s: no account entries", source)
 	}
 	return entries, nil
+}
+
+func validIdentityName(value string) bool {
+	if value == "" || !utf8.ValidString(value) || strings.ContainsAny(value, ":,/\\") {
+		return false
+	}
+	for _, character := range value {
+		if unicode.IsSpace(character) ||
+			unicode.IsControl(character) ||
+			unicode.Is(unicode.Cf, character) ||
+			unicode.Is(unicode.Zl, character) ||
+			unicode.Is(unicode.Zp, character) {
+			return false
+		}
+	}
+	return true
 }
 
 func passwdEvidence(source string, entries []PasswdEntry, extra map[string]any) model.Evidence {

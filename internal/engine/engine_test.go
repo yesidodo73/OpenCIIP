@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"errors"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -46,6 +47,9 @@ func TestScanProducesDeterministicSelectionCountsAndEvidenceBoundary(t *testing.
 	}
 	if run.Metadata.SchemaVersion != model.RunMetadataSchemaVersion {
 		t.Fatalf("schema version = %d, want %d", run.Metadata.SchemaVersion, model.RunMetadataSchemaVersion)
+	}
+	if matched := regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(run.Metadata.ToolExecutableSHA256); !matched {
+		t.Fatalf("tool executable digest = %q, want lowercase SHA-256", run.Metadata.ToolExecutableSHA256)
 	}
 	if len(progress) != 4 || progress[0].Completed != 0 || progress[0].Total != 2 || progress[len(progress)-1].Completed != 2 {
 		t.Fatalf("progress = %#v, want start and completion updates for two rules", progress)
@@ -143,9 +147,11 @@ func newFixtureEngine(t *testing.T) *Engine {
 			SchemaVersion: 1,
 			ID:            "verified-fixture",
 			Priority:      100,
-			Selector:      model.PlatformSelector{OS: "linux"},
-			Defaults:      model.BindingDefaults{Verification: &verified},
-			Bindings:      []model.RuleBinding{},
+			Selector:      model.PlatformSelector{ID: "rocky", Version: "9.8", Architecture: "amd64"},
+			Bindings: []model.RuleBinding{
+				{RuleID: "U-01", Verification: &verified},
+				{RuleID: "U-02", Verification: &verified},
+			},
 		}},
 		Version: "sha256:" + strings.Repeat("a", 64),
 	}

@@ -6,17 +6,15 @@ import (
 	"fmt"
 	"io/fs"
 	"sort"
+	"strings"
 
 	"github.com/yesidodo73/OpenCIIP/internal/model"
 	ruledata "github.com/yesidodo73/OpenCIIP/rules"
 )
 
-var defaultDataFiles = []string{
+var defaultCoreDataFiles = []string{
 	"2026/unix/catalog.yaml",
 	"profiles/2026-unix.yaml",
-	"platforms/linux-common.yaml",
-	"platforms/rhel-9.yaml",
-	"platforms/rocky-9.8.yaml",
 }
 
 type Bundle struct {
@@ -28,7 +26,7 @@ type Bundle struct {
 
 func LoadDefaults() (Bundle, error) {
 	loader := NewLoader(ruledata.FS)
-	catalog, err := loader.LoadCatalog(defaultDataFiles[0])
+	catalog, err := loader.LoadCatalog(defaultCoreDataFiles[0])
 	if err != nil {
 		return Bundle{}, err
 	}
@@ -39,19 +37,33 @@ func LoadDefaults() (Bundle, error) {
 	if err := validateDefaultUnixCatalog(catalog); err != nil {
 		return Bundle{}, err
 	}
-	profiles, err := loader.LoadProfiles(defaultDataFiles[1], catalog)
+	profiles, err := loader.LoadProfiles(defaultCoreDataFiles[1], catalog)
 	if err != nil {
 		return Bundle{}, err
 	}
-	layers := make([]model.BindingLayer, 0, len(defaultDataFiles)-2)
-	for _, path := range defaultDataFiles[2:] {
+	platformFiles, err := discoverDefaultPlatformFiles(ruledata.FS)
+	if err != nil {
+		return Bundle{}, err
+	}
+	layers := make([]model.BindingLayer, 0, len(platformFiles))
+	for _, path := range platformFiles {
 		layer, loadErr := loader.LoadBinding(path)
 		if loadErr != nil {
 			return Bundle{}, loadErr
 		}
 		layers = append(layers, layer)
 	}
-	version, err := dataVersion(ruledata.FS, defaultDataFiles)
+	if err := validateRemediationSelectorSet(layers); err != nil {
+		return Bundle{}, fmt.Errorf("validate embedded remediation selectors: %w", err)
+	}
+	sort.SliceStable(layers, func(i, j int) bool {
+		if layers[i].Priority == layers[j].Priority {
+			return layers[i].ID < layers[j].ID
+		}
+		return layers[i].Priority < layers[j].Priority
+	})
+	dataFiles := append(append([]string(nil), defaultCoreDataFiles...), platformFiles...)
+	version, err := dataVersion(ruledata.FS, dataFiles)
 	if err != nil {
 		return Bundle{}, err
 	}
@@ -61,6 +73,25 @@ func LoadDefaults() (Bundle, error) {
 		Layers:   layers,
 		Version:  version,
 	}, nil
+}
+
+func discoverDefaultPlatformFiles(source fs.FS) ([]string, error) {
+	entries, err := fs.ReadDir(source, "platforms")
+	if err != nil {
+		return nil, fmt.Errorf("read embedded platform bindings: %w", err)
+	}
+	paths := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".yaml") {
+			continue
+		}
+		paths = append(paths, "platforms/"+entry.Name())
+	}
+	if len(paths) == 0 {
+		return nil, fmt.Errorf("no embedded platform bindings were found")
+	}
+	sort.Strings(paths)
+	return paths, nil
 }
 
 func (b Bundle) Resolve(platform model.PlatformInfo) ([]model.ResolvedRule, error) {

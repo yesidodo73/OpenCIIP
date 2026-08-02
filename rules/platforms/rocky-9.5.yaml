@@ -1,0 +1,32 @@
+schema_version: 1
+id: rocky-linux-9.5
+priority: 300
+selector:
+  id: rocky
+  version: "9.5"
+  architecture: amd64
+scan_support: tested
+platform_verification:
+  state: verified
+  environments:
+    - Rocky Linux 9.5 amd64
+  verified_at: "2026-08-02T14:58:30.339056Z"
+bindings:
+  - rule_id: U-19
+    verification:
+      state: verified
+      environments:
+        - Rocky Linux 9.5 amd64
+      verified_at: "2026-08-02T14:58:30.339056Z"
+  - rule_id: U-22
+    verification:
+      state: verified
+      environments:
+        - Rocky Linux 9.5 amd64
+      verified_at: "2026-08-02T14:58:30.339056Z"
+  - rule_id: U-29
+    verification:
+      state: verified
+      environments:
+        - Rocky Linux 9.5 amd64
+      verified_at: "2026-08-02T14:58:30.339056Z"

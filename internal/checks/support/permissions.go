@@ -8,7 +8,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/yesidodo73/OpenCIIP/internal/executor"
 	"github.com/yesidodo73/OpenCIIP/internal/model"
@@ -83,26 +82,28 @@ func InspectPermissions(
 	if metadata.Mode&(os.ModeSetuid|os.ModeSetgid|os.ModeSticky)&^policy.AllowedSpecialBits != 0 {
 		assessment.Violations = append(assessment.Violations, "특수 권한 비트가 설정됨")
 	}
-	if commands == nil {
-		return assessment, fmt.Errorf("command runner is required for ACL inspection")
+	aclInspection, aclErr := InspectPOSIXACL(
+		ctx,
+		files,
+		commands,
+		path,
+		policy.FollowFinalSymlink,
+		policy.CheckDefaultACL,
+		&metadata,
+	)
+	if aclInspection.Evidence.Source != "" {
+		assessment.Evidence = append(assessment.Evidence, aclInspection.Evidence)
 	}
-	linkMode := "-P"
-	if policy.FollowFinalSymlink {
-		linkMode = "-L"
+	if aclErr != nil {
+		if IsACLToolUnavailable(aclErr) {
+			assessment.Unknowns = append(assessment.Unknowns, ACLInspectionUnavailableReason)
+			sort.Strings(assessment.Violations)
+			sort.Strings(assessment.Unknowns)
+			return assessment, nil
+		}
+		return assessment, aclErr
 	}
-	spec := executor.Spec{
-		Name: "getfacl", Arguments: []string{"-c", "-p", "-n", linkMode, "--absolute-names", "--", path},
-		Timeout: 15 * time.Second, MaxOutput: 1 << 20,
-	}
-	result, err := commands.Run(ctx, spec)
-	if err != nil {
-		return assessment, err
-	}
-	assessment.Evidence = append(assessment.Evidence, CommandEvidence(spec, result))
-	if result.ExitCode != 0 || result.Truncated {
-		return assessment, fmt.Errorf("getfacl %s exit=%d truncated=%t", path, result.ExitCode, result.Truncated)
-	}
-	violations, namedAccessACL, err := permissionACLViolations(string(result.Stdout), metadata.UID, policy.AllowedMode, policy.CheckDefaultACL)
+	violations, namedAccessACL, err := permissionACLViolations(aclInspection.Content, metadata.UID, policy.AllowedMode, policy.CheckDefaultACL)
 	if err != nil {
 		return assessment, err
 	}

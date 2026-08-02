@@ -120,6 +120,35 @@ func TestRegistryEvaluateRejectedDoesNotInvokeEvaluator(t *testing.T) {
 	}
 }
 
+func TestRegistryEvaluateCopiesDisplayDetailsWithoutChangingObserved(t *testing.T) {
+	registry := NewRegistry()
+	if err := registry.Register("test.evaluator", func(context.Context, model.ResolvedRule, Environment) Outcome {
+		return Outcome{
+			Status: model.StatusFail, Summary: "취약", Observed: "legacy observed",
+			Details: []model.ResultDetail{{Label: "설정", Current: "yes", Expected: "no", Source: "/etc/test:1"}},
+		}
+	}); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+	result := registry.Evaluate(context.Background(), testResolvedRule(model.VerificationPending), Environment{})
+	if result.Observed != "legacy observed" || len(result.DisplayDetails) != 1 || result.DisplayDetails[0].Source != "/etc/test:1" {
+		t.Fatalf("result observed/details = %q/%#v", result.Observed, result.DisplayDetails)
+	}
+}
+
+func TestRegistryEvaluateBuildsStructuredFallbackWithoutParsingObserved(t *testing.T) {
+	registry := NewRegistry()
+	if err := registry.Register("test.evaluator", func(context.Context, model.ResolvedRule, Environment) Outcome {
+		return Outcome{Status: model.StatusPass, Summary: "양호", Observed: "value=a; value=b", Expected: "value=c"}
+	}); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+	result := registry.Evaluate(context.Background(), testResolvedRule(model.VerificationPending), Environment{})
+	if len(result.DisplayDetails) != 1 || result.DisplayDetails[0].Current != "value=a; value=b" || result.DisplayDetails[0].Expected != "value=c" {
+		t.Fatalf("fallback details = %#v", result.DisplayDetails)
+	}
+}
+
 func TestRegistryEvaluateMasksPanic(t *testing.T) {
 	t.Parallel()
 	registry := NewRegistry()

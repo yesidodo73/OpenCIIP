@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"reflect"
 	"regexp"
 	"sort"
 	"strings"
@@ -18,8 +19,9 @@ import (
 const maxRuleFileSize = 4 << 20
 
 var (
-	bindingRuleIDPattern = regexp.MustCompile(`^U-[0-9]{2}$`)
-	versionMajorPattern  = regexp.MustCompile(`^(0|[1-9][0-9]*)$`)
+	bindingRuleIDPattern      = regexp.MustCompile(`^U-[0-9]{2}$`)
+	versionMajorPattern       = regexp.MustCompile(`^(0|[1-9][0-9]*)$`)
+	exactSelectorTokenPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._+-]{0,127}$`)
 )
 
 type Loader struct {
@@ -117,15 +119,10 @@ func validateBindingLayer(layer model.BindingLayer) error {
 	}
 	if layer.PlatformVerification != nil {
 		if !isExactPlatformSelector(layer.Selector) {
-			return fmt.Errorf("binding layer %s platform verification requires exact id and version selectors without version_major", layer.ID)
+			return fmt.Errorf("binding layer %s platform verification requires canonical lowercase ASCII id, exact version, and architecture selectors without version_major", layer.ID)
 		}
 		if err := validateVerification(*layer.PlatformVerification); err != nil {
 			return fmt.Errorf("binding layer %s platform verification: %w", layer.ID, err)
-		}
-	}
-	if layer.Defaults.Verification != nil {
-		if err := validateVerification(*layer.Defaults.Verification); err != nil {
-			return fmt.Errorf("binding layer %s default verification: %w", layer.ID, err)
 		}
 	}
 	seen := make(map[string]struct{}, len(layer.Bindings))
@@ -141,6 +138,9 @@ func validateBindingLayer(layer model.BindingLayer) error {
 			return fmt.Errorf("binding %s has an empty evaluator override", binding.RuleID)
 		}
 		if binding.Verification != nil {
+			if !isExactPlatformSelector(layer.Selector) {
+				return fmt.Errorf("binding %s verification requires an exact id, version, and architecture selector without version_major", binding.RuleID)
+			}
 			if err := validateVerification(*binding.Verification); err != nil {
 				return fmt.Errorf("binding %s verification: %w", binding.RuleID, err)
 			}
@@ -168,26 +168,120 @@ func validSelector(selector model.PlatformSelector) bool {
 }
 
 func isExactPlatformSelector(selector model.PlatformSelector) bool {
-	return selector.ID != "" && selector.Version != "" && selector.VersionMajor == ""
+	return selector.OS == "" && selector.Family == "" && selector.VersionMajor == "" &&
+		exactSelectorTokenPattern.MatchString(selector.ID) &&
+		exactSelectorTokenPattern.MatchString(selector.Version) &&
+		exactSelectorTokenPattern.MatchString(selector.Architecture)
 }
 
 func isExactTestedPlatformSelector(selector model.PlatformSelector) bool {
-	return isExactPlatformSelector(selector) && selector.Architecture != ""
+	return isExactPlatformSelector(selector)
 }
 
 func validateVerification(verification model.Verification) error {
 	return verification.Validate()
 }
 
+// validateRemediationSelectorSet rejects declarations that would leave the
+// automatic-remediation authority dependent on layer priority or lexical ID
+// ordering. Scan-only bindings may still overlap and merge normally.
+func validateRemediationSelectorSet(layers []model.BindingLayer) error {
+	layerIDs := make(map[string]struct{}, len(layers))
+	platformOwners := make(map[string]string)
+	ruleOwners := make(map[string]map[string]string)
+
+	for _, layer := range layers {
+		if err := validateBindingLayer(layer); err != nil {
+			return err
+		}
+		if _, duplicate := layerIDs[layer.ID]; duplicate {
+			return fmt.Errorf("duplicate binding layer id %q", layer.ID)
+		}
+		layerIDs[layer.ID] = struct{}{}
+
+		if layer.PlatformVerification == nil && !hasRuleVerification(layer.Bindings) {
+			continue
+		}
+		platformKey := exactRemediationPlatformKey(layer.Selector)
+		if layer.PlatformVerification != nil {
+			if owner, duplicate := platformOwners[platformKey]; duplicate {
+				return fmt.Errorf(
+					"platform verification selectors in layers %s and %s target the same exact platform",
+					owner,
+					layer.ID,
+				)
+			}
+			platformOwners[platformKey] = layer.ID
+		}
+
+		if ruleOwners[platformKey] == nil {
+			ruleOwners[platformKey] = make(map[string]string)
+		}
+		for _, binding := range layer.Bindings {
+			if binding.Verification == nil {
+				continue
+			}
+			if owner, duplicate := ruleOwners[platformKey][binding.RuleID]; duplicate {
+				return fmt.Errorf(
+					"%s verification selectors in layers %s and %s target the same exact platform",
+					binding.RuleID,
+					owner,
+					layer.ID,
+				)
+			}
+			ruleOwners[platformKey][binding.RuleID] = layer.ID
+		}
+	}
+	return nil
+}
+
+func hasRuleVerification(bindings []model.RuleBinding) bool {
+	for _, binding := range bindings {
+		if binding.Verification != nil {
+			return true
+		}
+	}
+	return false
+}
+
+func exactRemediationPlatformKey(selector model.PlatformSelector) string {
+	return selector.ID + "\x00" + selector.Version + "\x00" + selector.Architecture
+}
+
 // Resolve applies matching layers in ascending priority order. Layer IDs break
 // priority ties so the same inputs always produce the same effective rules.
 func Resolve(catalog model.Catalog, layers []model.BindingLayer, platform model.PlatformInfo) ([]model.ResolvedRule, error) {
+	if err := validateRemediationSelectorSet(layers); err != nil {
+		return nil, fmt.Errorf("validate remediation selectors: %w", err)
+	}
 	matching, err := matchingLayers(layers, platform)
 	if err != nil {
 		return nil, err
 	}
+	resolved, _, err := resolveMatchingRules(catalog, matching)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]model.ResolvedRule, 0, len(resolved))
+	for _, rule := range resolved {
+		result = append(result, rule)
+	}
+	return model.SortedRules(result), nil
+}
 
+type ruleVerificationProvenance struct {
+	SourceLayerID      string
+	SourceSelector     model.PlatformSelector
+	SourceVerification model.Verification
+	InvalidatedBy      string
+}
+
+func resolveMatchingRules(
+	catalog model.Catalog,
+	matching []model.BindingLayer,
+) (map[string]model.ResolvedRule, map[string]ruleVerificationProvenance, error) {
 	resolved := make(map[string]model.ResolvedRule, len(catalog.Rules))
+	provenance := make(map[string]ruleVerificationProvenance, len(catalog.Rules))
 	for _, definition := range catalog.Rules {
 		resolved[definition.ID] = model.ResolvedRule{
 			RuleDefinition: cloneDefinition(definition),
@@ -199,52 +293,139 @@ func Resolve(catalog model.Catalog, layers []model.BindingLayer, platform model.
 	}
 
 	for _, layer := range matching {
-		if layer.Defaults.Applicable != nil || layer.Defaults.Verification != nil {
+		if layer.Defaults.Applicable != nil {
 			for id, rule := range resolved {
-				if layer.Defaults.Applicable != nil {
-					rule.Applicable = *layer.Defaults.Applicable
-				}
-				if layer.Defaults.Verification != nil {
-					rule.Verification = *layer.Defaults.Verification
-					rule.Verification.Environments = append([]string(nil), layer.Defaults.Verification.Environments...)
+				changed := rule.Applicable != *layer.Defaults.Applicable
+				rule.Applicable = *layer.Defaults.Applicable
+				ruleProvenance := provenance[id]
+				if changed {
+					invalidateVerifiedRule(&rule, &ruleProvenance, layer.ID)
 				}
 				rule.BindingSources = append(rule.BindingSources, layer.ID)
 				resolved[id] = rule
+				provenance[id] = ruleProvenance
 			}
 		}
 		for _, binding := range layer.Bindings {
 			rule, exists := resolved[binding.RuleID]
 			if !exists {
-				return nil, fmt.Errorf("binding layer %s references unknown rule %s", layer.ID, binding.RuleID)
+				return nil, nil, fmt.Errorf("binding layer %s references unknown rule %s", layer.ID, binding.RuleID)
 			}
-			if binding.Evaluator != nil {
-				rule.Evaluator = strings.TrimSpace(*binding.Evaluator)
-			}
-			if binding.Parameters != nil {
-				if rule.Parameters == nil {
-					rule.Parameters = make(map[string]any)
-				}
-				for key, value := range binding.Parameters {
-					rule.Parameters[key] = cloneValue(value)
-				}
-			}
-			if binding.Applicable != nil {
-				rule.Applicable = *binding.Applicable
+			ruleProvenance := provenance[binding.RuleID]
+			if applyRuleBindingSemantics(&rule, binding) {
+				invalidateVerifiedRule(&rule, &ruleProvenance, layer.ID)
 			}
 			if binding.Verification != nil {
 				rule.Verification = *binding.Verification
 				rule.Verification.Environments = append([]string(nil), binding.Verification.Environments...)
+				ruleProvenance = ruleVerificationProvenance{
+					SourceLayerID:      layer.ID,
+					SourceSelector:     layer.Selector,
+					SourceVerification: rule.Verification,
+				}
 			}
 			rule.BindingSources = append(rule.BindingSources, layer.ID)
 			resolved[binding.RuleID] = rule
+			provenance[binding.RuleID] = ruleProvenance
 		}
 	}
+	return resolved, provenance, nil
+}
 
-	result := make([]model.ResolvedRule, 0, len(resolved))
-	for _, rule := range resolved {
-		result = append(result, rule)
+func applyRuleBindingSemantics(rule *model.ResolvedRule, binding model.RuleBinding) bool {
+	changed := false
+	if binding.Evaluator != nil {
+		evaluator := strings.TrimSpace(*binding.Evaluator)
+		changed = changed || rule.Evaluator != evaluator
+		rule.Evaluator = evaluator
 	}
-	return model.SortedRules(result), nil
+	if binding.Parameters != nil {
+		if rule.Parameters == nil {
+			rule.Parameters = make(map[string]any)
+		}
+		for key, value := range binding.Parameters {
+			current, exists := rule.Parameters[key]
+			if !exists || !reflect.DeepEqual(current, value) {
+				changed = true
+			}
+			rule.Parameters[key] = cloneValue(value)
+		}
+	}
+	if binding.Applicable != nil {
+		changed = changed || rule.Applicable != *binding.Applicable
+		rule.Applicable = *binding.Applicable
+	}
+	return changed
+}
+
+func invalidateVerifiedRule(
+	rule *model.ResolvedRule,
+	provenance *ruleVerificationProvenance,
+	layerID string,
+) {
+	if provenance.SourceVerification.State != model.VerificationVerified ||
+		provenance.InvalidatedBy != "" {
+		return
+	}
+	provenance.InvalidatedBy = layerID
+	rule.Verification = model.Verification{State: model.VerificationPending}
+}
+
+// ValidateRemediationRuleProvenance proves that a verified effective rule was
+// written by the single exact platform layer authorized for that rule.
+func (b Bundle) ValidateRemediationRuleProvenance(platform model.PlatformInfo, resolved model.ResolvedRule) error {
+	if resolved.Verification.State != model.VerificationVerified {
+		return fmt.Errorf("rule %s is not verified", resolved.ID)
+	}
+	if err := validateRemediationSelectorSet(b.Layers); err != nil {
+		return fmt.Errorf("validate remediation selectors: %w", err)
+	}
+	matching, err := matchingLayers(b.Layers, platform)
+	if err != nil {
+		return err
+	}
+	replayed, provenance, err := resolveMatchingRules(b.Catalog, matching)
+	if err != nil {
+		return err
+	}
+	effective, exists := replayed[resolved.ID]
+	if !exists {
+		return fmt.Errorf("rule %s is not present in the current catalog", resolved.ID)
+	}
+	source := provenance[resolved.ID]
+	if source.SourceLayerID == "" {
+		return fmt.Errorf("rule %s has no exact platform verification provenance", resolved.ID)
+	}
+	if source.InvalidatedBy != "" {
+		return fmt.Errorf(
+			"rule %s verification from %s was invalidated by later semantic changes in %s",
+			resolved.ID,
+			source.SourceLayerID,
+			source.InvalidatedBy,
+		)
+	}
+	if source.SourceVerification.State != model.VerificationVerified ||
+		effective.Verification.State != model.VerificationVerified {
+		return fmt.Errorf("rule %s exact platform verification is not effective", resolved.ID)
+	}
+	if !isExactPlatformSelector(source.SourceSelector) ||
+		!selectorMatches(source.SourceSelector, platform) {
+		return fmt.Errorf("rule %s verification provenance is not bound to the current exact platform", resolved.ID)
+	}
+	sourceRecorded := false
+	for _, bindingSource := range resolved.BindingSources {
+		if bindingSource == source.SourceLayerID {
+			sourceRecorded = true
+			break
+		}
+	}
+	if !sourceRecorded {
+		return fmt.Errorf("rule %s does not record exact verification source %s", resolved.ID, source.SourceLayerID)
+	}
+	if !reflect.DeepEqual(effective, resolved) {
+		return fmt.Errorf("rule %s does not match the effective rule and verification provenance", resolved.ID)
+	}
+	return nil
 }
 
 func matchingLayers(layers []model.BindingLayer, platform model.PlatformInfo) ([]model.BindingLayer, error) {
