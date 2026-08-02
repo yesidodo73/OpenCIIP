@@ -1,0 +1,446 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/yesidodo73/OpenCIIP/schemas/os-support-evidence.schema.json",
+  "title": "OpenCIIP OS support evidence",
+  "$comment": "This schema is for normalized JSON output only. The Go normalizer defines canonical field order, sorted evidence arrays, compact JSON, and the final LF. Runtime validation also requires scan and remediation binary_sha256 values to match.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "artifact_stage",
+    "platform",
+    "environment",
+    "verified_at",
+    "captured_at",
+    "source",
+    "scan"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "artifact_stage": {
+      "enum": [
+        "candidate",
+        "final"
+      ]
+    },
+    "platform": {
+      "$ref": "#/$defs/platform"
+    },
+    "environment": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[0-9A-Za-z][0-9A-Za-z ._()+-]*$",
+      "not": {
+        "pattern": "(^|[^0-9])([0-9]{1,3}\\.){3}[0-9]{1,3}($|[^0-9])"
+      }
+    },
+    "verified_at": {
+      "oneOf": [
+        {
+          "const": ""
+        },
+        {
+          "type": "string",
+          "format": "date-time"
+        }
+      ]
+    },
+    "captured_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "source": {
+      "$ref": "#/$defs/source"
+    },
+    "scan": {
+      "$ref": "#/$defs/scan"
+    },
+    "remediation": {
+      "$ref": "#/$defs/remediation"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "artifact_stage": {
+            "const": "candidate"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "verified_at": {
+            "const": ""
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "artifact_stage": {
+            "const": "final"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "verified_at": {
+            "type": "string",
+            "minLength": 1,
+            "format": "date-time"
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "exactToken": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._+-]{0,127}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "platform": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "os",
+        "id",
+        "version",
+        "architecture"
+      ],
+      "properties": {
+        "os": {
+          "const": "linux"
+        },
+        "id": {
+          "$ref": "#/$defs/exactToken"
+        },
+        "version": {
+          "$ref": "#/$defs/exactToken"
+        },
+        "architecture": {
+          "$ref": "#/$defs/exactToken"
+        }
+      }
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "tool_version",
+        "tool_commit",
+        "binary_sha256",
+        "rule_bundle_sha256",
+        "promotion_semantics_sha256"
+      ],
+      "properties": {
+        "tool_version": {
+          "type": "string",
+          "pattern": "^[0-9A-Za-z][0-9A-Za-z.+_-]{0,63}$"
+        },
+        "tool_commit": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "binary_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "rule_bundle_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "promotion_semantics_sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "scan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "read_only",
+        "complete",
+        "system_state_unchanged",
+        "result_count",
+        "unique_rule_count",
+        "error_count",
+        "status_counts",
+        "metadata_sha256",
+        "results_sha256",
+        "archive_sha256",
+        "archive_size_bytes"
+      ],
+      "properties": {
+        "read_only": {
+          "const": true
+        },
+        "complete": {
+          "const": true
+        },
+        "system_state_unchanged": {
+          "const": true
+        },
+        "result_count": {
+          "const": 67
+        },
+        "unique_rule_count": {
+          "const": 67
+        },
+        "error_count": {
+          "const": 0
+        },
+        "status_counts": {
+          "$ref": "#/$defs/statusCounts"
+        },
+        "metadata_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "results_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "archive_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "archive_size_bytes": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "statusCounts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "fail",
+        "unknown",
+        "error",
+        "pass",
+        "not_applicable",
+        "skipped"
+      ],
+      "properties": {
+        "fail": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "unknown": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "error": {
+          "const": 0
+        },
+        "pass": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "not_applicable": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "skipped": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "remediationRule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "rule_id",
+        "apply_verified",
+        "recheck_status",
+        "item_rollback_verified",
+        "run_rollback_verified"
+      ],
+      "properties": {
+        "rule_id": {
+          "enum": [
+            "U-19",
+            "U-22",
+            "U-29"
+          ]
+        },
+        "apply_verified": {
+          "const": true
+        },
+        "recheck_status": {
+          "const": "PASS"
+        },
+        "item_rollback_verified": {
+          "const": true
+        },
+        "run_rollback_verified": {
+          "const": true
+        }
+      }
+    },
+    "archive": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "scenario",
+        "result",
+        "archive_sha256",
+        "manifest_sha256",
+        "size_bytes"
+      ],
+      "properties": {
+        "scenario": {
+          "enum": [
+            "item_then_run_rollback",
+            "reboot_then_run_rollback"
+          ]
+        },
+        "result": {
+          "const": "PASS"
+        },
+        "archive_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "manifest_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "size_bytes": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "remediation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "binary_sha256",
+        "runner_sha256",
+        "rules",
+        "reboot",
+        "cleanup_verified",
+        "archives"
+      ],
+      "properties": {
+        "binary_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "runner_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "rules": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 3,
+          "prefixItems": [
+            {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/remediationRule"
+                },
+                {
+                  "properties": {
+                    "rule_id": {
+                      "const": "U-19"
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/remediationRule"
+                },
+                {
+                  "properties": {
+                    "rule_id": {
+                      "const": "U-22"
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/remediationRule"
+                },
+                {
+                  "properties": {
+                    "rule_id": {
+                      "const": "U-29"
+                    }
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        "reboot": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "performed",
+            "boot_id_changed",
+            "rollback_verified"
+          ],
+          "properties": {
+            "performed": {
+              "const": true
+            },
+            "boot_id_changed": {
+              "const": true
+            },
+            "rollback_verified": {
+              "const": true
+            }
+          }
+        },
+        "cleanup_verified": {
+          "const": true
+        },
+        "archives": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "prefixItems": [
+            {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/archive"
+                },
+                {
+                  "properties": {
+                    "scenario": {
+                      "const": "item_then_run_rollback"
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/archive"
+                },
+                {
+                  "properties": {
+                    "scenario": {
+                      "const": "reboot_then_run_rollback"
+                    }
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      }
+    }
+  }
+}

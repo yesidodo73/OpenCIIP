@@ -1,0 +1,18 @@
+schema_version: 1
+selector:
+  id: example
+  version: "1.0"
+  architecture: amd64
+family: unknown
+display_name: Example Linux
+display_version: "1.0"
+os_release: |
+  NAME="Example Linux"
+  ID=example
+  ID_LIKE=example
+  VERSION_ID="1.0"
+  PRETTY_NAME="Example Linux 1.0"
+
+# /etc/os-release보다 더 정확한 버전을 확인하는 배포판에서만 사용하세요.
+# centos_release: |
+#   CentOS Linux release 8.5.2111

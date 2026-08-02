@@ -123,6 +123,78 @@ func TestDetectFamilyUsesDistributionFactsOnly(t *testing.T) {
 	}
 }
 
+func TestDetectorRefineCentOSVersionID(t *testing.T) {
+	tests := []struct {
+		name      string
+		id        string
+		versionID string
+		release   string
+		want      string
+	}{
+		{
+			name:      "CentOS Linux point release",
+			id:        "centos",
+			versionID: "8",
+			release:   "CentOS Linux release 8.5.2111\n",
+			want:      "8.5.2111",
+		},
+		{
+			name:      "CentOS Stream is not treated as a point release",
+			id:        "centos",
+			versionID: "8",
+			release:   "CentOS Stream release 8\n",
+			want:      "8",
+		},
+		{
+			name:      "major mismatch is rejected",
+			id:        "centos",
+			versionID: "8",
+			release:   "CentOS Linux release 7.9.2009\n",
+			want:      "8",
+		},
+		{
+			name:      "malformed point release is rejected",
+			id:        "centos",
+			versionID: "8",
+			release:   "CentOS Linux release 8.5\n",
+			want:      "8",
+		},
+		{
+			name:      "other distributions are unchanged",
+			id:        "rocky",
+			versionID: "9.8",
+			release:   "CentOS Linux release 8.5.2111\n",
+			want:      "9.8",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			reader := &detectorReader{files: map[string][]byte{
+				"/etc/centos-release": []byte(test.release),
+			}}
+			got := NewDetector(reader).refineCentOSVersionID(
+				context.Background(),
+				test.id,
+				test.versionID,
+			)
+			if got != test.want {
+				t.Fatalf("refineCentOSVersionID() = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestDetectorRefineCentOSVersionIDKeepsMajorWhenReleaseFileIsUnavailable(t *testing.T) {
+	reader := &detectorReader{readErrors: map[string]error{
+		"/etc/centos-release": os.ErrNotExist,
+	}}
+	got := NewDetector(reader).refineCentOSVersionID(context.Background(), "centos", "8")
+	if got != "8" {
+		t.Fatalf("refineCentOSVersionID() = %q, want %q", got, "8")
+	}
+}
+
 func TestDetectorDetectInitUsesPathThenPID1Fact(t *testing.T) {
 	tests := []struct {
 		name         string

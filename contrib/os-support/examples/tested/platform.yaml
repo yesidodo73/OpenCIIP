@@ -1,0 +1,9 @@
+schema_version: 1
+id: example-linux-1.0
+priority: 300
+selector:
+  id: example
+  version: "1.0"
+  architecture: amd64
+scan_support: tested
+bindings: []

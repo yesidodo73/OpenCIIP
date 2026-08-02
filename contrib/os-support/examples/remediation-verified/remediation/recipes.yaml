@@ -1,0 +1,68 @@
+schema_version: 1
+recipes:
+  - id: u19-hosts-permissions-example-1.0-amd64
+    guide_year: 2026
+    rule_id: U-19
+    selector:
+      id: example
+      version: "1.0"
+      architecture: amd64
+    verification:
+      state: verified
+      environments:
+        - Example Linux 1.0 amd64
+      verified_at: "2026-01-02T03:04:05Z"
+      evidence_sha256:
+        - a3f7c721fc684e46bdad501149df946c8eee899ef29fd708da8fae3a467ac1ea
+    risk: CAUTION
+    expected_impact: "/etc/hosts의 내용은 유지하고 소유자와 권한만 검증한 범위 안에서 변경합니다."
+    operations:
+      - type: preserve_content_file_metadata
+        path: /etc/hosts
+        allowed_owners: [root]
+        remediation_owner: root
+        maximum_mode: "0644"
+  - id: u22-services-permissions-example-1.0-amd64
+    guide_year: 2026
+    rule_id: U-22
+    selector:
+      id: example
+      version: "1.0"
+      architecture: amd64
+    verification:
+      state: verified
+      environments:
+        - Example Linux 1.0 amd64
+      verified_at: "2026-01-02T03:04:05Z"
+      evidence_sha256:
+        - a3f7c721fc684e46bdad501149df946c8eee899ef29fd708da8fae3a467ac1ea
+    risk: CAUTION
+    expected_impact: "/etc/services의 내용은 유지하고 소유자와 권한만 검증한 범위 안에서 변경합니다."
+    operations:
+      - type: preserve_content_file_metadata
+        path: /etc/services
+        allowed_owners: [root, bin, sys]
+        remediation_owner: root
+        maximum_mode: "0644"
+  - id: u29-hosts-lpd-permissions-example-1.0-amd64
+    guide_year: 2026
+    rule_id: U-29
+    selector:
+      id: example
+      version: "1.0"
+      architecture: amd64
+    verification:
+      state: verified
+      environments:
+        - Example Linux 1.0 amd64
+      verified_at: "2026-01-02T03:04:05Z"
+      evidence_sha256:
+        - a3f7c721fc684e46bdad501149df946c8eee899ef29fd708da8fae3a467ac1ea
+    risk: CAUTION
+    expected_impact: "/etc/hosts.lpd의 내용은 유지하고 소유자와 권한만 검증한 범위 안에서 변경합니다."
+    operations:
+      - type: preserve_content_file_metadata
+        path: /etc/hosts.lpd
+        allowed_owners: [root]
+        remediation_owner: root
+        maximum_mode: "0600"

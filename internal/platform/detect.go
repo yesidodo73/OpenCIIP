@@ -52,6 +52,7 @@ func (d *Detector) Detect(ctx context.Context) (model.PlatformInfo, []string, er
 	info.ID = strings.ToLower(values["ID"])
 	info.Name = firstNonEmpty(values["PRETTY_NAME"], values["NAME"], info.ID)
 	info.VersionID = values["VERSION_ID"]
+	info.VersionID = d.refineCentOSVersionID(ctx, info.ID, info.VersionID)
 	info.Family = detectFamily(info.ID, values["ID_LIKE"])
 
 	if kernel, readErr := d.readTrimmed(ctx, "/proc/sys/kernel/osrelease"); readErr == nil {
@@ -63,6 +64,51 @@ func (d *Detector) Detect(ctx context.Context) (model.PlatformInfo, []string, er
 	info.PackageManager = d.detectPackageManager()
 
 	return info, warnings, nil
+}
+
+func (d *Detector) refineCentOSVersionID(ctx context.Context, id, versionID string) string {
+	if id != "centos" || !isDecimal(versionID) {
+		return versionID
+	}
+	release, err := d.readTrimmed(ctx, "/etc/centos-release")
+	if err != nil {
+		return versionID
+	}
+	refined, ok := parseCentOSLinuxRelease(release)
+	if !ok || strings.SplitN(refined, ".", 2)[0] != versionID {
+		return versionID
+	}
+	return refined
+}
+
+func parseCentOSLinuxRelease(release string) (string, bool) {
+	const prefix = "CentOS Linux release "
+	version, ok := strings.CutPrefix(release, prefix)
+	if !ok || strings.ContainsAny(version, " \t\r\n") {
+		return "", false
+	}
+	parts := strings.Split(version, ".")
+	if len(parts) != 3 {
+		return "", false
+	}
+	for _, part := range parts {
+		if !isDecimal(part) {
+			return "", false
+		}
+	}
+	return version, true
+}
+
+func isDecimal(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, character := range value {
+		if character < '0' || character > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func (d *Detector) detectInit(ctx context.Context, warnings []string) (string, []string) {
