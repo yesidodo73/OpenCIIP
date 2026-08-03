@@ -65,15 +65,33 @@ func (w *Writer) WriteScan(ctx context.Context, run model.ScanRun) (string, erro
 		}
 		return "", fmt.Errorf("verify report root: %w", err)
 	}
+	if err := validateReportDirectory(w.basePath, openedBase); err != nil {
+		return "", fmt.Errorf("verify report root: %w", err)
+	}
 
 	name := reportDirectoryName(run.Metadata)
 	partial := "." + name + ".partial"
 	if err := base.Mkdir(partial, 0o700); err != nil {
 		return "", fmt.Errorf("create report directory: %w", err)
 	}
+	partialInfo, err := base.Lstat(partial)
+	if err != nil {
+		return "", fmt.Errorf("inspect partial report directory: %w", err)
+	}
+	if err := validatePrivateReportDirectory(filepath.Join(w.basePath, partial), partialInfo); err != nil {
+		return "", err
+	}
 	runRoot, err := base.OpenRoot(partial)
 	if err != nil {
 		return "", fmt.Errorf("open partial report directory: %w", err)
+	}
+	openedPartial, err := runRoot.Stat(".")
+	if err != nil || !os.SameFile(partialInfo, openedPartial) {
+		_ = runRoot.Close()
+		if err == nil {
+			err = fmt.Errorf("partial report directory changed while opening")
+		}
+		return "", fmt.Errorf("verify partial report directory: %w", err)
 	}
 	writeErr := w.writeScanFiles(ctx, runRoot, run)
 	closeErr := runRoot.Close()
@@ -86,9 +104,29 @@ func (w *Writer) WriteScan(ctx context.Context, run model.ScanRun) (string, erro
 	if err := base.Rename(partial, name); err != nil {
 		return filepath.Join(w.basePath, partial), fmt.Errorf("finalize report directory: %w", err)
 	}
+	finalInfo, err := base.Lstat(name)
+	if err != nil || !os.SameFile(partialInfo, finalInfo) {
+		if err == nil {
+			err = fmt.Errorf("final report directory changed while renaming")
+		}
+		return filepath.Join(w.basePath, name), fmt.Errorf("verify final report directory: %w", err)
+	}
+	if err := validatePrivateReportDirectory(filepath.Join(w.basePath, name), finalInfo); err != nil {
+		return filepath.Join(w.basePath, name), err
+	}
 	if directory, err := base.Open("."); err == nil {
 		_ = directory.Sync()
 		_ = directory.Close()
+	}
+	currentBase, err := os.Lstat(w.basePath)
+	if err != nil || !os.SameFile(w.baseInfo, currentBase) {
+		if err == nil {
+			err = fmt.Errorf("report root changed while writing")
+		}
+		return filepath.Join(w.basePath, name), fmt.Errorf("verify report root after writing: %w", err)
+	}
+	if err := validateReportDirectory(w.basePath, currentBase); err != nil {
+		return filepath.Join(w.basePath, name), fmt.Errorf("verify report root after writing: %w", err)
 	}
 	return filepath.Join(w.basePath, name), nil
 }
@@ -225,18 +263,14 @@ func validateReportDirectory(path string, info os.FileInfo) error {
 	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
 		return fmt.Errorf("report root must be a real directory: %s", path)
 	}
-	if info.Mode().Perm()&0o022 != 0 {
-		return fmt.Errorf("report root must not be writable by group or other users: %s", path)
+	if err := validateReportDirectoryAccess(path, info); err != nil {
+		return err
 	}
 	if err := validateReportAncestorChain(filepath.Dir(path)); err != nil {
 		return err
 	}
-	resolved, err := filepath.EvalSymlinks(path)
-	if err != nil || filepath.Clean(resolved) != filepath.Clean(path) {
-		if err == nil {
-			err = fmt.Errorf("path contains a symbolic link")
-		}
-		return fmt.Errorf("resolve report root: %w", err)
+	if err := validateReportDirectoryPath(path); err != nil {
+		return err
 	}
 	return nil
 }
@@ -264,9 +298,9 @@ func validateReportAncestorChain(path string) error {
 	}
 	for _, candidate := range paths {
 		info, inspectErr := os.Lstat(candidate)
-		if inspectErr != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() || info.Mode().Perm()&0o022 != 0 {
+		if inspectErr != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
 			if inspectErr == nil {
-				inspectErr = fmt.Errorf("ancestor is not a real, non-writable directory")
+				inspectErr = fmt.Errorf("ancestor is not a real directory")
 			}
 			return fmt.Errorf("unsafe report root ancestor %s: %w", candidate, inspectErr)
 		}
