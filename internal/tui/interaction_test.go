@@ -152,6 +152,194 @@ func TestFilterInputOwnsShortcutKeysWhileEditing(t *testing.T) {
 	}
 }
 
+func TestEscapeQuitConfirmationRequiresRightSelection(t *testing.T) {
+	view := newModel(context.Background(), nil, nil, nil)
+	view.width = 100
+	view.height = 30
+	view.screen = screenResults
+
+	_, command := view.Update(specialKey(tea.KeyEscape))
+	if command != nil || !view.quitConfirmation || view.quitSelection != 0 {
+		t.Fatalf("initial quit confirmation = active %t, selection %d, command %v", view.quitConfirmation, view.quitSelection, command)
+	}
+	content := ansi.Strip(view.View().Content)
+	for _, expected := range []string{"정말 종료할까요?", "‹ 취소 ›", "종료", "←/→", "Enter"} {
+		if !strings.Contains(content, expected) {
+			t.Fatalf("quit confirmation is missing %q: %q", expected, content)
+		}
+	}
+
+	_, command = view.Update(specialKey(tea.KeyEnter))
+	if command == nil || view.quitConfirmation || view.screen != screenResults {
+		t.Fatalf("default cancel changed state: active %t, screen %d, command %v", view.quitConfirmation, view.screen, command)
+	}
+
+	view.Update(specialKey(tea.KeyEscape))
+	view.Update(specialKey(tea.KeyRight))
+	if view.quitSelection != 1 {
+		t.Fatalf("right key selection = %d, want exit", view.quitSelection)
+	}
+	content = ansi.Strip(view.View().Content)
+	if !strings.Contains(content, "‹ 종료 ›") || strings.Contains(content, "‹ 취소 ›") {
+		t.Fatalf("right-selected quit confirmation = %q", content)
+	}
+	_, command = view.Update(specialKey(tea.KeyEnter))
+	if command == nil || !view.quitConfirmation || view.quitSelection != 1 {
+		t.Fatalf("confirmed exit = active %t, selection %d, command %v", view.quitConfirmation, view.quitSelection, command)
+	}
+}
+
+func TestEscapeOpensQuitConfirmationOnEveryScreen(t *testing.T) {
+	for current := screenReady; current <= screenError; current++ {
+		t.Run(fmt.Sprintf("screen_%d", current), func(t *testing.T) {
+			view := newModel(context.Background(), nil, nil, nil)
+			view.screen = current
+
+			_, command := view.Update(specialKey(tea.KeyEscape))
+			if command != nil || !view.quitConfirmation || view.quitSelection != 0 {
+				t.Fatalf("escape from %d = active %t, selection %d, command %v", current, view.quitConfirmation, view.quitSelection, command)
+			}
+		})
+	}
+}
+
+func TestQNavigatesBackWithoutQuitting(t *testing.T) {
+	tests := []struct {
+		name string
+		from screen
+		to   screen
+	}{
+		{name: "options", from: screenOptions, to: screenReady},
+		{name: "picker", from: screenOptionPicker, to: screenOptions},
+		{name: "redaction confirmation", from: screenConfirmNoRedact, to: screenOptions},
+		{name: "results", from: screenResults, to: screenReady},
+		{name: "detail", from: screenDetail, to: screenResults},
+		{name: "failure policy", from: screenRemediationFailurePolicy, to: screenResults},
+		{name: "approval confirmation", from: screenRemediationConfirmApproval, to: screenRemediationPlan},
+		{name: "apply confirmation", from: screenRemediationConfirmApply, to: screenRemediationApproved},
+		{name: "status", from: screenRemediationStatus, to: screenResults},
+		{name: "rollback preview", from: screenRemediationRollbackPreview, to: screenRemediationStatus},
+		{name: "rollback confirmation", from: screenRemediationConfirmRollback, to: screenRemediationRollbackPreview},
+		{name: "scan error", from: screenError, to: screenOptions},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			view := newModel(context.Background(), nil, nil, nil)
+			view.screen = test.from
+			_, command := view.Update(printableKey("q"))
+			if command != nil || view.screen != test.to || view.quitConfirmation {
+				t.Fatalf("q from %d = screen %d, confirmation %t, command %v; want screen %d", test.from, view.screen, view.quitConfirmation, command, test.to)
+			}
+		})
+	}
+}
+
+func TestReadyQuitMenuUsesConfirmation(t *testing.T) {
+	view := newModel(context.Background(), nil, nil, nil)
+	view.readySelection = readyMenuQuit
+	_, command := view.Update(specialKey(tea.KeyEnter))
+	if command != nil || !view.quitConfirmation || view.quitSelection != 0 {
+		t.Fatalf("ready quit = active %t, selection %d, command %v", view.quitConfirmation, view.quitSelection, command)
+	}
+}
+
+func TestQCancelScanReturnsToOptionsAfterWorkerStops(t *testing.T) {
+	view := newModel(context.Background(), nil, nil, nil)
+	view.screen = screenScanning
+	_, cancel := context.WithCancel(context.Background())
+	view.cancelScan = cancel
+
+	_, command := view.Update(printableKey("q"))
+	if command != nil || !view.scanBackRequested {
+		t.Fatalf("scan back request = %t, command %v", view.scanBackRequested, command)
+	}
+	_, command = view.Update(scanCompleteMsg{err: context.Canceled})
+	if command != nil || view.screen != screenOptions || view.scanBackRequested {
+		t.Fatalf("canceled scan = screen %d, pending %t, command %v", view.screen, view.scanBackRequested, command)
+	}
+}
+
+func TestConfirmedExitWaitsForActiveScan(t *testing.T) {
+	view := newModel(context.Background(), nil, nil, nil)
+	view.screen = screenScanning
+	_, cancel := context.WithCancel(context.Background())
+	view.cancelScan = cancel
+	view.openQuitConfirmation()
+	view.quitSelection = 1
+
+	_, command := view.Update(specialKey(tea.KeyEnter))
+	if command != nil || !view.quitAfterAction {
+		t.Fatalf("active scan exit = pending %t, command %v", view.quitAfterAction, command)
+	}
+	_, command = view.Update(scanCompleteMsg{err: context.Canceled})
+	if command == nil || view.quitAfterAction {
+		t.Fatalf("completed scan exit = pending %t, command %v", view.quitAfterAction, command)
+	}
+}
+
+func TestConfirmedExitPreservesUnusedPlanUntilCancellation(t *testing.T) {
+	view := newModel(context.Background(), nil, nil, nil)
+	view.screen = screenRemediationPlanning
+	view.journal = &model.RemediationJournal{State: model.RunPlanned}
+	view.quitAfterAction = true
+
+	_, command := view.Update(remediationPlanMsg{err: context.Canceled})
+	if command != nil || view.screen != screenRemediationConfirmCancel || !view.quitAfterPlanCancel {
+		t.Fatalf("completed plan exit = screen %d, cancel pending %t, command %v", view.screen, view.quitAfterPlanCancel, command)
+	}
+	if view.journal == nil || view.journal.State != model.RunPlanned {
+		t.Fatalf("unused plan was discarded before cancellation: %#v", view.journal)
+	}
+}
+
+func TestConfirmedExitQuitsAfterUnusedPlanCancellation(t *testing.T) {
+	view := newModel(context.Background(), nil, nil, nil)
+	view.screen = screenRemediationCanceling
+	view.quitAfterPlanCancel = true
+
+	_, command := view.Update(remediationJournalMsg{
+		journal: &model.RemediationJournal{State: model.RunCanceled},
+	})
+	if command == nil || view.quitAfterPlanCancel {
+		t.Fatalf("completed plan cancellation = pending %t, command %v", view.quitAfterPlanCancel, command)
+	}
+}
+
+func TestFocusedInputsKeepQAndHandleEscapeLocally(t *testing.T) {
+	view := newModel(context.Background(), nil, nil, nil)
+	view.screen = screenResults
+	view.run.Results = []model.CheckResult{{RuleID: "U-01", Title: "root 계정", Status: model.StatusFail}}
+	view.updateItems()
+	view.Update(printableKey("/"))
+	view.Update(printableKey("q"))
+	if got := view.list.FilterValue(); got != "q" {
+		t.Fatalf("filter value = %q, want q", got)
+	}
+	view.Update(specialKey(tea.KeyEscape))
+	if !view.quitConfirmation || !view.list.SettingFilter() {
+		t.Fatalf("filter escape = confirmation %t, filtering %t", view.quitConfirmation, view.list.SettingFilter())
+	}
+	view.Update(specialKey(tea.KeyEnter))
+	view.Update(tea.KeyPressMsg(tea.Key{Code: 'g', Mod: tea.ModCtrl}))
+	if view.list.SettingFilter() {
+		t.Fatal("ctrl+g did not cancel result filter editing")
+	}
+
+	view = newModel(context.Background(), nil, nil, nil)
+	view.screen = screenOptions
+	view.optionIndex = optionReportDir
+	view.optionInput.Focus()
+	view.editingOption = true
+	view.Update(printableKey("q"))
+	if got := view.optionInput.Value(); got != "q" {
+		t.Fatalf("report path input = %q, want q", got)
+	}
+	view.Update(specialKey(tea.KeyEscape))
+	if !view.quitConfirmation || !view.editingOption {
+		t.Fatalf("editor escape = confirmation %t, editing %t", view.quitConfirmation, view.editingOption)
+	}
+}
+
 func TestResultItemTitleAndFilterValueRemainPlainAndIdentical(t *testing.T) {
 	item := resultItem{result: model.CheckResult{RuleID: "U-01", Title: "root 계정", Status: model.StatusFail}}
 	title := item.Title()

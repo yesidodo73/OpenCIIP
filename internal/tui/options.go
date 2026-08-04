@@ -175,7 +175,7 @@ func (m *Model) updateOptions(key string) (tea.Model, tea.Cmd) {
 		}
 		m.optionErr = nil
 		return m, m.startScan()
-	case "esc", "backspace":
+	case "backspace":
 		m.optionErr = nil
 		m.screen = screenReady
 	}
@@ -192,6 +192,9 @@ func (m *Model) updateOptionEditor(message tea.KeyPressMsg) (tea.Model, tea.Cmd)
 		_, m.optionErr = m.scanSettings.engineOptions()
 		return m, nil
 	case "esc":
+		m.openQuitConfirmation()
+		return m, nil
+	case "ctrl+g":
 		m.editingOption = false
 		m.optionInput.Blur()
 		m.optionInput.SetValue("")
@@ -438,7 +441,7 @@ func (m *Model) updateOptionPicker(key string) (tea.Model, tea.Cmd) {
 		if m.applyOptionPicker() {
 			m.screen = screenOptions
 		}
-	case "esc", "backspace":
+	case "backspace":
 		m.screen = screenOptions
 	}
 	return m, nil
@@ -566,7 +569,7 @@ func (m *Model) optionPickerView() string {
 	builder.WriteString("\n")
 	builder.WriteString(optionSectionDivider("조작", contentWidth))
 	builder.WriteString("\n")
-	builder.WriteString(optionKeyLegend("↑↓", "이동", "Space", "선택", "Enter", "적용", "Esc", "취소"))
+	builder.WriteString(optionKeyLegend("↑↓", "이동", "Space", "선택", "Enter", "적용", "q", "뒤로", "Esc", "종료"))
 	return m.centerOptionContent(builder.String(), contentWidth)
 }
 
@@ -613,7 +616,7 @@ func (m *Model) optionsView() string {
 		builder.WriteString("\n")
 		builder.WriteString(selectedRowStyle.Copy().Width(contentWidth).Render(accentStyle.Render("› ") + sanitizedTextInputView(m.optionInput)))
 		builder.WriteString("\n\n")
-		builder.WriteString(optionKeyLegend("Enter", "저장", "Esc", "취소", "Ctrl+U", "지우기"))
+		builder.WriteString(optionKeyLegend("Enter", "저장", "Ctrl+G", "취소", "Ctrl+U", "지우기", "Esc", "종료"))
 	} else {
 		builder.WriteString("\n")
 		builder.WriteString(optionSectionDivider("설명", contentWidth))
@@ -624,7 +627,7 @@ func (m *Model) optionsView() string {
 			builder.WriteString(errorStyle.Render("! " + presentation.Sanitize(m.optionErr.Error())))
 		}
 		builder.WriteString("\n\n")
-		builder.WriteString(optionKeyLegend("↑↓", "이동", "←→", "변경", "Enter", "상세", "S", "점검", "R", "기본값", "Esc", "뒤로"))
+		builder.WriteString(optionKeyLegend("↑↓", "이동", "←→", "변경", "Enter", "상세", "S", "점검", "R", "기본값", "q", "뒤로", "Esc", "종료"))
 	}
 	return m.centerOptionContent(builder.String(), contentWidth)
 }
@@ -879,6 +882,6 @@ func (m *Model) confirmNoRedactView() string {
 			warningStyle.Render("보고서에 민감정보가 포함될 수 있습니다.")+"\n\n"+
 				"비밀번호 해시, 토큰, community string, 설정 원문 등이 마스킹되지 않을 수 있습니다.\n"+
 				"안전한 저장 경로와 접근 권한을 확인하세요.",
-		) + "\n\n" + optionKeyLegend("Y", "마스킹 해제", "N", "유지", "Esc", "뒤로")
+		) + "\n\n" + optionKeyLegend("Y", "마스킹 해제", "N 또는 q", "유지", "Esc", "종료")
 	return m.centerOptionContent(content, contentWidth)
 }

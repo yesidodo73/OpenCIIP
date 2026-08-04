@@ -187,6 +187,11 @@ type Model struct {
 	optionErr             error
 	optionPicker          optionPickerState
 	readySelection        int
+	quitConfirmation      bool
+	quitSelection         int
+	quitAfterAction       bool
+	quitAfterPlanCancel   bool
+	scanBackRequested     bool
 	remediationCandidates remediationCandidateEvaluator
 }
 
@@ -210,6 +215,10 @@ func newModel(ctx context.Context, scanner Scanner, writerFactory ScanWriterFact
 	resultList.SetShowStatusBar(true)
 	resultList.SetShowHelp(false)
 	resultList.SetStatusBarItemName("항목", "항목")
+	resultList.KeyMap.CancelWhileFiltering.SetKeys("ctrl+g")
+	resultList.KeyMap.CancelWhileFiltering.SetHelp("ctrl+g", "검색 취소")
+	resultList.KeyMap.ClearFilter.SetKeys("ctrl+g")
+	resultList.KeyMap.ClearFilter.SetHelp("ctrl+g", "검색 해제")
 	detail := viewport.New()
 	detail.SoftWrap = true
 	pathInput := textinput.New()
@@ -377,6 +386,16 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	case scanCompleteMsg:
 		m.cancelScan = nil
 		m.scanProgressCh = nil
+		if m.quitAfterAction {
+			m.quitAfterAction = false
+			return m, tea.Quit
+		}
+		if m.scanBackRequested {
+			m.scanBackRequested = false
+			m.err = nil
+			m.screen = screenOptions
+			return m, nil
+		}
 		if message.err != nil {
 			m.err = message.err
 			m.exitCode = exitcode.Error
@@ -409,17 +428,17 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			if m.journal != nil && m.journal.State == model.RunCanceled {
 				m.remediationErr = nil
 				m.screen = screenRemediationStatus
-				return m, nil
+				return m.finishQuitAfterAction()
 			}
 			m.remediationErr = message.err
 			m.exitCode = exitcode.Error
 			m.screen = screenRemediationError
-			return m, nil
+			return m.finishQuitAfterAction()
 		}
 		m.viewport.SetContent(remediationPlanContent(message.plan, false))
 		m.viewport.GotoTop()
 		m.screen = screenRemediationPlan
-		return m, nil
+		return m.finishQuitAfterAction()
 	case remediationJournalMsg:
 		completedScreen := m.screen
 		m.cancelAction = nil
@@ -427,10 +446,15 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.journal = message.journal
 		}
 		if message.err != nil {
+			m.quitAfterPlanCancel = false
 			m.remediationErr = message.err
 			m.exitCode = exitcode.Error
 			m.screen = screenRemediationError
-			return m, nil
+			return m.finishQuitAfterAction()
+		}
+		if m.quitAfterPlanCancel && completedScreen == screenRemediationCanceling {
+			m.quitAfterPlanCancel = false
+			return m, tea.Quit
 		}
 		if completedScreen == screenRemediationApproving {
 			m.viewport.SetContent(remediationPlanContent(m.plan, true))
@@ -439,14 +463,14 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.screen = screenRemediationStatus
 		}
-		return m, nil
+		return m.finishQuitAfterAction()
 	case remediationRollbackPreviewMsg:
 		m.cancelAction = nil
 		if message.err != nil {
 			m.remediationErr = message.err
 			m.exitCode = exitcode.Error
 			m.screen = screenRemediationError
-			return m, nil
+			return m.finishQuitAfterAction()
 		}
 		m.rollbackPreview = message.preview
 		m.rollbackRunScope = message.runScope
@@ -454,7 +478,7 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.viewport.SetContent(remediationRollbackPreviewContent(message.preview, message.runScope))
 		m.viewport.GotoTop()
 		m.screen = screenRemediationRollbackPreview
-		return m, nil
+		return m.finishQuitAfterAction()
 	case remediationRollbackMsg:
 		m.cancelAction = nil
 		m.rollback = message.attempt
@@ -465,15 +489,27 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.remediationErr = message.err
 			m.exitCode = exitcode.Error
 			m.screen = screenRemediationError
-			return m, nil
+			return m.finishQuitAfterAction()
 		}
 		m.screen = screenRemediationStatus
-		return m, nil
+		return m.finishQuitAfterAction()
 	case tea.KeyPressMsg:
+		key := message.String()
+		if m.quitConfirmation {
+			return m.updateQuitConfirmation(key)
+		}
 		if m.screen == screenOptions && m.editingOption {
 			return m.updateOptionEditor(message)
 		}
-		key := message.String()
+		if m.screen == screenResults && m.list.SettingFilter() {
+			if key == "esc" {
+				m.openQuitConfirmation()
+				return m, nil
+			}
+			updated, command := m.list.Update(message)
+			m.list = updated
+			return m, command
+		}
 		if key == "ctrl+c" {
 			if m.cancelAction != nil {
 				m.cancelAction()
@@ -484,28 +520,12 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, tea.Quit
 		}
-		if m.screen == screenResults && m.list.SettingFilter() {
-			updated, command := m.list.Update(message)
-			m.list = updated
-			return m, command
+		if key == "esc" {
+			m.openQuitConfirmation()
+			return m, nil
 		}
 		if key == "q" {
-			if m.cancelScan != nil {
-				m.cancelScan()
-				return m, tea.Quit
-			}
-			if m.cancelAction != nil {
-				m.cancelAction()
-				return m, nil
-			}
-			if m.hasUnusedRemediationPlan() {
-				if m.screen != screenRemediationConfirmCancel {
-					m.cancelReturn = m.screen
-					m.screen = screenRemediationConfirmCancel
-				}
-				return m, nil
-			}
-			return m, tea.Quit
+			return m.navigateBack()
 		}
 		switch m.screen {
 		case screenReady:
@@ -525,7 +545,8 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 					m.screen = screenOptions
 					return m, nil
 				case readyMenuQuit:
-					return m, tea.Quit
+					m.openQuitConfirmation()
+					return m, nil
 				}
 			case "s":
 				return m, m.startScan()
@@ -544,7 +565,7 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				m.scanSettings.noRedact = true
 				m.scanSettings.remediationEnabled = false
 				m.screen = screenOptions
-			case "n", "esc", "backspace":
+			case "n", "backspace":
 				m.screen = screenOptions
 			}
 			return m, nil
@@ -571,7 +592,7 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 		case screenDetail:
-			if key == "esc" || key == "backspace" {
+			if key == "backspace" {
 				m.screen = screenResults
 				return m, nil
 			}
@@ -583,7 +604,7 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			case "r":
 				m.failurePolicy = model.FailureRollbackRun
 				return m.startRemediationPlan()
-			case "esc", "backspace":
+			case "backspace":
 				m.screen = screenResults
 				return m, nil
 			}
@@ -592,7 +613,7 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			case "a":
 				m.screen = screenRemediationConfirmApproval
 				return m, nil
-			case "c", "esc", "backspace":
+			case "c", "backspace":
 				m.cancelReturn = screenRemediationPlan
 				m.screen = screenRemediationConfirmCancel
 				return m, nil
@@ -601,7 +622,7 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			switch key {
 			case "y":
 				return m.startRemediationApproval()
-			case "n", "esc", "backspace":
+			case "n", "backspace":
 				m.screen = screenRemediationPlan
 				return m, nil
 			}
@@ -610,7 +631,7 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			case "x":
 				m.screen = screenRemediationConfirmApply
 				return m, nil
-			case "c", "esc", "backspace":
+			case "c", "backspace":
 				m.cancelReturn = screenRemediationApproved
 				m.screen = screenRemediationConfirmCancel
 				return m, nil
@@ -619,7 +640,7 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			switch key {
 			case "y":
 				return m.startRemediationApply()
-			case "n", "esc", "backspace":
+			case "n", "backspace":
 				m.screen = screenRemediationApproved
 				return m, nil
 			}
@@ -647,7 +668,7 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 					m.screen = screenRemediationConfirmCancel
 				}
 				return m, nil
-			case "esc", "backspace":
+			case "backspace":
 				m.screen = screenResults
 				return m, nil
 			}
@@ -656,7 +677,7 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			case "r":
 				m.screen = screenRemediationConfirmRollback
 				return m, nil
-			case "esc", "backspace":
+			case "backspace":
 				m.screen = screenRemediationStatus
 				return m, nil
 			}
@@ -664,7 +685,7 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			switch key {
 			case "y":
 				return m.startApprovedRollback()
-			case "n", "esc", "backspace":
+			case "n", "backspace":
 				m.screen = screenRemediationRollbackPreview
 				return m, nil
 			}
@@ -672,12 +693,13 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			switch key {
 			case "y":
 				return m.startRemediationCancel()
-			case "n", "esc", "backspace":
+			case "n", "backspace":
+				m.quitAfterPlanCancel = false
 				m.screen = m.cancelReturn
 				return m, nil
 			}
 		case screenRemediationError:
-			if key == "esc" || key == "backspace" {
+			if key == "backspace" {
 				if m.journal != nil {
 					m.screen = screenRemediationStatus
 				} else {
@@ -689,7 +711,7 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			if key == "r" {
 				return m, m.startScan()
 			}
-			if key == "esc" || key == "backspace" {
+			if key == "backspace" {
 				m.screen = screenOptions
 				return m, nil
 			}
@@ -708,6 +730,138 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	default:
 		return m, nil
 	}
+}
+
+func (m *Model) openQuitConfirmation() {
+	if m.quitAfterAction {
+		return
+	}
+	m.quitConfirmation = true
+	m.quitSelection = 0
+}
+
+func (m *Model) updateQuitConfirmation(key string) (tea.Model, tea.Cmd) {
+	switch key {
+	case "left", "h":
+		m.quitSelection = 0
+	case "right", "l":
+		m.quitSelection = 1
+	case "tab", "shift+tab":
+		m.quitSelection = (m.quitSelection + 1) % 2
+	case "q", "esc", "backspace":
+		m.quitConfirmation = false
+		m.quitSelection = 0
+		return m, tea.ClearScreen
+	case "enter":
+		if m.quitSelection == 0 {
+			m.quitConfirmation = false
+			return m, tea.ClearScreen
+		}
+		return m.confirmQuit()
+	}
+	return m, nil
+}
+
+func (m *Model) confirmQuit() (tea.Model, tea.Cmd) {
+	if m.cancelAction != nil {
+		m.quitConfirmation = false
+		m.quitSelection = 0
+		m.quitAfterAction = true
+		m.cancelAction()
+		return m, nil
+	}
+	if m.cancelScan != nil {
+		m.quitConfirmation = false
+		m.quitSelection = 0
+		m.quitAfterAction = true
+		m.cancelScan()
+		return m, nil
+	}
+	if m.hasUnusedRemediationPlan() {
+		m.quitConfirmation = false
+		m.quitSelection = 0
+		m.quitAfterPlanCancel = true
+		if m.screen != screenRemediationConfirmCancel {
+			m.cancelReturn = m.screen
+			m.screen = screenRemediationConfirmCancel
+		}
+		return m, nil
+	}
+	return m, tea.Quit
+}
+
+func (m *Model) finishQuitAfterAction() (tea.Model, tea.Cmd) {
+	if !m.quitAfterAction {
+		return m, nil
+	}
+	m.quitAfterAction = false
+	if m.hasUnusedRemediationPlan() {
+		m.quitAfterPlanCancel = true
+		if m.screen != screenRemediationConfirmCancel {
+			m.cancelReturn = m.screen
+			m.screen = screenRemediationConfirmCancel
+		}
+		return m, nil
+	}
+	return m, tea.Quit
+}
+
+func (m *Model) navigateBack() (tea.Model, tea.Cmd) {
+	switch m.screen {
+	case screenReady:
+		return m, nil
+	case screenOptions:
+		m.optionErr = nil
+		m.screen = screenReady
+	case screenOptionPicker, screenConfirmNoRedact:
+		m.screen = screenOptions
+	case screenScanning:
+		if m.cancelScan != nil {
+			m.scanBackRequested = true
+			m.cancelScan()
+		}
+	case screenResults:
+		m.screen = screenReady
+	case screenDetail, screenRemediationFailurePolicy:
+		m.screen = screenResults
+	case screenRemediationPlanning,
+		screenRemediationApproving,
+		screenRemediationApplying,
+		screenRemediationCanceling,
+		screenRemediationRollbackPreviewing,
+		screenRemediationRollingBack:
+		if m.cancelAction != nil {
+			m.cancelAction()
+		}
+	case screenRemediationPlan:
+		m.cancelReturn = screenRemediationPlan
+		m.screen = screenRemediationConfirmCancel
+	case screenRemediationConfirmApproval:
+		m.screen = screenRemediationPlan
+	case screenRemediationApproved:
+		m.cancelReturn = screenRemediationApproved
+		m.screen = screenRemediationConfirmCancel
+	case screenRemediationConfirmApply:
+		m.screen = screenRemediationApproved
+	case screenRemediationStatus:
+		m.screen = screenResults
+	case screenRemediationConfirmCancel:
+		m.quitAfterPlanCancel = false
+		m.screen = m.cancelReturn
+	case screenRemediationRollbackPreview:
+		m.screen = screenRemediationStatus
+	case screenRemediationConfirmRollback:
+		m.screen = screenRemediationRollbackPreview
+	case screenRemediationError:
+		if m.journal != nil {
+			m.screen = screenRemediationStatus
+		} else {
+			m.screen = screenResults
+		}
+	case screenError:
+		m.screen = screenOptions
+	}
+	return m, nil
 }
 
 func (m *Model) View() tea.View {
@@ -730,11 +884,17 @@ func (m *Model) View() tea.View {
 		}
 		m.list.Title = header
 		helpValues := []string{"Enter", "상세", "A", "전체/문제", "/", "검색", "R", "다시 점검"}
+		if m.list.SettingFilter() {
+			helpValues = []string{"Enter", "검색 적용", "Ctrl+G", "검색 취소"}
+		}
 		availability := m.remediationAvailability()
-		if availability.enabled {
+		if availability.enabled && !m.list.SettingFilter() {
 			helpValues = append(helpValues, "M", "조치 계획")
 		}
-		helpValues = append(helpValues, "Q", "종료")
+		if !m.list.SettingFilter() {
+			helpValues = append(helpValues, "Q", "뒤로")
+		}
+		helpValues = append(helpValues, "Esc", "종료")
 		content = screenHeader("점검 결과") + "\n\n" + m.list.View()
 		if m.reportPath != "" {
 			pathWidth := m.width - 18
@@ -747,27 +907,27 @@ func (m *Model) View() tea.View {
 		content += "\n\n" + remediationAvailabilityView(availability)
 		content += "\n\n" + optionKeyLegend(helpValues...)
 	case screenDetail:
-		content = screenHeader("항목 상세") + "\n\n" + m.viewport.View() + "\n\n" + helpStyle.Render("Esc: 결과 목록   q: 종료")
+		content = screenHeader("항목 상세") + "\n\n" + m.viewport.View() + "\n\n" + helpStyle.Render("q: 결과 목록   Esc: 종료")
 	case screenRemediationFailurePolicy:
 		content = titleStyle.Render("조치 실패 정책 선택") + "\n\n" +
 			"변경 세트 적용 또는 검증이 실패했을 때의 자동 롤백 범위를 선택해주세요.\n\n" +
 			"i  rollback_item: 실패한 항목 변경 세트만 복원합니다.\n" +
 			"r  rollback_run: 실패한 항목을 복원한 뒤 앞서 적용한 실행 전체를 역순으로 복원합니다.\n\n" +
-			helpStyle.Render("i: 항목 단위   r: 실행 전체   Esc: 돌아가기   q: 종료")
+			helpStyle.Render("i: 항목 단위   r: 실행 전체   q: 돌아가기   Esc: 종료")
 	case screenRemediationPlanning:
-		content = titleStyle.Render("조치 dry-run 생성") + "\n\n점검 보고서와 현재 호스트를 재검증하고 변경 계획을 만들고 있습니다.\n시스템 파일은 변경하지 않습니다.\n\n" + helpStyle.Render("q 또는 Ctrl+C: 안전한 작업 취소 요청")
+		content = titleStyle.Render("조치 dry-run 생성") + "\n\n점검 보고서와 현재 호스트를 재검증하고 변경 계획을 만들고 있습니다.\n시스템 파일은 변경하지 않습니다.\n\n" + helpStyle.Render("q: 안전한 작업 취소 요청   Esc: 종료")
 	case screenRemediationPlan:
-		content = m.viewport.View() + "\n" + helpStyle.Render("a: plan digest 확인 및 승인 단계   c 또는 Esc: 계획 폐기   q: 계획 폐기 확인")
+		content = m.viewport.View() + "\n" + helpStyle.Render("a: plan digest 확인 및 승인 단계   c 또는 q: 계획 폐기   Esc: 종료")
 	case screenRemediationConfirmApproval:
-		content = remediationApprovalConfirmation(m.plan) + "\n\n" + helpStyle.Render("y: 이 계획 승인   n 또는 Esc: 돌아가기")
+		content = remediationApprovalConfirmation(m.plan) + "\n\n" + helpStyle.Render("y: 이 계획 승인   n 또는 q: 돌아가기   Esc: 종료")
 	case screenRemediationApproving:
-		content = titleStyle.Render("조치 계획 승인") + "\n\n승인 정보를 내구성 저널에 기록하고 있습니다.\n아직 시스템 파일은 변경하지 않습니다.\n\n" + helpStyle.Render("q 또는 Ctrl+C: 안전한 작업 취소 요청")
+		content = titleStyle.Render("조치 계획 승인") + "\n\n승인 정보를 내구성 저널에 기록하고 있습니다.\n아직 시스템 파일은 변경하지 않습니다.\n\n" + helpStyle.Render("q: 안전한 작업 취소 요청   Esc: 종료")
 	case screenRemediationApproved:
-		content = m.viewport.View() + "\n" + helpStyle.Render("x: 실제 적용 단계   c 또는 Esc: 승인 계획 폐기   q: 계획 폐기 확인")
+		content = m.viewport.View() + "\n" + helpStyle.Render("x: 실제 적용 단계   c 또는 q: 승인 계획 폐기   Esc: 종료")
 	case screenRemediationConfirmApply:
-		content = remediationApplyConfirmation(m.plan) + "\n\n" + helpStyle.Render("y: 백업 후 실제 적용·검증   n 또는 Esc: 돌아가기")
+		content = remediationApplyConfirmation(m.plan) + "\n\n" + helpStyle.Render("y: 백업 후 실제 적용·검증   n 또는 q: 돌아가기   Esc: 종료")
 	case screenRemediationApplying:
-		content = titleStyle.Render("조치 적용 및 검증") + "\n\n변경 전 백업, write-ahead 저널 기록, 변경 후 검증을 순차 실행하고 있습니다.\n실패하면 선택한 실패 정책에 따라 롤백합니다.\n\n" + helpStyle.Render("q 또는 Ctrl+C: 안전한 중단 요청 후 저널 기록 완료 대기")
+		content = titleStyle.Render("조치 적용 및 검증") + "\n\n변경 전 백업, write-ahead 저널 기록, 변경 후 검증을 순차 실행하고 있습니다.\n실패하면 선택한 실패 정책에 따라 롤백합니다.\n\n" + helpStyle.Render("q: 안전한 중단 요청   Esc: 종료")
 	case screenRemediationStatus:
 		help := "j/k: 항목 선택"
 		if m.canPreviewSelectedRollback() {
@@ -779,23 +939,26 @@ func (m *Model) View() tea.View {
 		if m.hasUnusedRemediationPlan() {
 			help += "   c: 계획 폐기"
 		}
-		content = remediationStatusContent(m.journal, m.rollback, m.selectedChangeSet) + "\n" + helpStyle.Render(help+"   Esc: 점검 결과   q: 종료")
+		content = remediationStatusContent(m.journal, m.rollback, m.selectedChangeSet) + "\n" + helpStyle.Render(help+"   q: 점검 결과   Esc: 종료")
 	case screenRemediationConfirmCancel:
-		content = remediationCancelConfirmation(m.journal) + "\n\n" + helpStyle.Render("y: 계획과 미사용 payload 폐기   n 또는 Esc: 돌아가기")
+		content = remediationCancelConfirmation(m.journal) + "\n\n" + helpStyle.Render("y: 계획과 미사용 payload 폐기   n 또는 q: 돌아가기   Esc: 종료")
 	case screenRemediationCanceling:
-		content = titleStyle.Render("조치 계획 폐기") + "\n\n적용되지 않은 desired payload를 격리·삭제하고 취소 상태를 저널에 기록하고 있습니다.\n\n" + helpStyle.Render("q 또는 Ctrl+C: 안전한 작업 취소 요청")
+		content = titleStyle.Render("조치 계획 폐기") + "\n\n적용되지 않은 desired payload를 격리·삭제하고 취소 상태를 저널에 기록하고 있습니다.\n\n" + helpStyle.Render("q: 안전한 작업 취소 요청   Esc: 종료")
 	case screenRemediationRollbackPreviewing:
-		content = titleStyle.Render("롤백 범위 계산") + "\n\n현재 저널 revision에서 공유 자원과 의존 관계를 다시 계산하고 있습니다.\n아직 시스템 파일은 변경하지 않습니다.\n\n" + helpStyle.Render("q 또는 Ctrl+C: 안전한 작업 취소 요청")
+		content = titleStyle.Render("롤백 범위 계산") + "\n\n현재 저널 revision에서 공유 자원과 의존 관계를 다시 계산하고 있습니다.\n아직 시스템 파일은 변경하지 않습니다.\n\n" + helpStyle.Render("q: 안전한 작업 취소 요청   Esc: 종료")
 	case screenRemediationRollbackPreview:
-		content = m.viewport.View() + "\n\n" + helpStyle.Render("r: 표시 범위 승인 단계   Esc: 현재 상태로 돌아가기   q: 종료")
+		content = m.viewport.View() + "\n\n" + helpStyle.Render("r: 표시 범위 승인 단계   q: 현재 상태로 돌아가기   Esc: 종료")
 	case screenRemediationConfirmRollback:
-		content = remediationRollbackConfirmation(m.rollbackPreview, m.rollbackRunScope) + "\n\n" + helpStyle.Render("y: digest에 고정된 범위 롤백   n 또는 Esc: 돌아가기")
+		content = remediationRollbackConfirmation(m.rollbackPreview, m.rollbackRunScope) + "\n\n" + helpStyle.Render("y: digest에 고정된 범위 롤백   n 또는 q: 돌아가기   Esc: 종료")
 	case screenRemediationRollingBack:
-		content = titleStyle.Render("롤백 실행") + "\n\n백업과 현재 상태를 재검증한 뒤 승인된 역순으로 복원하고 있습니다.\n독립적인 분기는 다른 분기의 실패와 관계없이 계속 시도합니다.\n\n" + helpStyle.Render("q 또는 Ctrl+C: 안전한 중단 요청 후 저널 기록 완료 대기")
+		content = titleStyle.Render("롤백 실행") + "\n\n백업과 현재 상태를 재검증한 뒤 승인된 역순으로 복원하고 있습니다.\n독립적인 분기는 다른 분기의 실패와 관계없이 계속 시도합니다.\n\n" + helpStyle.Render("q: 안전한 중단 요청   Esc: 종료")
 	case screenRemediationError:
-		content = remediationErrorContent(m.journal, m.remediationErr, !m.scanSettings.noRedact) + "\n\n" + helpStyle.Render("Esc: 현재 저널 또는 점검 결과로 돌아가기   q: 종료")
+		content = remediationErrorContent(m.journal, m.remediationErr, !m.scanSettings.noRedact) + "\n\n" + helpStyle.Render("q: 현재 저널 또는 점검 결과로 돌아가기   Esc: 종료")
 	case screenError:
-		content = errorPanelStyle.Render(errorStyle.Render("점검을 완료하지 못했습니다.")+"\n\n"+protectedDisplayText(fmt.Sprint(m.err), !m.scanSettings.noRedact)) + "\n\n" + helpStyle.Render("r: 다시 시도   Esc: 실행 옵션   q: 종료")
+		content = errorPanelStyle.Render(errorStyle.Render("점검을 완료하지 못했습니다.")+"\n\n"+protectedDisplayText(fmt.Sprint(m.err), !m.scanSettings.noRedact)) + "\n\n" + helpStyle.Render("r: 다시 시도   q: 실행 옵션   Esc: 종료")
+	}
+	if m.quitConfirmation {
+		content = m.quitConfirmationView()
 	}
 	content = frameStyle.Render(content)
 	view := tea.NewView(content)
@@ -817,7 +980,7 @@ func (m *Model) readyView() string {
 		"",
 		menu,
 		"",
-		helpStyle.Render("↑/↓  이동     Enter  선택"),
+		helpStyle.Render("↑/↓  이동     Enter  선택     Esc  종료"),
 	)
 
 	if m.platform.Privilege != "root" {
@@ -834,6 +997,44 @@ func (m *Model) readyView() string {
 	}
 	centered := lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, main)
 	return centered + "\n" + lipgloss.PlaceHorizontal(width, lipgloss.Center, readyFooter())
+}
+
+func (m *Model) quitConfirmationView() string {
+	contentWidth := m.optionContentWidth()
+	if contentWidth > 58 {
+		contentWidth = 58
+	}
+	button := func(label string, selected bool, destructive bool) string {
+		text := label
+		if selected {
+			text = "‹ " + label + " ›"
+		}
+		style := lipgloss.NewStyle().
+			Width(14).
+			Align(lipgloss.Center).
+			Foreground(mutedColor)
+		if selected {
+			foreground := accentColor
+			if destructive {
+				foreground = errorColor
+			}
+			style = style.Bold(true).Foreground(foreground).Background(selectedColor)
+		}
+		return style.Render(text)
+	}
+	buttons := lipgloss.JoinHorizontal(
+		lipgloss.Center,
+		button("취소", m.quitSelection == 0, false),
+		"    ",
+		button("종료", m.quitSelection == 1, true),
+	)
+	panel := quitPanelStyle.Copy().Width(contentWidth - 4).Render(
+		detailTitleStyle.Render("정말 종료할까요?") + "\n\n" +
+			lipgloss.PlaceHorizontal(contentWidth-10, lipgloss.Center, buttons),
+	)
+	content := screenHeader("종료") + "\n\n" + panel + "\n\n" +
+		optionKeyLegend("←/→", "이동", "Enter", "선택", "q 또는 Esc", "취소")
+	return m.centerOptionContent(content, contentWidth)
 }
 
 const (
@@ -885,7 +1086,7 @@ func (m *Model) scanningView() string {
 	if progress.Total <= 0 {
 		content := screenHeader("Linux 서버 보안 점검") + "\n\n" +
 			accentStyle.Render(spinner+" 점검 항목을 준비하고 있습니다") + "\n\n" +
-			statusRuleStyle.Render("─ 준비 중") + "\n" + helpStyle.Render("q  점검 취소 및 종료")
+			statusRuleStyle.Render("─ 준비 중") + "\n" + helpStyle.Render("q  점검 취소     Esc  종료")
 		return m.centerScanningContent(content, contentWidth)
 	}
 
@@ -922,7 +1123,7 @@ func (m *Model) scanningView() string {
 		labelStyle.Render("현재") + "  " + current + "\n" +
 		labelStyle.Render("경과") + "  " + durationLabel(elapsed) + "\n\n" +
 		statusRuleStyle.Render(strings.Repeat("─", contentWidth)) + "\n" +
-		helpStyle.Render("q  점검 취소 및 종료")
+		helpStyle.Render("q  점검 취소     Esc  종료")
 	return m.centerScanningContent(content, contentWidth)
 }
 
@@ -1880,6 +2081,11 @@ var (
 			Foreground(textColor).
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(errorColor).
+			Padding(1, 2)
+	quitPanelStyle = lipgloss.NewStyle().
+			Foreground(textColor).
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(borderColor).
 			Padding(1, 2)
 
 	spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
