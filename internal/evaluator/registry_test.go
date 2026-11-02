@@ -144,8 +144,18 @@ func TestRegistryEvaluateBuildsStructuredFallbackWithoutParsingObserved(t *testi
 		t.Fatalf("Register() error = %v", err)
 	}
 	result := registry.Evaluate(context.Background(), testResolvedRule(model.VerificationPending), Environment{})
-	if len(result.DisplayDetails) != 1 || result.DisplayDetails[0].Current != "value=a; value=b" || result.DisplayDetails[0].Expected != "value=c" {
+	if len(result.DisplayDetails) != 1 || result.DisplayDetails[0].Current != "value=a; value=b" || result.DisplayDetails[0].Expected != "테스트 기준을 충족해야 합니다." {
 		t.Fatalf("fallback details = %#v", result.DisplayDetails)
+	}
+}
+
+func TestFallbackDetailsIncludeEveryDistinctSource(t *testing.T) {
+	details := defaultDisplayDetails(Outcome{Evidence: []model.Evidence{
+		{Source: "/etc/one"}, {Source: "/etc/two"}, {Source: "/etc/three"},
+		{Source: "/etc/four"}, {Source: "/etc/one"},
+	}})
+	if len(details) != 1 || details[0].Source != "/etc/one, /etc/two, /etc/three, /etc/four" {
+		t.Fatalf("fallback sources were omitted or repeated: %#v", details)
 	}
 }
 

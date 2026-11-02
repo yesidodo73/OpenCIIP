@@ -26,7 +26,7 @@ const (
 )
 
 func evaluateDoSProneDisabled(ctx context.Context, rule model.ResolvedRule, environment evaluator.Environment) evaluator.Outcome {
-	legacy := disabledEvaluator(disabledPolicy{
+	return disabledEvaluator(disabledPolicy{
 		label: "Echo, Discard, Daytime 및 Chargen",
 		units: []string{
 			"echo.service", "echo.socket", "echo-dgram.service", "echo-dgram.socket",
@@ -43,40 +43,6 @@ func evaluateDoSProneDisabled(ctx context.Context, rule model.ResolvedRule, envi
 			"chargen", "chargen-stream", "chargen-dgram",
 		},
 	})(ctx, rule, environment)
-	if legacy.Status == model.StatusFail || legacy.Status == model.StatusError || legacy.Status == model.StatusUnknown {
-		return legacy
-	}
-
-	units, unitEvidence, err := support.InspectUnits(ctx, environment, []string{
-		"chronyd.service", "named.service", "named-chroot.service", "snmpd.service", "postfix.service", "sendmail.service",
-	})
-	if err != nil {
-		return serviceError("additional_service_inspection_failed", "DoS 관련 추가", err)
-	}
-	processes, processEvidence, err := support.InspectProcesses(ctx, environment, []string{"chronyd", "named", "snmpd", "master", "sendmail"})
-	if err != nil {
-		return serviceError("additional_process_inspection_failed", "DoS 관련 추가", err)
-	}
-	active := append([]string(nil), processes...)
-	for _, unit := range units {
-		if support.UnitActive(unit) || support.UnitEnabled(unit) {
-			active = append(active, unit.Name)
-		}
-	}
-	if len(active) == 0 {
-		legacy.Evidence = append(legacy.Evidence, unitEvidence...)
-		legacy.Evidence = append(legacy.Evidence, processEvidence)
-		return legacy
-	}
-	sort.Strings(active)
-	return evaluator.Outcome{
-		Status:        model.StatusUnknown,
-		UnknownReason: model.UnknownManualVerification,
-		Summary:       "legacy 응답 서비스는 비활성이나 추가 네트워크 서비스의 업무 필요성을 확인해야 합니다.",
-		Expected:      "Echo, Discard, Daytime, Chargen은 비활성화하고 NTP·DNS·SNMP·SMTP는 승인된 업무 서비스만 사용해야 합니다.",
-		Observed:      "활성 또는 부팅 활성 후보: " + strings.Join(uniqueStrings(active), ", "),
-		Evidence:      append(append(legacy.Evidence, unitEvidence...), processEvidence),
-	}
 }
 
 func evaluateNFSDisabled(ctx context.Context, rule model.ResolvedRule, environment evaluator.Environment) evaluator.Outcome {
@@ -145,7 +111,7 @@ func evaluateNFSDisabled(ctx context.Context, rule model.ResolvedRule, environme
 	activeSignals = uniqueStrings(activeSignals)
 	active := len(activeSignals) > 0
 	if !installed && !configured && !active {
-		return evaluator.Outcome{Status: model.StatusNotApplicable, Summary: "NFS 서버 구성요소와 export가 없습니다.", Expected: "불필요한 NFS 서버는 비활성화되어야 합니다.", Observed: "NFS server unit, process, thread, export 없음", Evidence: evidence}
+		return evaluator.Outcome{Status: model.StatusPass, Summary: "NFS 서버 구성요소와 export가 없어 비활성 상태입니다.", Expected: rule.Criteria.Pass, Observed: "NFS server unit, process, thread, export 없음", Evidence: evidence}
 	}
 	if policySet && required {
 		return evaluator.Outcome{Status: model.StatusNotApplicable, Summary: "기관 정책에서 NFS 서버 사용을 필요한 업무 서비스로 지정했습니다.", Expected: "불필요한 NFS 서버에만 비활성화 기준을 적용합니다.", Observed: fmt.Sprintf("nfs_required=true active=%t configured=%t", active, configured), Evidence: evidence}
@@ -183,23 +149,13 @@ func evaluateAutofsDisabled(ctx context.Context, rule model.ResolvedRule, enviro
 		return serviceError("autofs_config_inspection_failed", "autofs", configErr)
 	}
 	evidence = append(evidence, configEvidence...)
-	required, policySet, parameterErr := support.BoolParameter(rule.Parameters, "autofs_required")
-	if parameterErr != nil {
-		return serviceError("invalid_rule_parameter", "autofs", parameterErr)
-	}
 	if !installed && !configured && !active {
-		return evaluator.Outcome{Status: model.StatusNotApplicable, Summary: "autofs 구성요소가 없습니다.", Expected: "불필요한 autofs는 비활성화되어야 합니다.", Observed: "unit, process, map 없음", Evidence: evidence}
-	}
-	if policySet && required {
-		return evaluator.Outcome{Status: model.StatusNotApplicable, Summary: "기관 정책에서 autofs 사용을 필요한 업무 기능으로 지정했습니다.", Expected: "불필요한 autofs에만 비활성화 기준을 적용합니다.", Observed: fmt.Sprintf("autofs_required=true active=%t", active), Evidence: evidence}
+		return evaluator.Outcome{Status: model.StatusPass, Summary: "automountd 구성요소가 없어 비활성 상태입니다.", Expected: rule.Criteria.Pass, Observed: "unit, process, map 없음", Evidence: evidence}
 	}
 	if active {
-		if policySet {
-			return evaluator.Outcome{Status: model.StatusFail, Summary: "불필요하다고 지정된 autofs가 활성화되어 있습니다.", Expected: "autofs_required=false이면 unit과 automount 프로세스가 비활성이어야 합니다.", Observed: "autofs active or enabled", Evidence: evidence}
-		}
-		return evaluator.Outcome{Status: model.StatusUnknown, UnknownReason: model.UnknownManualVerification, Summary: "활성 autofs의 업무 필요성을 확인해야 합니다.", Expected: "기관 정책으로 autofs 필요 여부를 확인해야 합니다.", Observed: "autofs active or enabled", Evidence: evidence}
+		return evaluator.Outcome{Status: model.StatusFail, Summary: "automountd 서비스가 활성화되어 있습니다.", Expected: rule.Criteria.Pass, Observed: "autofs active or enabled", Evidence: evidence}
 	}
-	return evaluator.Outcome{Status: model.StatusPass, Summary: "autofs가 비활성화되어 있습니다.", Expected: "불필요한 autofs unit과 프로세스가 비활성이어야 합니다.", Observed: fmt.Sprintf("active=false configured=%t", configured), Evidence: evidence}
+	return evaluator.Outcome{Status: model.StatusPass, Summary: "automountd 서비스가 비활성화되어 있습니다.", Expected: rule.Criteria.Pass, Observed: fmt.Sprintf("active=false configured=%t", configured), Evidence: evidence}
 }
 
 func evaluateRPCDisabled(ctx context.Context, rule model.ResolvedRule, environment evaluator.Environment) evaluator.Outcome {
@@ -207,14 +163,15 @@ func evaluateRPCDisabled(ctx context.Context, rule model.ResolvedRule, environme
 		return unsupportedConditionalService("RPC", environment.Platform.InitSystem)
 	}
 	units, unitEvidence, err := support.InspectUnits(ctx, environment, []string{
-		"rpcbind.service", "rpcbind.socket", "rpc-statd.service", "rstatd.service", "rusersd.service",
+		"rpc-statd.service", "rstatd.service", "rusersd.service",
 		"walld.service", "sprayd.service", "rexd.service", "rquotad.service",
+		"ypupdated.service",
 	})
 	if err != nil {
 		return serviceError("rpc_unit_inspection_failed", "RPC", err)
 	}
 	processes, processEvidence, err := support.InspectProcesses(ctx, environment, []string{
-		"rpcbind", "rpc.statd", "rpc.rstatd", "rpc.rusersd", "rpc.rwalld", "rpc.sprayd", "rpc.rexd", "rpc.rquotad",
+		"rpc.statd", "rpc.rstatd", "rpc.rusersd", "rpc.rwalld", "rpc.sprayd", "rpc.rexd", "rpc.rquotad", "rpc.ypupdated",
 	})
 	if err != nil {
 		return serviceError("rpc_process_inspection_failed", "RPC", err)
@@ -231,54 +188,14 @@ func evaluateRPCDisabled(ctx context.Context, rule model.ResolvedRule, environme
 	for _, process := range processes {
 		active = append(active, strings.TrimPrefix(process, "rpc."))
 	}
-	if len(active) > 0 && environment.Commands.Available("rpcinfo") {
-		spec := executor.Spec{Name: "rpcinfo", Arguments: []string{"-p"}, Timeout: 20 * time.Second, MaxOutput: 2 << 20}
-		result, runErr := environment.Commands.Run(ctx, spec)
-		if runErr != nil {
-			return serviceError("rpcinfo_failed", "RPC", runErr)
-		}
-		evidence = append(evidence, privateCommandSummary(spec, result))
-		if result.ExitCode != 0 || result.Truncated {
-			return serviceError("rpcinfo_failed", "RPC", fmt.Errorf("exit=%d truncated=%t", result.ExitCode, result.Truncated))
-		}
-		services, parseErr := parseRPCInfo(result.Stdout)
-		if parseErr != nil {
-			return serviceError("rpcinfo_parse_failed", "RPC", parseErr)
-		}
-		active = append(active, services...)
-	}
 	active = uniqueStrings(active)
 	if !installed && len(active) == 0 {
-		return evaluator.Outcome{Status: model.StatusNotApplicable, Summary: "RPC framework와 대상 daemon이 없습니다.", Expected: "불필요한 RPC daemon은 비활성화되어야 합니다.", Observed: "RPC unit 및 process 없음", Evidence: evidence}
+		return evaluator.Outcome{Status: model.StatusPass, Summary: "점검 대상 RPC 서비스가 없어 비활성 상태입니다.", Expected: rule.Criteria.Pass, Observed: "대상 RPC unit 및 process 없음", Evidence: evidence}
 	}
 	if len(active) == 0 {
-		return evaluator.Outcome{Status: model.StatusPass, Summary: "RPC daemon의 활성 경로가 없습니다.", Expected: "불필요한 RPC daemon은 비활성화되어야 합니다.", Observed: "설치된 RPC unit이 inactive이고 disabled 상태입니다.", Evidence: evidence}
+		return evaluator.Outcome{Status: model.StatusPass, Summary: "점검 대상 RPC 서비스가 비활성화되어 있습니다.", Expected: rule.Criteria.Pass, Observed: "설치된 대상 RPC unit이 inactive이고 disabled 상태입니다.", Evidence: evidence}
 	}
-	approved, policySet, parameterErr := support.StringSliceParameter(rule.Parameters, "approved_rpc_services")
-	if parameterErr != nil {
-		return serviceError("invalid_rule_parameter", "RPC", parameterErr)
-	}
-	if !policySet {
-		return evaluator.Outcome{Status: model.StatusUnknown, UnknownReason: model.UnknownManualVerification, Summary: "활성 RPC 프로그램의 업무 필요성과 NFS 의존성을 확인해야 합니다.", Expected: "approved_rpc_services 정책과 활성 RPC 프로그램을 대조해야 합니다.", Observed: strings.Join(active, ", "), Evidence: evidence}
-	}
-	approvedSet := make(map[string]bool, len(approved))
-	for _, item := range approved {
-		item = strings.TrimSpace(item)
-		if item == "" || strings.ContainsAny(item, " \t/\\:") {
-			return serviceError("invalid_rule_parameter", "RPC", fmt.Errorf("invalid approved RPC service %q", item))
-		}
-		approvedSet[item] = true
-	}
-	unapproved := make([]string, 0)
-	for _, item := range active {
-		if !approvedSet[item] {
-			unapproved = append(unapproved, item)
-		}
-	}
-	if len(unapproved) > 0 {
-		return evaluator.Outcome{Status: model.StatusFail, Summary: "승인되지 않은 RPC daemon이 활성화되어 있습니다.", Expected: "활성 RPC 프로그램이 approved_rpc_services 정책에 포함되어야 합니다.", Observed: strings.Join(unapproved, ", "), Evidence: evidence}
-	}
-	return evaluator.Outcome{Status: model.StatusPass, Summary: "활성 RPC 프로그램이 모두 승인 목록에 포함되어 있습니다.", Expected: "활성 RPC 프로그램이 approved_rpc_services 정책에 포함되어야 합니다.", Observed: strings.Join(active, ", "), Evidence: evidence}
+	return evaluator.Outcome{Status: model.StatusFail, Summary: "불필요한 RPC 서비스가 활성화되어 있습니다.", Expected: rule.Criteria.Pass, Observed: strings.Join(active, ", "), Evidence: evidence}
 }
 
 func readNFSDThreads(ctx context.Context, environment evaluator.Environment) (int, model.Evidence, bool, error) {

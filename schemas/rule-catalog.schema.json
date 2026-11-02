@@ -67,6 +67,9 @@
         "fail": {
           "type": "string"
         },
+        "solution": {
+          "type": "string"
+        },
         "manual_review_required": {
           "type": "boolean"
         }

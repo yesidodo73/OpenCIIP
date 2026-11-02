@@ -20,6 +20,7 @@ type PermissionPolicy struct {
 	AllowedTypes       map[string]struct{}
 	AllowedSpecialBits os.FileMode
 	FollowFinalSymlink bool
+	SkipACL            bool
 	CheckDefaultACL    bool
 }
 
@@ -28,6 +29,7 @@ type PermissionAssessment struct {
 	Exists         bool
 	Metadata       system.FileMetadata
 	NamedAccessACL bool
+	ExtraModeBits  os.FileMode
 	Violations     []string
 	Unknowns       []string
 	Evidence       []model.Evidence
@@ -77,10 +79,16 @@ func InspectPermissions(
 		}
 	}
 	if extra := metadata.Mode.Perm() &^ policy.AllowedMode.Perm(); extra != 0 {
+		assessment.ExtraModeBits = extra
 		assessment.Violations = append(assessment.Violations, fmt.Sprintf("허용되지 않은 권한 비트 %04o", extra))
 	}
 	if metadata.Mode&(os.ModeSetuid|os.ModeSetgid|os.ModeSticky)&^policy.AllowedSpecialBits != 0 {
 		assessment.Violations = append(assessment.Violations, "특수 권한 비트가 설정됨")
+	}
+	if policy.SkipACL {
+		sort.Strings(assessment.Violations)
+		sort.Strings(assessment.Unknowns)
+		return assessment, nil
 	}
 	aclInspection, aclErr := InspectPOSIXACL(
 		ctx,

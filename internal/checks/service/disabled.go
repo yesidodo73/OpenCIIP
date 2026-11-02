@@ -26,6 +26,7 @@ type disabledPolicy struct {
 	ports          []int
 	processes      []string
 	xinetdServices []string
+	manualIfActive bool
 }
 
 func Implementations() map[string]evaluator.Func {
@@ -66,6 +67,7 @@ func Implementations() map[string]evaluator.Func {
 			ports:          []int{512, 513, 514},
 			processes:      []string{"in.rexecd", "in.rlogind", "in.rshd", "rexecd", "rlogind", "rshd"},
 			xinetdServices: []string{"exec", "rexec", "login", "rlogin", "shell", "rsh"},
+			manualIfActive: true,
 		}),
 		EvaluatorNISDisabled: disabledEvaluator(disabledPolicy{
 			label:     "NIS",
@@ -96,7 +98,7 @@ func Implementations() map[string]evaluator.Func {
 }
 
 func disabledEvaluator(policy disabledPolicy) evaluator.Func {
-	return func(ctx context.Context, _ model.ResolvedRule, environment evaluator.Environment) evaluator.Outcome {
+	return func(ctx context.Context, rule model.ResolvedRule, environment evaluator.Environment) evaluator.Outcome {
 		if environment.Platform.InitSystem != "systemd" {
 			return evaluator.Outcome{
 				Status:        model.StatusUnknown,
@@ -164,10 +166,20 @@ func disabledEvaluator(policy disabledPolicy) evaluator.Func {
 		}
 		sort.Strings(violations)
 		if len(violations) > 0 {
+			if policy.manualIfActive {
+				return evaluator.Outcome{
+					Status:        model.StatusUnknown,
+					UnknownReason: model.UnknownManualVerification,
+					Summary:       fmt.Sprintf("활성 %s 서비스의 업무상 필요 여부를 확인해야 합니다.", policy.label),
+					Expected:      rule.Criteria.Pass,
+					Observed:      strings.Join(violations, "; "),
+					Evidence:      evidence,
+				}
+			}
 			return evaluator.Outcome{
 				Status:   model.StatusFail,
 				Summary:  fmt.Sprintf("%s 서비스의 활성 경로가 발견되었습니다.", policy.label),
-				Expected: "관련 서비스, 소켓 및 리스닝 포트가 비활성화되어야 합니다.",
+				Expected: rule.Criteria.Pass,
 				Observed: strings.Join(violations, "; "),
 				Evidence: evidence,
 			}
@@ -185,9 +197,9 @@ func disabledEvaluator(policy disabledPolicy) evaluator.Func {
 		installed = installed || xinetdConfigured > 0
 		if !installed {
 			return evaluator.Outcome{
-				Status:   model.StatusNotApplicable,
-				Summary:  fmt.Sprintf("%s 서버 구성요소가 설치되어 있지 않습니다.", policy.label),
-				Expected: "관련 서버 구성요소가 없거나 비활성화되어야 합니다.",
+				Status:   model.StatusPass,
+				Summary:  fmt.Sprintf("%s 서비스가 설치되어 있지 않아 비활성 상태입니다.", policy.label),
+				Expected: rule.Criteria.Pass,
 				Observed: "systemd unit 및 listener 없음",
 				Evidence: evidence,
 			}
@@ -195,7 +207,7 @@ func disabledEvaluator(policy disabledPolicy) evaluator.Func {
 		return evaluator.Outcome{
 			Status:   model.StatusPass,
 			Summary:  fmt.Sprintf("%s 서비스가 비활성화되어 있습니다.", policy.label),
-			Expected: "관련 서비스, 소켓 및 리스닝 포트가 비활성화되어야 합니다.",
+			Expected: rule.Criteria.Pass,
 			Observed: "설치된 구성요소가 inactive이며 enabled 상태가 아니고 listener가 없습니다.",
 			Evidence: evidence,
 		}

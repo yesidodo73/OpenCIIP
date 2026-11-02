@@ -9,6 +9,7 @@ import (
 	"github.com/yesidodo73/OpenCIIP/internal/checks/support"
 	"github.com/yesidodo73/OpenCIIP/internal/evaluator"
 	"github.com/yesidodo73/OpenCIIP/internal/model"
+	"github.com/yesidodo73/OpenCIIP/internal/system"
 )
 
 const (
@@ -115,6 +116,7 @@ func staticPermissionEvaluator(policy permissionPolicy) evaluator.Func {
 		assessment, err := support.InspectPermissions(ctx, environment.Files, environment.Commands, policy.path, support.PermissionPolicy{
 			AllowedUIDs: allowedUIDs, AllowedMode: policy.allowedMode,
 			AllowedTypes: map[string]struct{}{"regular": {}},
+			SkipACL:      true,
 		})
 		if err != nil {
 			return permissionError("file_permission_inspection_failed", policy.path, err)
@@ -123,19 +125,28 @@ func staticPermissionEvaluator(policy permissionPolicy) evaluator.Func {
 			assessment.Evidence = append([]model.Evidence{*ownerEvidence}, assessment.Evidence...)
 		}
 		ownerLabel := "root"
+		displayOwner := "root"
 		if len(policy.allowedOwnerNames) > 0 {
 			ownerLabel += "/" + strings.Join(policy.allowedOwnerNames, "/")
+			displayOwner = strings.Join(append([]string{"root"}, policy.allowedOwnerNames...), ", ") + " 중 하나"
 		}
 		if !assessment.Exists {
 			return permissionError("file_not_found", policy.path, os.ErrNotExist)
 		}
-		expected := fmt.Sprintf("%s 소유 일반 파일이며 권한과 ACL이 %04o 허용 비트 이내여야 합니다.", ownerLabel, policy.allowedMode.Perm())
+		expected := fmt.Sprintf("%s 소유 일반 파일이며 권한이 %04o 이하여야 합니다.", ownerLabel, policy.allowedMode.Perm())
+		displayExpected := fmt.Sprintf("소유자는 %s여야 하고 일반 파일이어야 합니다. 기본 권한은 %04o에 포함된 권한만 허용됩니다: %s. 특수 권한은 허용되지 않습니다.", displayOwner, policy.allowedMode.Perm(), permissionModeMeaning(policy.allowedMode))
+		detail := permissionMetadataDetail(policy.path, assessment.Metadata, displayExpected)
 		if len(assessment.Violations) > 0 {
+			displayFindings := append([]string(nil), assessment.Violations...)
+			if assessment.ExtraModeBits != 0 {
+				displayFindings = append(displayFindings, permissionExcessExplanation(assessment.ExtraModeBits))
+			}
 			return evaluator.Outcome{
 				Status:   model.StatusFail,
-				Summary:  fmt.Sprintf("%s 파일의 소유자, 유형, 권한 또는 ACL이 기준을 충족하지 않습니다.", policy.path),
+				Summary:  fmt.Sprintf("%s 파일의 소유자 또는 권한이 기준을 충족하지 않습니다.", policy.path),
 				Expected: expected,
 				Observed: strings.Join(assessment.Violations, "; "),
+				Details:  []model.ResultDetail{detail, {Label: "판정 결과", Current: strings.Join(displayFindings, "\n")}},
 				Evidence: assessment.Evidence,
 			}
 		}
@@ -143,9 +154,10 @@ func staticPermissionEvaluator(policy permissionPolicy) evaluator.Func {
 			return evaluator.Outcome{
 				Status:        model.StatusUnknown,
 				UnknownReason: model.UnknownUnsupportedConfiguration,
-				Summary:       fmt.Sprintf("%s 파일의 소유자, 유형 또는 ACL을 확정할 수 없습니다.", policy.path),
+				Summary:       fmt.Sprintf("%s 파일의 소유자 또는 권한을 확정할 수 없습니다.", policy.path),
 				Expected:      expected,
 				Observed:      strings.Join(assessment.Unknowns, "; "),
+				Details:       []model.ResultDetail{detail, {Label: "확인하지 못한 내용", Current: strings.Join(assessment.Unknowns, "; ")}},
 				Evidence:      assessment.Evidence,
 			}
 		}
@@ -154,9 +166,65 @@ func staticPermissionEvaluator(policy permissionPolicy) evaluator.Func {
 			Summary:  fmt.Sprintf("%s 파일의 소유자와 권한이 기준을 충족합니다.", policy.path),
 			Expected: expected,
 			Observed: fmt.Sprintf("uid=%d mode=%04o", assessment.Metadata.UID, assessment.Metadata.Mode.Perm()),
+			Details:  []model.ResultDetail{detail},
 			Evidence: assessment.Evidence,
 		}
 	}
+}
+
+func permissionMetadataDetail(path string, metadata system.FileMetadata, expected string) model.ResultDetail {
+	uid := "확인 불가"
+	if metadata.UID >= 0 {
+		uid = fmt.Sprint(metadata.UID)
+	}
+	gid := "확인 불가"
+	if metadata.GID >= 0 {
+		gid = fmt.Sprint(metadata.GID)
+	}
+	current := fmt.Sprintf("소유자 UID=%s, 그룹 GID=%s\n기본 권한=%04o (%s)", uid, gid, metadata.Mode.Perm(), metadata.Mode.String())
+	if metadata.FileType == "regular" {
+		current += "\n기본 권한 비트의 의미: " + permissionModeMeaning(metadata.Mode.Perm())
+	}
+	return model.ResultDetail{
+		Label: "파일 권한", Source: path, Expected: expected,
+		Current: current,
+	}
+}
+
+func permissionModeMeaning(mode os.FileMode) string {
+	return strings.Join(permissionModeParts(mode, true), ", ")
+}
+
+func permissionModeParts(mode os.FileMode, includeEmpty bool) []string {
+	groups := []struct {
+		label string
+		shift uint
+	}{{"소유자", 6}, {"소유 그룹", 3}, {"다른 사용자", 0}}
+	values := make([]string, 0, len(groups))
+	for _, group := range groups {
+		bits := (mode.Perm() >> group.shift) & 0o7
+		rights := make([]string, 0, 3)
+		for _, permission := range []struct {
+			bit  os.FileMode
+			name string
+		}{{0o4, "읽기"}, {0o2, "쓰기"}, {0o1, "실행"}} {
+			if bits&permission.bit != 0 {
+				rights = append(rights, permission.name)
+			}
+		}
+		if len(rights) == 0 {
+			if includeEmpty {
+				values = append(values, group.label+" 권한 없음")
+			}
+		} else {
+			values = append(values, group.label+" "+strings.Join(rights, "·"))
+		}
+	}
+	return values
+}
+
+func permissionExcessExplanation(extra os.FileMode) string {
+	return fmt.Sprintf("기준에 포함되지 않은 기본 권한이 설정되어 있습니다: %s.", strings.Join(permissionModeParts(extra, false), ", "))
 }
 
 func checkACL(content string, allowedMode os.FileMode) ([]string, error) {

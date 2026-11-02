@@ -100,110 +100,24 @@ func evaluateSNMPAccessControl(ctx context.Context, rule model.ResolvedRule, env
 	if len(communityPrincipals) == 0 && len(userPrincipals) == 0 {
 		return evaluator.Outcome{Status: model.StatusUnknown, UnknownReason: model.UnknownInsufficientEvidence, Summary: "SNMP 접근 주체와 view 경로를 확인할 수 없습니다.", Expected: "활성 SNMP 접근 경로가 승인 source/user 및 최소 view로 제한되어야 합니다.", Observed: "해석된 접근 principal 없음", Evidence: evidence}
 	}
-	approvedSources, sourcesSet, err := support.StringSliceParameter(rule.Parameters, "approved_snmp_sources")
-	if err != nil {
-		return snmpPolicyError("invalid_rule_parameter", err, evidence)
-	}
-	approvedUsers, usersSet, err := support.StringSliceParameter(rule.Parameters, "approved_snmp_users")
-	if err != nil {
-		return snmpPolicyError("invalid_rule_parameter", err, evidence)
-	}
-	approvedViews, viewsSet, err := support.StringSliceParameter(rule.Parameters, "approved_snmp_views")
-	if err != nil {
-		return snmpPolicyError("invalid_rule_parameter", err, evidence)
-	}
-	approvedWriters, writersSet, err := support.StringSliceParameter(rule.Parameters, "approved_snmp_write_principals")
-	if err != nil {
-		return snmpPolicyError("invalid_rule_parameter", err, evidence)
-	}
-	sourcePolicy, err := makePolicySet(approvedSources, "approved_snmp_sources")
-	if err != nil {
-		return snmpPolicyError("invalid_rule_parameter", err, evidence)
-	}
-	userPolicy, err := makePolicySet(approvedUsers, "approved_snmp_users")
-	if err != nil {
-		return snmpPolicyError("invalid_rule_parameter", err, evidence)
-	}
-	viewPolicy, err := makePolicySet(approvedViews, "approved_snmp_views")
-	if err != nil {
-		return snmpPolicyError("invalid_rule_parameter", err, evidence)
-	}
-	writerPolicy, err := makePolicySet(approvedWriters, "approved_snmp_write_principals")
-	if err != nil {
-		return snmpPolicyError("invalid_rule_parameter", err, evidence)
-	}
 	unsafe := 0
-	outsidePolicy := 0
-	unknownPolicy := unknownMappings
-	writeCount := 0
 	for _, principal := range communityPrincipals {
 		if broadSNMPSource(principal.Source) {
 			unsafe++
 		}
-		if !sourcesSet {
-			unknownPolicy++
-		} else if !sourcePolicy[principal.Source] {
-			outsidePolicy++
-		}
-		if !viewsSet {
-			unknownPolicy++
-		} else if !viewPolicy[principal.View] {
-			outsidePolicy++
-		}
-		if !snmpViewPolicySelfDescribing(principal.View) {
-			unknownPolicy++
-		}
-		if principal.Write {
-			writeCount++
-			if !writersSet {
-				unknownPolicy++
-			} else if !writerPolicy["source:"+principal.Source] && !writerPolicy[principal.Source] {
-				outsidePolicy++
-			}
-		}
-	}
-	for _, principal := range userPrincipals {
-		if principal.SecurityLevel == "noauth" {
-			unsafe++
-		}
-		if !usersSet {
-			unknownPolicy++
-		} else if !userPolicy[principal.Name] {
-			outsidePolicy++
-		}
-		if !viewsSet {
-			unknownPolicy++
-		} else if !viewPolicy[principal.View] {
-			outsidePolicy++
-		}
-		if !snmpViewPolicySelfDescribing(principal.View) {
-			unknownPolicy++
-		}
-		if principal.Write {
-			writeCount++
-			if !writersSet {
-				unknownPolicy++
-			} else if !writerPolicy["user:"+principal.Name] && !writerPolicy[principal.Name] {
-				outsidePolicy++
-			}
-		}
 	}
 	evidence = append(evidence, support.FactEvidence("SNMP 접근 통제 파생 정보", map[string]any{
 		"community_principal_count": len(communityPrincipals), "v3_principal_count": len(userPrincipals),
-		"write_path_count": writeCount, "unsafe_path_count": unsafe,
-		"outside_policy_count": outsidePolicy, "unknown_mapping_or_policy_count": unknownPolicy,
+		"unsafe_path_count": unsafe, "unknown_mapping_count": unknownMappings,
 		"principal_values_redacted": true,
 	}))
 	if unsafe > 0 {
-		return evaluator.Outcome{Status: model.StatusFail, Summary: "모든 source를 허용하거나 인증 없는 SNMP 접근 경로가 있습니다.", Expected: "승인 source/user와 필요한 최소 view로 제한하고 v3 인증을 요구해야 합니다.", Observed: fmt.Sprintf("명백히 무통제인 접근 경로 %d개", unsafe), Evidence: evidence}
+		return evaluator.Outcome{Status: model.StatusFail, Summary: "모든 출발지를 허용하는 SNMP 접근 경로가 있습니다.", Expected: rule.Criteria.Pass, Observed: fmt.Sprintf("접근 제어가 없는 경로 %d개", unsafe), Evidence: evidence}
 	}
-	if outsidePolicy > 0 {
-		return evaluator.Outcome{Status: model.StatusFail, Summary: "SNMP 접근 범위가 승인 source/user/view 정책보다 넓습니다.", Expected: "모든 접근 principal과 view가 승인 정책의 부분집합이어야 합니다.", Observed: fmt.Sprintf("승인 정책 밖 조건 %d건", outsidePolicy), Evidence: evidence}
+	if unknownMappings > 0 {
+		return evaluator.Outcome{Status: model.StatusUnknown, UnknownReason: model.UnknownUnsupportedConfiguration, Summary: "일부 SNMP 접근 제어 경로를 해석할 수 없습니다.", Expected: rule.Criteria.Pass, Observed: fmt.Sprintf("확정 불가 매핑 %d건", unknownMappings), Evidence: evidence}
 	}
-	if unknownPolicy > 0 {
-		return evaluator.Outcome{Status: model.StatusUnknown, UnknownReason: model.UnknownManualVerification, Summary: "SNMP VACM 경로를 승인 source/user/view 정책과 완전히 대조할 수 없습니다.", Expected: "approved_snmp_sources/users/views와 쓰기 principal 정책이 필요합니다.", Observed: fmt.Sprintf("확정 불가 mapping/policy 조건 %d건", unknownPolicy), Evidence: evidence}
-	}
-	return evaluator.Outcome{Status: model.StatusPass, Summary: "SNMP 접근 경로가 승인 source/user와 view로 제한되어 있습니다.", Expected: "모든 접근 principal과 view가 승인 정책의 부분집합이어야 합니다.", Observed: fmt.Sprintf("community 경로 %d개, v3 경로 %d개", len(communityPrincipals), len(userPrincipals)), Evidence: evidence}
+	return evaluator.Outcome{Status: model.StatusPass, Summary: "SNMP 서비스에 접근 제어가 설정되어 있습니다.", Expected: rule.Criteria.Pass, Observed: fmt.Sprintf("community 경로 %d개, v3 경로 %d개", len(communityPrincipals), len(userPrincipals)), Evidence: evidence}
 }
 
 func snmpViewPolicySelfDescribing(view string) bool {

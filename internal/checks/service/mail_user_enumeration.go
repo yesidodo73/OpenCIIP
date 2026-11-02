@@ -2,7 +2,9 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -47,6 +49,8 @@ func evaluateMailUserEnumeration(ctx context.Context, _ model.ResolvedRule, envi
 		return evaluatePostfixUserEnumeration(ctx, environment, target)
 	case "sendmail":
 		return evaluateSendmailUserEnumeration(ctx, environment, target)
+	case "exim":
+		return evaluateEximUserEnumeration(ctx, environment, target)
 	default:
 		return evaluator.Outcome{
 			Status:        model.StatusUnknown,
@@ -57,6 +61,48 @@ func evaluateMailUserEnumeration(ctx context.Context, _ model.ResolvedRule, envi
 			Evidence:      target.evidence,
 		}
 	}
+}
+
+func evaluateEximUserEnumeration(ctx context.Context, environment evaluator.Environment, target serviceTarget) evaluator.Outcome {
+	evidence := append([]model.Evidence(nil), target.evidence...)
+	var data []byte
+	configPath := ""
+	for _, candidate := range []string{"/etc/exim/exim.conf", "/etc/exim4/exim4.conf"} {
+		content, metadata, err := environment.Files.ReadFile(ctx, candidate, 2<<20)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return mailEnumerationError("exim_config_read_failed", err)
+		}
+		if configPath != "" {
+			return evaluator.Outcome{Status: model.StatusUnknown, UnknownReason: model.UnknownAmbiguousResult, Summary: "Exim 설정 파일이 둘 이상 존재합니다.", Expected: "활성 Exim 설정에서 VRFY와 EXPN 허용 지시문이 없어야 합니다.", Observed: configPath + ", " + candidate, Evidence: evidence}
+		}
+		configPath = candidate
+		data = content
+		evidence = append(evidence, support.FileMetadataEvidence(metadata))
+	}
+	if configPath == "" {
+		return mailEnumerationError("exim_config_read_failed", fmt.Errorf("Exim configuration file not found"))
+	}
+	allowed := make([]string, 0, 2)
+	for _, raw := range strings.Split(strings.ReplaceAll(string(data), "\r\n", "\n"), "\n") {
+		line := strings.TrimSpace(strings.SplitN(raw, "#", 2)[0])
+		key, value, found := strings.Cut(line, "=")
+		if !found || !strings.EqualFold(strings.TrimSpace(value), "accept") {
+			continue
+		}
+		switch strings.ToLower(strings.TrimSpace(key)) {
+		case "acl_smtp_vrfy", "acl_smtp_expn":
+			allowed = append(allowed, strings.ToLower(strings.TrimSpace(key)))
+		}
+	}
+	sort.Strings(allowed)
+	evidence = append(evidence, support.FactEvidence(configPath, map[string]any{"allowed_user_enumeration_directives": allowed}))
+	if len(allowed) > 0 {
+		return evaluator.Outcome{Status: model.StatusFail, Summary: "Exim에서 사용자 열거 명령을 허용하고 있습니다.", Expected: "VRFY와 EXPN 허용 지시문이 없어야 합니다.", Observed: strings.Join(allowed, ", ") + "=accept", Evidence: evidence}
+	}
+	return evaluator.Outcome{Status: model.StatusPass, Summary: "Exim의 VRFY 및 EXPN 허용 설정이 제거되어 있습니다.", Expected: "VRFY와 EXPN 허용 지시문이 없어야 합니다.", Observed: "acl_smtp_vrfy/acl_smtp_expn accept 설정 없음", Evidence: evidence}
 }
 
 func evaluatePostfixUserEnumeration(ctx context.Context, environment evaluator.Environment, target serviceTarget) evaluator.Outcome {

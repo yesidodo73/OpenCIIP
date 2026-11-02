@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"fmt"
-	"os"
 	"strings"
 	"time"
 
@@ -99,21 +98,27 @@ func evaluateMailQueueRestriction(ctx context.Context, _ model.ResolvedRule, env
 		}
 		return evaluator.Outcome{Status: model.StatusPass, Summary: "Sendmail queue 실행이 제한되어 있습니다.", Expected: "PrivacyOptions에 restrictqrun이 적용되어야 합니다.", Observed: "restrictqrun 설정됨", Evidence: evidence}
 	case "postfix":
-		metadata, err := environment.Files.Lstat("/usr/sbin/postsuper")
-		if err != nil {
-			return mailPolicyError("postsuper_stat_failed", err, target.evidence)
-		}
-		evidence := append(target.evidence, support.FileMetadataEvidence(metadata))
-		if metadata.FileType != "regular" || metadata.UID < 0 {
-			return evaluator.Outcome{Status: model.StatusUnknown, UnknownReason: model.UnknownUnsupportedConfiguration, Summary: "Postfix queue 관리 도구의 유형과 소유자를 확정할 수 없습니다.", Expected: "일반 사용자가 queue 관리 권한을 얻지 않아야 합니다.", Observed: metadata.FileType, Evidence: evidence}
-		}
-		if metadata.UID != 0 || metadata.Mode.Perm()&0o022 != 0 || metadata.Mode&(os.ModeSetuid|os.ModeSetgid) != 0 {
-			return evaluator.Outcome{Status: model.StatusFail, Summary: "Postfix queue 관리 도구에 명백히 위험한 소유자 또는 권한이 있습니다.", Expected: "root 소유이고 비소유자 쓰기와 setuid/setgid가 없어야 합니다.", Observed: fmt.Sprintf("uid=%d mode=%s", metadata.UID, metadata.Mode.String()), Evidence: evidence}
-		}
-		return evaluator.Outcome{Status: model.StatusUnknown, UnknownReason: model.UnknownUnsupportedConfiguration, Summary: "Postfix 패키지의 queue 권한 모델만으로 일반 계정의 관리 작업 가능 여부를 확정할 수 없습니다.", Expected: "일반 사용자가 postsuper queue 관리 작업을 수행하지 못해야 합니다.", Observed: fmt.Sprintf("uid=%d mode=%s", metadata.UID, metadata.Mode.String()), Evidence: evidence}
+		return evaluateMailQueueCommandPermission(environment, target, "/usr/sbin/postsuper")
+	case "exim":
+		return evaluateMailQueueCommandPermission(environment, target, "/usr/sbin/exiqgrep")
 	default:
-		return unsupportedTargetOutcome("메일 서비스", "지원하지 않는 MTA queue 권한 모델입니다.", target.evidence)
+		return unsupportedTargetOutcome("메일 서비스", "지원하지 않는 MTA queue 제한 방식입니다.", target.evidence)
 	}
+}
+
+func evaluateMailQueueCommandPermission(environment evaluator.Environment, target serviceTarget, commandPath string) evaluator.Outcome {
+	metadata, err := environment.Files.Lstat(commandPath)
+	if err != nil {
+		return mailPolicyError("mail_queue_command_stat_failed", err, target.evidence)
+	}
+	evidence := append(target.evidence, support.FileMetadataEvidence(metadata))
+	if metadata.FileType != "regular" {
+		return evaluator.Outcome{Status: model.StatusUnknown, UnknownReason: model.UnknownUnsupportedConfiguration, Summary: "메일 queue 관리 명령의 파일 유형을 확정할 수 없습니다.", Expected: "일반 사용자의 실행 권한이 제거되어야 합니다.", Observed: commandPath + " type=" + metadata.FileType, Evidence: evidence}
+	}
+	if metadata.Mode.Perm()&0o001 != 0 {
+		return evaluator.Outcome{Status: model.StatusFail, Summary: "일반 사용자에게 메일 queue 관리 명령 실행 권한이 있습니다.", Expected: "일반 사용자의 실행 권한이 제거되어야 합니다.", Observed: fmt.Sprintf("%s mode=%04o", commandPath, metadata.Mode.Perm()), Evidence: evidence}
+	}
+	return evaluator.Outcome{Status: model.StatusPass, Summary: "일반 사용자의 메일 queue 관리 명령 실행 권한이 제거되어 있습니다.", Expected: "일반 사용자의 실행 권한이 제거되어야 합니다.", Observed: fmt.Sprintf("%s mode=%04o", commandPath, metadata.Mode.Perm()), Evidence: evidence}
 }
 
 func evaluateMailRelay(ctx context.Context, rule model.ResolvedRule, environment evaluator.Environment) evaluator.Outcome {
@@ -162,43 +167,13 @@ func evaluateMailRelay(ctx context.Context, rule model.ResolvedRule, environment
 	if len(unsafe) > 0 {
 		return evaluator.Outcome{Status: model.StatusFail, Summary: "Postfix relay 제한에 명백한 open relay 구성이 있습니다.", Expected: "인증 또는 승인 네트워크·도메인만 relay하고 나머지는 unauth destination으로 거부해야 합니다.", Observed: strings.Join(unsafe, "; "), Evidence: evidence}
 	}
-	approvedNetworks, networkPolicy, err := support.StringSliceParameter(rule.Parameters, "approved_relay_clients")
-	if err != nil {
-		return mailPolicyError("invalid_rule_parameter", err, evidence)
-	}
-	approvedDomains, domainPolicy, err := support.StringSliceParameter(rule.Parameters, "approved_relay_domains")
-	if err != nil {
-		return mailPolicyError("invalid_rule_parameter", err, evidence)
-	}
-	if !networkPolicy || !domainPolicy || containsDynamicPostfixValue(networks) || containsDynamicPostfixValue(domains) {
-		return evaluator.Outcome{Status: model.StatusUnknown, UnknownReason: model.UnknownManualVerification, Summary: "Postfix relay 흐름은 거부 조건을 포함하지만 승인 client·domain 정책과 완전히 대조할 수 없습니다.", Expected: "approved_relay_clients와 approved_relay_domains를 실효값과 대조해야 합니다.", Observed: fmt.Sprintf("mynetworks 항목 %d개, relay_domains 항목 %d개", len(networks), len(domains)), Evidence: evidence}
-	}
-	networkPolicySet, setErr := makePolicySet(approvedNetworks, "approved_relay_clients")
-	if setErr != nil {
-		return mailPolicyError("invalid_rule_parameter", setErr, evidence)
-	}
-	domainPolicySet, setErr := makePolicySet(approvedDomains, "approved_relay_domains")
-	if setErr != nil {
-		return mailPolicyError("invalid_rule_parameter", setErr, evidence)
-	}
-	outside := make([]string, 0)
-	for _, network := range networks {
-		if !networkPolicySet[network] {
-			outside = append(outside, "승인 목록 밖 relay client")
-		}
-	}
-	for _, domain := range domains {
-		if !domainPolicySet[domain] {
-			outside = append(outside, "승인 목록 밖 relay domain")
-		}
-	}
-	if len(outside) > 0 {
-		return evaluator.Outcome{Status: model.StatusFail, Summary: "Postfix relay 범위가 승인 정책보다 넓습니다.", Expected: "실효 relay client와 domain이 승인 목록의 부분집합이어야 합니다.", Observed: strings.Join(uniqueStrings(outside), "; "), Evidence: evidence}
+	if containsDynamicPostfixValue(networks) || containsDynamicPostfixValue(domains) {
+		return evaluator.Outcome{Status: model.StatusUnknown, UnknownReason: model.UnknownUnsupportedConfiguration, Summary: "Postfix relay 제한의 동적 client 또는 domain 값을 해석할 수 없습니다.", Expected: rule.Criteria.Pass, Observed: fmt.Sprintf("mynetworks 항목 %d개, relay_domains 항목 %d개", len(networks), len(domains)), Evidence: evidence}
 	}
 	if len(restrictionAssessment.indeterminate) > 0 {
 		return evaluator.Outcome{Status: model.StatusUnknown, UnknownReason: model.UnknownUnsupportedConfiguration, Summary: "Postfix unauth destination 거부 전에 실행되는 restriction의 허용 동작을 결정적으로 해석할 수 없습니다.", Expected: "승인 범위 외 relay가 access map이나 사용자 정의 restriction보다 먼저 또는 그 결과와 관계없이 거부됨을 증명해야 합니다.", Observed: strings.Join(restrictionAssessment.indeterminate, "; "), Evidence: evidence}
 	}
-	return evaluator.Outcome{Status: model.StatusPass, Summary: "Postfix relay가 인증 또는 승인된 client·domain으로 제한되어 있습니다.", Expected: "승인 범위 외 relay가 unauth destination으로 거부되어야 합니다.", Observed: fmt.Sprintf("승인 client %d개와 domain %d개를 대조했습니다.", len(networks), len(domains)), Evidence: evidence}
+	return evaluator.Outcome{Status: model.StatusPass, Summary: "Postfix relay 제한이 설정되어 있습니다.", Expected: rule.Criteria.Pass, Observed: fmt.Sprintf("relay client %d개와 domain %d개, unauth destination 거부 확인", len(networks), len(domains)), Evidence: evidence}
 }
 
 func postconfPrivateValue(ctx context.Context, environment evaluator.Environment, name string) (string, model.Evidence, error) {

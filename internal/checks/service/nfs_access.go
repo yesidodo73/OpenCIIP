@@ -43,7 +43,7 @@ func evaluateNFSAccessControl(ctx context.Context, rule model.ResolvedRule, envi
 		return serviceError("nfs_exportfs_parse_failed", "NFS 접근 통제", err)
 	}
 	if len(exports) == 0 {
-		return evaluator.Outcome{Status: model.StatusNotApplicable, Summary: "활성 NFS export가 없습니다.", Expected: "활성 NFS export에만 접근 통제 기준을 적용합니다.", Observed: "exportfs -v 결과 없음", Evidence: evidence}
+		return evaluator.Outcome{Status: model.StatusNotApplicable, Summary: "활성 NFS export가 없습니다.", Expected: rule.Criteria.Pass, Observed: "exportfs -v 결과 없음", Evidence: evidence}
 	}
 
 	configPaths, err := nfsExportConfigPaths(environment)
@@ -63,125 +63,56 @@ func evaluateNFSAccessControl(ctx context.Context, rule model.ResolvedRule, envi
 		}
 		configSeen = true
 		evidence = append(evidence, support.FileMetadataEvidence(metadata))
-		if metadata.FileType != "regular" || metadata.UID < 0 {
+		if metadata.FileType != "regular" {
 			permissionUnknown = true
 			continue
 		}
-		if metadata.UID != 0 || metadata.Mode.Perm()&^os.FileMode(0o644) != 0 || metadata.Mode&(os.ModeSetuid|os.ModeSetgid|os.ModeSticky) != 0 {
+		if metadata.Mode.Perm()&^os.FileMode(0o644) != 0 || metadata.Mode&(os.ModeSetuid|os.ModeSetgid|os.ModeSticky) != 0 {
 			permissionExcess = true
 		}
-		aclSpec := executor.Spec{Name: "getfacl", Arguments: []string{"-cpn", "--absolute-names", "--", configPath}, Timeout: 15 * time.Second, MaxOutput: 1 << 20}
-		acl, aclErr := environment.Commands.Run(ctx, aclSpec)
-		if aclErr != nil {
-			return serviceError("nfs_exports_acl_failed", "NFS 접근 통제", aclErr)
-		}
-		evidence = append(evidence, support.CommandEvidence(aclSpec, acl))
-		if acl.ExitCode != 0 || acl.Truncated {
-			return serviceError("nfs_exports_acl_failed", "NFS 접근 통제", fmt.Errorf("exit=%d truncated=%t", acl.ExitCode, acl.Truncated))
-		}
-		excess, parseErr := nfsConfigACLExcess(string(acl.Stdout))
-		if parseErr != nil {
-			return serviceError("nfs_exports_acl_parse_failed", "NFS 접근 통제", parseErr)
-		}
-		permissionExcess = permissionExcess || excess
 	}
 	if !configSeen {
 		permissionUnknown = true
 	}
 
-	approvedClients, clientsSet, parameterErr := support.StringSliceParameter(rule.Parameters, "approved_nfs_clients")
-	if parameterErr != nil {
-		return serviceError("invalid_rule_parameter", "NFS 접근 통제", parameterErr)
-	}
-	approvedFlavors, flavorsSet, parameterErr := support.StringSliceParameter(rule.Parameters, "approved_nfs_security_flavors")
-	if parameterErr != nil {
-		return serviceError("invalid_rule_parameter", "NFS 접근 통제", parameterErr)
-	}
-	approvedRWPaths, rwSet, parameterErr := support.StringSliceParameter(rule.Parameters, "approved_nfs_rw_paths")
-	if parameterErr != nil {
-		return serviceError("invalid_rule_parameter", "NFS 접근 통제", parameterErr)
-	}
-	clientPolicy, parameterErr := makePolicySet(approvedClients, "approved_nfs_clients")
-	if parameterErr != nil {
-		return serviceError("invalid_rule_parameter", "NFS 접근 통제", parameterErr)
-	}
-	flavorPolicy, parameterErr := makePolicySet(approvedFlavors, "approved_nfs_security_flavors")
-	if parameterErr != nil {
-		return serviceError("invalid_rule_parameter", "NFS 접근 통제", parameterErr)
-	}
-	rwPolicy, parameterErr := makePolicySet(approvedRWPaths, "approved_nfs_rw_paths")
-	if parameterErr != nil {
-		return serviceError("invalid_rule_parameter", "NFS 접근 통제", parameterErr)
-	}
 	uncontrolled := false
-	policyViolations := make([]string, 0)
-	unknowns := make([]string, 0)
 	for _, export := range exports {
 		if export.Client == "*" || export.Client == "<world>" {
 			uncontrolled = true
-			policyViolations = append(policyViolations, "모든 클라이언트에 허용된 export")
-		} else if clientsSet && !clientPolicy[export.Client] {
-			policyViolations = append(policyViolations, "승인 목록 밖 client selector")
-		} else if !clientsSet {
-			unknowns = append(unknowns, "approved_nfs_clients 없음")
-		}
-		if _, disabled := export.Options["no_root_squash"]; disabled {
-			policyViolations = append(policyViolations, "no_root_squash")
-		} else if _, enabled := export.Options["root_squash"]; !enabled {
-			unknowns = append(unknowns, "root_squash 실효값 미확인")
-		}
-		flavors := strings.Split(export.Options["sec"], ":")
-		if export.Options["sec"] == "" {
-			unknowns = append(unknowns, "NFS security flavor 미확인")
-		} else if !flavorsSet {
-			unknowns = append(unknowns, "approved_nfs_security_flavors 없음")
-		} else {
-			for _, flavor := range flavors {
-				if !flavorPolicy[flavor] {
-					policyViolations = append(policyViolations, "승인 목록 밖 security flavor")
-				}
-			}
-		}
-		if _, writable := export.Options["rw"]; writable {
-			if !rwSet {
-				unknowns = append(unknowns, "approved_nfs_rw_paths 없음")
-			} else if !rwPolicy[export.Path] {
-				policyViolations = append(policyViolations, "승인 목록 밖 쓰기 export")
-			}
 		}
 	}
-	policyViolations = uniqueStrings(policyViolations)
-	unknowns = uniqueStrings(unknowns)
 	evidence = append(evidence, support.FactEvidence("exportfs -v 파생 정보", map[string]any{
 		"export_count": len(exports), "uncontrolled_client": uncontrolled,
-		"policy_violation_count": len(policyViolations), "unknown_count": len(unknowns), "content_redacted": true,
+		"permission_excess": permissionExcess, "permission_unknown": permissionUnknown, "content_redacted": true,
 	}))
 	if uncontrolled && permissionExcess {
-		return evaluator.Outcome{Status: model.StatusFail, Summary: "NFS 접근 통제가 없고 exports 설정 파일 권한도 기준을 초과합니다.", Expected: "승인 client로 제한하고 exports 파일을 root 소유 0644 허용 비트 이내로 유지해야 합니다.", Observed: "world export와 설정 파일 권한 초과가 함께 확인됨", Evidence: evidence}
+		return evaluator.Outcome{Status: model.StatusFail, Summary: "NFS 접근 통제가 없고 설정 파일 권한도 644를 초과합니다.", Expected: rule.Criteria.Pass, Observed: "모든 클라이언트에 허용된 export와 설정 파일 권한 초과가 함께 확인됨", Evidence: evidence}
 	}
-	if len(policyViolations) > 0 || permissionExcess || permissionUnknown || len(unknowns) > 0 {
-		parts := append([]string(nil), policyViolations...)
+	if uncontrolled || permissionExcess || permissionUnknown {
+		parts := make([]string, 0, 3)
+		if uncontrolled {
+			parts = append(parts, "모든 클라이언트에 허용된 export")
+		}
 		if permissionExcess {
-			parts = append(parts, "설정 파일 소유자·권한 초과")
+			parts = append(parts, "설정 파일 권한 644 초과")
 		}
 		if permissionUnknown {
-			parts = append(parts, "설정 파일 유형·소유자 확정 불가")
+			parts = append(parts, "설정 파일 유형 또는 권한 확정 불가")
 		}
-		parts = append(parts, unknowns...)
-		return evaluator.Outcome{Status: model.StatusUnknown, UnknownReason: model.UnknownManualVerification, Summary: "NFS 접근 통제의 일부 조건을 정책과 대조하거나 확정해야 합니다.", Expected: "승인 client·security flavor·쓰기 경로로 제한하고 exports 파일 권한이 안전해야 합니다.", Observed: strings.Join(uniqueStrings(parts), "; "), Evidence: evidence}
+		return evaluator.Outcome{Status: model.StatusUnknown, UnknownReason: model.UnknownAmbiguousResult, Summary: "가이드의 양호·취약 복합 조건 중 한쪽만 확인되어 수동 판단이 필요합니다.", Expected: rule.Criteria.Pass, Observed: strings.Join(parts, "; "), Evidence: evidence}
 	}
-	return evaluator.Outcome{Status: model.StatusPass, Summary: "NFS export가 승인 정책으로 제한되고 설정 파일 권한이 안전합니다.", Expected: "승인 client·security flavor·쓰기 경로로 제한하고 exports 파일 권한이 안전해야 합니다.", Observed: fmt.Sprintf("export %d개를 승인 정책과 대조했습니다.", len(exports)), Evidence: evidence}
+	return evaluator.Outcome{Status: model.StatusPass, Summary: "NFS 접근 통제가 설정되어 있고 설정 파일 권한이 644 이하입니다.", Expected: rule.Criteria.Pass, Observed: fmt.Sprintf("접근 제한 export %d개와 설정 파일 권한을 확인했습니다.", len(exports)), Evidence: evidence}
 }
 
 func nfsAccessWithoutExportfs(presence evaluator.Outcome) evaluator.Outcome {
 	if presence.Status == model.StatusError {
 		return presence
 	}
-	if presence.Status == model.StatusNotApplicable {
+	if presence.Status == model.StatusNotApplicable || presence.Status == model.StatusPass {
 		return evaluator.Outcome{
 			Status:   model.StatusNotApplicable,
 			Summary:  "NFS 서버 구성요소와 export가 없습니다.",
-			Expected: "활성 NFS export에만 접근 통제 기준을 적용합니다.",
+			Expected: presence.Expected,
 			Observed: presence.Observed,
 			Evidence: presence.Evidence,
 		}

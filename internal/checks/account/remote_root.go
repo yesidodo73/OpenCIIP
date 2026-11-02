@@ -49,9 +49,9 @@ func evaluateRemoteRootLogin(ctx context.Context, _ model.ResolvedRule, environm
 			observed += " 설치된 unit: " + strings.Join(installed, ", ")
 		}
 		return evaluator.Outcome{
-			Status:   model.StatusNotApplicable,
-			Summary:  "활성 원격 터미널 서비스가 없습니다.",
-			Expected: "활성 SSH 또는 Telnet 경로가 있을 때 root 직접 로그인을 차단해야 합니다.",
+			Status:   model.StatusPass,
+			Summary:  "원격 터미널 서비스가 사용되지 않습니다.",
+			Expected: "원격 터미널 서비스를 사용하지 않거나 root 직접 접속을 차단해야 합니다.",
 			Observed: observed,
 			Evidence: evidence,
 		}

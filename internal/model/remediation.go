@@ -12,11 +12,16 @@ import (
 
 const (
 	legacyRemediationSchemaVersion = 2
-	RemediationSchemaVersion       = 3
+	provenanceSchemaVersion        = 3
+	RemediationSchemaVersion       = 4
 )
 
 func IsSupportedRemediationSchemaVersion(version int) bool {
-	return version == legacyRemediationSchemaVersion || version == RemediationSchemaVersion
+	return version == legacyRemediationSchemaVersion || HasRemediationBuildProvenance(version)
+}
+
+func HasRemediationBuildProvenance(version int) bool {
+	return version == provenanceSchemaVersion || version == RemediationSchemaVersion
 }
 
 type RemediationRisk string
@@ -1481,6 +1486,7 @@ type RemediationBuildIdentity struct {
 
 var (
 	stableRemediationVersionPattern   = regexp.MustCompile(`^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$`)
+	cleanRemediationVersionPattern    = regexp.MustCompile(`^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-((0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(\.(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*))?$`)
 	canonicalRemediationCommitPattern = regexp.MustCompile(`^([0-9a-f]{40}|[0-9a-f]{64})$`)
 )
 
@@ -1498,14 +1504,25 @@ func (i RemediationBuildIdentity) ValidateRollbackExecutor() error {
 	if err := i.Validate(); err != nil {
 		return err
 	}
-	if !stableRemediationVersionPattern.MatchString(i.Version) {
-		return fmt.Errorf("rollback executor version is not a stable Semantic Version")
+	if !cleanRemediationVersionPattern.MatchString(i.Version) {
+		return fmt.Errorf("rollback executor version is not a Semantic Version without build metadata")
 	}
 	if !canonicalRemediationCommitPattern.MatchString(i.Commit) || strings.Trim(i.Commit, "0") == "" {
 		return fmt.Errorf("rollback executor commit is not a non-null canonical Git revision")
 	}
 	if i.Modified {
 		return fmt.Errorf("rollback executor build is modified")
+	}
+	return nil
+}
+
+// ValidateLegacyRollbackExecutor preserves the version 3 journal contract.
+func (i RemediationBuildIdentity) ValidateLegacyRollbackExecutor() error {
+	if err := i.ValidateRollbackExecutor(); err != nil {
+		return err
+	}
+	if !stableRemediationVersionPattern.MatchString(i.Version) {
+		return fmt.Errorf("version 3 rollback executor requires a stable Semantic Version")
 	}
 	return nil
 }
@@ -1517,7 +1534,7 @@ func validateRollbackAttemptProvenance(schemaVersion int, journalBuild Remediati
 		}
 		return nil
 	}
-	if schemaVersion != RemediationSchemaVersion {
+	if !HasRemediationBuildProvenance(schemaVersion) {
 		return fmt.Errorf("rollback attempt %s has unsupported schema provenance", attempt.ID)
 	}
 	if attempt.Trigger == RollbackCrashRecovery {
@@ -1538,7 +1555,13 @@ func validateRollbackAttemptProvenance(schemaVersion int, journalBuild Remediati
 			return fmt.Errorf("automatic rollback attempt %s executor differs from the remediation build", attempt.ID)
 		}
 	case RollbackUserRequest:
-		if err := attempt.ExecutorBuild.ValidateRollbackExecutor(); err != nil {
+		var err error
+		if schemaVersion == provenanceSchemaVersion {
+			err = attempt.ExecutorBuild.ValidateLegacyRollbackExecutor()
+		} else {
+			err = attempt.ExecutorBuild.ValidateRollbackExecutor()
+		}
+		if err != nil {
 			return fmt.Errorf("user rollback attempt %s: %w", attempt.ID, err)
 		}
 		if attempt.Scope == RollbackItem {
@@ -1657,7 +1680,7 @@ func (j RemediationJournal) Validate() error {
 	if strings.TrimSpace(j.ScanToolVersion) == "" || strings.TrimSpace(j.ScanToolCommit) == "" || strings.TrimSpace(j.RuleSetVersion) == "" {
 		return fmt.Errorf("scan tool identity and rule set version are required")
 	}
-	if j.SchemaVersion == RemediationSchemaVersion && !validSHA256(j.ScanToolExecutableSHA256) {
+	if HasRemediationBuildProvenance(j.SchemaVersion) && !validSHA256(j.ScanToolExecutableSHA256) {
 		return fmt.Errorf("scan executable digest is invalid")
 	}
 	if j.SchemaVersion == legacyRemediationSchemaVersion && j.ScanToolExecutableSHA256 != "" {
@@ -1669,7 +1692,7 @@ func (j RemediationJournal) Validate() error {
 	if err := j.RemediationBuild.Validate(); err != nil {
 		return err
 	}
-	if j.SchemaVersion == RemediationSchemaVersion &&
+	if HasRemediationBuildProvenance(j.SchemaVersion) &&
 		(j.ScanToolVersion != j.RemediationBuild.Version ||
 			j.ScanToolCommit != j.RemediationBuild.Commit) {
 		return fmt.Errorf("scan and remediation build version or commit do not match")

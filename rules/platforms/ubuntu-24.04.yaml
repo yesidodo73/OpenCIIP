@@ -30,7 +30,3 @@ bindings:
       environments:
         - Ubuntu 24.04 LTS amd64
       verified_at: "2026-08-02T14:58:30.339056Z"
-  - rule_id: U-62
-    parameters:
-      known_inadequate_issue_hashes:
-        - 0f42739b4fee9ba3ea7768ddf304853467e394265dc2dfde4a9531156e57ceb8

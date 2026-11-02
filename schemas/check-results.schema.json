@@ -399,6 +399,9 @@
         "expected": {
           "type": "string"
         },
+        "solution": {
+          "type": "string"
+        },
         "observed": {
           "type": "string"
         },

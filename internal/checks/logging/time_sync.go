@@ -38,47 +38,46 @@ func evaluateTimeSync(ctx context.Context, rule model.ResolvedRule, environment 
 			Observed:      environment.Platform.InitSystem,
 		}
 	}
-	units, unitEvidence, err := support.InspectUnits(ctx, environment, []string{"chronyd.service", "systemd-timesyncd.service"})
+	units, unitEvidence, err := support.InspectUnits(ctx, environment, []string{"chronyd.service", "ntp.service", "systemd-timesyncd.service"})
 	if err != nil {
 		return logError("time_sync_service_failed", err, unitEvidence...)
 	}
 	evidence := append([]model.Evidence(nil), unitEvidence...)
-	if len(units) != 2 {
+	if len(units) != 3 {
 		return logError("time_sync_service_failed", fmt.Errorf("time synchronization unit inventory is incomplete"), evidence...)
 	}
-	if support.UnitInstalled(units[0]) && support.UnitActive(units[0]) &&
-		support.UnitInstalled(units[1]) && support.UnitActive(units[1]) {
+	active := make([]int, 0, 3)
+	for index, unit := range units {
+		if support.UnitInstalled(unit) && support.UnitActive(unit) {
+			active = append(active, index)
+		}
+	}
+	if len(active) > 1 {
 		return evaluator.Outcome{
 			Status:        model.StatusUnknown,
 			UnknownReason: model.UnknownAmbiguousResult,
-			Summary:       "둘 이상의 시각 동기화 서비스가 동시에 실행 중이어서 실효 관리자를 확정할 수 없습니다.",
-			Expected:      "실효 시각 동기화 관리자와 시간원을 하나의 일관된 상태로 확인할 수 있어야 합니다.",
-			Observed:      "chronyd.service=active, systemd-timesyncd.service=active",
+			Summary:       "둘 이상의 시각 동기화 서비스가 동시에 실행 중입니다.",
+			Expected:      rule.Criteria.Pass,
+			Observed:      fmt.Sprintf("활성 시각 동기화 서비스 %d개", len(active)),
 			Evidence:      evidence,
 		}
 	}
-	if support.UnitInstalled(units[1]) && support.UnitActive(units[1]) &&
-		(!support.UnitInstalled(units[0]) || !support.UnitActive(units[0])) {
-		return evaluateSystemdTimesyncd(ctx, rule, environment, units[1], evidence)
+	if len(active) == 1 && active[0] == 1 {
+		return evaluateNTPD(ctx, rule, environment, evidence)
 	}
-	if !support.UnitInstalled(units[0]) {
-		if support.UnitInstalled(units[1]) {
-			return evaluateSystemdTimesyncd(ctx, rule, environment, units[1], evidence)
-		}
+	if len(active) == 1 && active[0] == 2 {
 		return evaluator.Outcome{
-			Status:   model.StatusFail,
-			Summary:  "시각 동기화 서비스가 설치되어 있지 않습니다.",
-			Expected: "지원되는 시각 동기화 서비스가 설치되어 활성화되고 승인된 시간원과 동기화되어야 합니다.",
-			Observed: "chronyd.service 및 systemd-timesyncd.service not found",
-			Evidence: evidence,
+			Status: model.StatusUnknown, UnknownReason: model.UnknownUnsupportedConfiguration,
+			Summary:  "가이드의 Linux 점검 사례에 없는 systemd-timesyncd가 사용 중입니다.",
+			Expected: rule.Criteria.Pass, Observed: "systemd-timesyncd.service=active", Evidence: evidence,
 		}
 	}
-	if !support.UnitActive(units[0]) || !support.UnitEnabled(units[0]) {
+	if len(active) == 0 {
 		return evaluator.Outcome{
 			Status:   model.StatusFail,
 			Summary:  "시각 동기화 서비스가 활성화되어 있지 않습니다.",
-			Expected: "chronyd가 실행 중이며 부팅 시 활성화되어야 합니다.",
-			Observed: fmt.Sprintf("active=%s unit_file=%s", units[0].ActiveState, units[0].UnitFileState),
+			Expected: rule.Criteria.Pass,
+			Observed: "chronyd.service 및 ntp.service 비활성",
 			Evidence: evidence,
 		}
 	}
@@ -92,39 +91,12 @@ func evaluateTimeSync(ctx context.Context, rule model.ResolvedRule, environment 
 		return evaluator.Outcome{
 			Status:   model.StatusFail,
 			Summary:  "chrony 설정에 시간원이 지정되어 있지 않습니다.",
-			Expected: "하나 이상의 승인된 server 또는 pool 시간원이 설정되어야 합니다.",
+			Expected: rule.Criteria.Pass,
 			Observed: "server/pool 없음",
 			Evidence: evidence,
 		}
 	}
 
-	trackingSpec := executor.Spec{Name: "chronyc", Arguments: []string{"tracking"}, Timeout: 10 * time.Second}
-	tracking, err := environment.Commands.Run(ctx, trackingSpec)
-	if err != nil {
-		return logError("chronyc_tracking_failed", err, evidence...)
-	}
-	evidence = append(evidence, support.CommandEvidence(trackingSpec, tracking))
-	if tracking.ExitCode != 0 || tracking.Truncated {
-		return evaluator.Outcome{
-			Status:        model.StatusUnknown,
-			UnknownReason: model.UnknownInsufficientEvidence,
-			Summary:       "현재 시각 동기화 상태를 확인하지 못했습니다.",
-			Expected:      "chronyc tracking이 정상 상태를 반환해야 합니다.",
-			Observed:      fmt.Sprintf("exit=%d truncated=%t", tracking.ExitCode, tracking.Truncated),
-			Evidence:      evidence,
-		}
-	}
-	leapStatus := trackingValue(string(tracking.Stdout), "Leap status")
-	if !strings.EqualFold(leapStatus, "Normal") {
-		return evaluator.Outcome{
-			Status:        model.StatusUnknown,
-			UnknownReason: model.UnknownAmbiguousResult,
-			Summary:       "chronyd가 실행 중이지만 정상 동기화 상태를 확인하지 못했습니다.",
-			Expected:      "Leap status가 Normal이어야 합니다.",
-			Observed:      firstNonEmpty(leapStatus, "Leap status 없음"),
-			Evidence:      evidence,
-		}
-	}
 	sourcesSpec := executor.Spec{Name: "chronyc", Arguments: []string{"-N", "-c", "sources"}, Timeout: 10 * time.Second, MaxOutput: 1 << 20}
 	runtimeResult, err := environment.Commands.Run(ctx, sourcesSpec)
 	if err != nil {
@@ -148,69 +120,84 @@ func evaluateTimeSync(ctx context.Context, rule model.ResolvedRule, environment 
 	evidence = append(evidence, support.FactEvidence("chronyc runtime sources", map[string]any{
 		"runtime_source_count": len(runtimeSources), "selected_source_count": len(selectedSources), "source_names": runtimeSources,
 	}))
-	if len(runtimeSources) == 0 || len(selectedSources) != 1 {
-		return evaluator.Outcome{
-			Status:        model.StatusUnknown,
-			UnknownReason: model.UnknownAmbiguousResult,
-			Summary:       "chronyd가 실제로 선택한 단일 시간원을 확정할 수 없습니다.",
-			Expected:      "runtime source가 존재하고 동기화에 선택된 source가 정확히 하나여야 합니다.",
-			Observed:      fmt.Sprintf("runtime=%d selected=%d", len(runtimeSources), len(selectedSources)),
-			Evidence:      evidence,
-		}
-	}
-
-	approved, hasApproved, err := support.StringSliceParameter(rule.Parameters, "approved_sources")
-	if err != nil {
-		return logError("invalid_rule_parameter", err, evidence...)
-	}
-	if hasDynamicIncludes {
-		return evaluator.Outcome{
-			Status:        model.StatusUnknown,
-			UnknownReason: model.UnknownUnsupportedConfiguration,
-			Summary:       "동적으로 포함되는 chrony 설정을 모두 해석하지 못했습니다.",
-			Expected:      "모든 실효 시간원과 include 경로를 확인할 수 있어야 합니다.",
-			Observed:      chronyDynamicIncludeObservation(configuredSources, runtimeSources, selectedSources),
-			Evidence:      evidence,
-		}
-	}
-	if !hasApproved || len(approved) == 0 {
-		return evaluator.Outcome{
-			Status:        model.StatusUnknown,
-			UnknownReason: model.UnknownManualVerification,
-			Summary:       "현재 동기화는 정상이나 승인된 시간원 목록이 없어 정책 적합성을 확정할 수 없습니다.",
-			Expected:      "구성된 모든 시간원이 기관의 승인 목록에 포함되어야 합니다.",
-			Observed:      strings.Join(configuredSources, ", "),
-			Evidence:      evidence,
-		}
-	}
-	unapproved := differenceFold(append(append([]string(nil), configuredSources...), runtimeSources...), approved)
-	if len(unapproved) > 0 {
+	if len(runtimeSources) == 0 || len(selectedSources) == 0 {
 		return evaluator.Outcome{
 			Status:   model.StatusFail,
-			Summary:  "승인 목록에 없는 시간원이 구성되어 있습니다.",
-			Expected: "구성된 모든 시간원이 기관의 승인 목록에 포함되어야 합니다.",
-			Observed: strings.Join(unapproved, ", "),
+			Summary:  "동기화된 Chrony 서버가 없습니다.",
+			Expected: rule.Criteria.Pass,
+			Observed: fmt.Sprintf("runtime=%d selected=%d", len(runtimeSources), len(selectedSources)),
 			Evidence: evidence,
 		}
 	}
-	runtimeOnly := differenceFold(runtimeSources, configuredSources)
-	if len(runtimeOnly) > 0 {
-		return evaluator.Outcome{
-			Status:        model.StatusUnknown,
-			UnknownReason: model.UnknownUnsupportedConfiguration,
-			Summary:       "정적 설정에 없는 runtime 시간원이 있어 실효 구성의 출처를 확정할 수 없습니다.",
-			Expected:      "runtime 시간원이 해석된 chrony 설정에서 유래해야 합니다.",
-			Observed:      strings.Join(runtimeOnly, ", "),
-			Evidence:      evidence,
-		}
+	if len(selectedSources) > 1 {
+		return evaluator.Outcome{Status: model.StatusUnknown, UnknownReason: model.UnknownAmbiguousResult, Summary: "동기화된 Chrony 서버 상태를 해석할 수 없습니다.", Expected: rule.Criteria.Pass, Observed: fmt.Sprintf("selected=%d", len(selectedSources)), Evidence: evidence}
+	}
+
+	observed := fmt.Sprintf("configured=%s; runtime=%s; selected=%s", strings.Join(configuredSources, ", "), strings.Join(runtimeSources, ", "), strings.Join(selectedSources, ", "))
+	if hasDynamicIncludes {
+		observed += "; 동적 include 사용"
 	}
 	return evaluator.Outcome{
 		Status:   model.StatusPass,
-		Summary:  "시각 동기화 서비스와 시간원이 정책 기준을 충족합니다.",
-		Expected: "chronyd가 활성화되고 승인된 시간원과 정상 동기화되어야 합니다.",
-		Observed: strings.Join(configuredSources, ", "),
+		Summary:  "NTP 및 시각 동기화 설정이 적용되어 있습니다.",
+		Expected: rule.Criteria.Pass,
+		Observed: observed,
 		Evidence: evidence,
 	}
+}
+
+func evaluateNTPD(
+	ctx context.Context,
+	rule model.ResolvedRule,
+	environment evaluator.Environment,
+	evidence []model.Evidence,
+) evaluator.Outcome {
+	data, metadata, err := environment.Files.ReadFile(ctx, "/etc/ntp.conf", 1<<20)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return evaluator.Outcome{Status: model.StatusFail, Summary: "/etc/ntp.conf에 NTP 서버가 설정되어 있지 않습니다.", Expected: rule.Criteria.Pass, Observed: "/etc/ntp.conf 없음", Evidence: evidence}
+		}
+		return logError("ntp_config_failed", err, evidence...)
+	}
+	evidence = append(evidence, support.FileMetadataEvidence(metadata))
+	configured := make([]string, 0)
+	for _, raw := range strings.Split(strings.ReplaceAll(string(data), "\r\n", "\n"), "\n") {
+		line := strings.TrimSpace(strings.SplitN(raw, "#", 2)[0])
+		fields := strings.Fields(line)
+		if len(fields) >= 2 && fields[0] == "server" {
+			configured = append(configured, fields[1])
+		}
+	}
+	sort.Strings(configured)
+	configured = uniqueStrings(configured)
+	evidence = append(evidence, support.FactEvidence("/etc/ntp.conf", map[string]any{"configured_servers": configured}))
+	if len(configured) == 0 {
+		return evaluator.Outcome{Status: model.StatusFail, Summary: "/etc/ntp.conf에 NTP 서버가 설정되어 있지 않습니다.", Expected: rule.Criteria.Pass, Observed: "server 설정 없음", Evidence: evidence}
+	}
+	spec := executor.Spec{Name: "ntpq", Arguments: []string{"-pn"}, Timeout: 10 * time.Second, MaxOutput: 1 << 20}
+	result, err := environment.Commands.Run(ctx, spec)
+	if err != nil {
+		return logError("ntpq_failed", err, evidence...)
+	}
+	evidence = append(evidence, support.CommandEvidence(spec, result))
+	if result.ExitCode != 0 || result.Truncated {
+		return evaluator.Outcome{Status: model.StatusUnknown, UnknownReason: model.UnknownInsufficientEvidence, Summary: "동기화된 NTP 서버를 확인하지 못했습니다.", Expected: rule.Criteria.Pass, Observed: fmt.Sprintf("ntpq exit=%d truncated=%t", result.ExitCode, result.Truncated), Evidence: evidence}
+	}
+	selected := make([]string, 0, 1)
+	for _, raw := range strings.Split(strings.ReplaceAll(string(result.Stdout), "\r\n", "\n"), "\n") {
+		line := strings.TrimSpace(raw)
+		if !strings.HasPrefix(line, "*") {
+			continue
+		}
+		fields := strings.Fields(strings.TrimPrefix(line, "*"))
+		if len(fields) > 0 {
+			selected = append(selected, fields[0])
+		}
+	}
+	if len(selected) == 0 {
+		return evaluator.Outcome{Status: model.StatusFail, Summary: "동기화된 NTP 서버가 없습니다.", Expected: rule.Criteria.Pass, Observed: "ntpq -pn에서 선택된 서버 없음", Evidence: evidence}
+	}
+	return evaluator.Outcome{Status: model.StatusPass, Summary: "NTP 서비스가 활성화되어 있고 서버와 동기화되어 있습니다.", Expected: rule.Criteria.Pass, Observed: fmt.Sprintf("configured=%s; selected=%s", strings.Join(configured, ", "), strings.Join(selected, ", ")), Evidence: evidence}
 }
 
 func evaluateSystemdTimesyncd(
@@ -220,11 +207,11 @@ func evaluateSystemdTimesyncd(
 	unit support.UnitState,
 	evidence []model.Evidence,
 ) evaluator.Outcome {
-	if !support.UnitActive(unit) || !support.UnitEnabled(unit) {
+	if !support.UnitActive(unit) {
 		return evaluator.Outcome{
 			Status:   model.StatusFail,
 			Summary:  "시각 동기화 서비스가 활성화되어 있지 않습니다.",
-			Expected: "systemd-timesyncd가 실행 중이며 부팅 시 활성화되어야 합니다.",
+			Expected: rule.Criteria.Pass,
 			Observed: fmt.Sprintf("active=%s unit_file=%s", unit.ActiveState, unit.UnitFileState),
 			Evidence: evidence,
 		}
@@ -263,12 +250,11 @@ func evaluateSystemdTimesyncd(
 	}
 	if synchronized != "yes" {
 		return evaluator.Outcome{
-			Status:        model.StatusUnknown,
-			UnknownReason: model.UnknownAmbiguousResult,
-			Summary:       "systemd-timesyncd가 실행 중이지만 현재 동기화 완료 상태가 아닙니다.",
-			Expected:      "System clock synchronized가 yes여야 합니다.",
-			Observed:      "System clock synchronized=" + synchronized,
-			Evidence:      evidence,
+			Status:   model.StatusFail,
+			Summary:  "systemd-timesyncd가 실행 중이지만 현재 동기화 완료 상태가 아닙니다.",
+			Expected: rule.Criteria.Pass,
+			Observed: "System clock synchronized=" + synchronized,
+			Evidence: evidence,
 		}
 	}
 
@@ -334,47 +320,24 @@ func evaluateSystemdTimesyncd(
 		}
 	}
 
-	approved, hasApproved, err := support.StringSliceParameter(rule.Parameters, "approved_sources")
-	if err != nil {
-		return logError("invalid_rule_parameter", err, evidence...)
-	}
 	observed := "System clock synchronized=yes"
 	if runtimeSource != "" {
 		observed += "; runtime source=" + runtimeSource
-	}
-	if !hasApproved || len(approved) == 0 {
-		return evaluator.Outcome{
-			Status:        model.StatusUnknown,
-			UnknownReason: model.UnknownManualVerification,
-			Summary:       "현재 시각 동기화는 정상이나 승인된 시간원 목록이 없어 정책 적합성을 확정할 수 없습니다.",
-			Expected:      "구성된 모든 시간원이 기관의 승인 목록에 포함되어야 합니다.",
-			Observed:      observed,
-			Evidence:      evidence,
-		}
 	}
 	if !sourcesSupported || runtimeSource == "" || len(configuredSources) == 0 {
 		return evaluator.Outcome{
 			Status:        model.StatusUnknown,
 			UnknownReason: model.UnknownInsufficientEvidence,
-			Summary:       "현재 동기화는 정상이나 실효 시간원 전체를 승인 목록과 대조하지 못했습니다.",
-			Expected:      "구성된 모든 시간원과 현재 사용 중인 시간원이 기관의 승인 목록에 포함되어야 합니다.",
+			Summary:       "현재 동기화는 정상이나 동기화된 시간원을 확인하지 못했습니다.",
+			Expected:      rule.Criteria.Pass,
 			Observed:      observed,
 			Evidence:      evidence,
 		}
 	}
-	if unapproved := differenceFold(configuredSources, approved); len(unapproved) > 0 {
-		return evaluator.Outcome{
-			Status:   model.StatusFail,
-			Summary:  "승인 목록에 없는 시간원이 구성되어 있습니다.",
-			Expected: "구성된 모든 시간원이 기관의 승인 목록에 포함되어야 합니다.",
-			Observed: strings.Join(unapproved, ", "),
-			Evidence: evidence,
-		}
-	}
 	return evaluator.Outcome{
 		Status:   model.StatusPass,
-		Summary:  "시각 동기화 서비스와 시간원이 정책 기준을 충족합니다.",
-		Expected: "systemd-timesyncd가 활성화되고 승인된 시간원과 정상 동기화되어야 합니다.",
+		Summary:  "NTP 및 시각 동기화 설정이 적용되어 있습니다.",
+		Expected: rule.Criteria.Pass,
 		Observed: observed,
 		Evidence: evidence,
 	}

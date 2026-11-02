@@ -17,6 +17,31 @@ import (
 )
 
 func evaluateFTPAccountShell(ctx context.Context, rule model.ResolvedRule, environment evaluator.Environment) evaluator.Outcome {
+	target, terminal := inspectFTPTarget(ctx, environment)
+	if terminal != nil {
+		if terminal.Status == model.StatusNotApplicable {
+			return evaluator.Outcome{Status: model.StatusPass, Summary: "FTP 서비스가 비활성화되어 있습니다.", Expected: rule.Criteria.Pass, Observed: "활성 FTP 서비스 없음", Evidence: terminal.Evidence}
+		}
+		return *terminal
+	}
+	accounts, accountEvidence, err := support.ReadEffectivePasswd(ctx, environment.Commands)
+	if err != nil {
+		return ftpCheckError("ftp_account_collection_failed", err, target.evidence)
+	}
+	evidence := append(append([]model.Evidence(nil), target.evidence...), accountEvidence)
+	for _, account := range accounts {
+		if account.Name != "ftp" {
+			continue
+		}
+		if !isFTPNonLoginShell(account.Shell) {
+			return evaluator.Outcome{Status: model.StatusFail, Summary: "FTP 계정에 로그인 가능한 shell이 설정되어 있습니다.", Expected: rule.Criteria.Pass, Observed: "ftp=" + account.Shell, Evidence: evidence}
+		}
+		return evaluator.Outcome{Status: model.StatusPass, Summary: "FTP 계정에 로그인할 수 없는 shell이 설정되어 있습니다.", Expected: rule.Criteria.Pass, Observed: "ftp=" + account.Shell, Evidence: evidence}
+	}
+	return evaluator.Outcome{Status: model.StatusPass, Summary: "FTP 기본 계정이 존재하지 않습니다.", Expected: rule.Criteria.Pass, Observed: "ftp 계정 없음", Evidence: evidence}
+}
+
+func evaluateFTPAccountShellLegacy(ctx context.Context, rule model.ResolvedRule, environment evaluator.Environment) evaluator.Outcome {
 	policyAccounts, policySet, err := ftpServiceAccountPolicy(rule.Parameters)
 	if err != nil {
 		return ftpCheckError("invalid_rule_parameter", err, nil)
@@ -300,35 +325,10 @@ func evaluateFTPAccessControl(ctx context.Context, rule model.ResolvedRule, envi
 	if terminal != nil {
 		return *terminal
 	}
-	approved, approvedSet, err := ftpSourcePolicy(rule.Parameters, "approved_ftp_client_sources")
-	if err != nil {
-		if errors.Is(err, errFTPUnsupportedConfiguration) {
-			return unsupportedFTPCheck("FTP IP 접근 통제", "DNS 기반 승인 host 규칙은 자동으로 확정하지 않습니다.", target.evidence)
-		}
-		return ftpCheckError("invalid_rule_parameter", err, target.evidence)
-	}
-	verifiedExternal, externalSet, err := ftpSourcePolicy(rule.Parameters, "verified_external_ftp_acl_sources")
-	if err != nil {
-		if errors.Is(err, errFTPUnsupportedConfiguration) {
-			return unsupportedFTPCheck("FTP IP 접근 통제", "DNS 기반 외부 ACL 규칙은 자동으로 확정하지 않습니다.", target.evidence)
-		}
-		return ftpCheckError("invalid_rule_parameter", err, target.evidence)
-	}
 	evidence := append([]model.Evidence(nil), target.evidence...)
-	evidence = append(evidence, support.FactEvidence("ftp-source-policy-summary", map[string]any{
-		"approved_policy_set":     approvedSet,
-		"approved_source_count":   len(approved),
-		"approved_sources_sha256": hashFTPStrings(approved),
-		"external_acl_verified":   externalSet,
-		"external_source_count":   len(verifiedExternal),
-		"external_sources_sha256": hashFTPStrings(verifiedExternal),
-		"source_details_redacted": true,
-	}))
-	if externalSet && approvedSet && len(approved) > 0 {
-		return evaluateFTPSourceSubset(rule, "검증된 외부 ACL", verifiedExternal, approved, evidence)
-	}
 
 	var inspection ftpAccessInspection
+	var err error
 	configurationUnsupported := false
 	switch target.product.id {
 	case "vsftpd":
@@ -368,16 +368,6 @@ func evaluateFTPAccessControl(ctx context.Context, rule model.ResolvedRule, envi
 			return ftpCheckError("ftp_firewall_collection_failed", err, evidence)
 		}
 	}
-	if !approvedSet || len(approved) == 0 {
-		return evaluator.Outcome{
-			Status:        model.StatusUnknown,
-			UnknownReason: model.UnknownManualVerification,
-			Summary:       "승인된 FTP 클라이언트 IP 정책이 없어 접근 범위를 확정할 수 없습니다.",
-			Expected:      rule.Criteria.Pass,
-			Observed:      "approved_ftp_client_sources 정책 없음",
-			Evidence:      evidence,
-		}
-	}
 	if configurationUnsupported {
 		return unsupportedFTPCheck("FTP IP 접근 통제", "include, host 규칙 또는 동적 접근 모듈을 완전히 해석할 수 없습니다.", evidence)
 	}
@@ -391,21 +381,22 @@ func evaluateFTPAccessControl(ctx context.Context, rule model.ResolvedRule, envi
 			Evidence:      evidence,
 		}
 	}
-	if countFTPPolicyOutsideSources(inspection.sources, approved) > 0 {
-		evidence, err = collectFTPFirewallEvidence(ctx, environment, evidence)
-		if err != nil {
-			return ftpCheckError("ftp_firewall_collection_failed", err, evidence)
-		}
+	if inspection.explicitUnrestricted {
 		return evaluator.Outcome{
-			Status:        model.StatusUnknown,
-			UnknownReason: model.UnknownManualVerification,
-			Summary:       "FTP 서버 자체 허용 범위는 승인 정책보다 넓지만 호스트 또는 외부 ACL의 추가 제한을 확정하지 못했습니다.",
-			Expected:      rule.Criteria.Pass,
-			Observed:      "firewalld/nftables 또는 외부 ACL과의 결합 검증 필요",
-			Evidence:      evidence,
+			Status:   model.StatusFail,
+			Summary:  "FTP 서버에 접근 제어가 설정되어 있지 않습니다.",
+			Expected: rule.Criteria.Pass,
+			Observed: "모든 IP 주소 또는 호스트에서 접속 가능",
+			Evidence: evidence,
 		}
 	}
-	return evaluateFTPSourceSubset(rule, "FTP 서버 로컬 접근 정책", inspection.sources, approved, evidence)
+	return evaluator.Outcome{
+		Status:   model.StatusPass,
+		Summary:  "FTP 서버 접근이 특정 IP 주소 또는 호스트로 제한되어 있습니다.",
+		Expected: rule.Criteria.Pass,
+		Observed: fmt.Sprintf("명시적으로 허용된 접근 출발지 %d개", len(inspection.sources)),
+		Evidence: evidence,
+	}
 }
 
 func collectFTPFirewallEvidence(

@@ -3,7 +3,6 @@ package account
 import (
 	"context"
 	"fmt"
-	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -16,7 +15,7 @@ import (
 
 const EvaluatorSURestriction = "unix.account.su_restriction"
 
-func evaluateSURestriction(ctx context.Context, rule model.ResolvedRule, environment evaluator.Environment) evaluator.Outcome {
+func evaluateSURestriction(ctx context.Context, _ model.ResolvedRule, environment evaluator.Environment) evaluator.Outcome {
 	accounts, accountEvidence, err := support.ReadEffectivePasswd(ctx, environment.Commands)
 	if err != nil {
 		return checkError("passwd_read_failed", err)
@@ -27,7 +26,7 @@ func evaluateSURestriction(ctx context.Context, rule model.ResolvedRule, environ
 	}
 	loginAccounts := make([]string, 0)
 	for _, account := range accounts {
-		if account.UID == 0 || isNonLoginShell(account.Shell) {
+		if account.UID == 0 || account.UID < uint32(uidMin) || isNonLoginShell(account.Shell) {
 			continue
 		}
 		loginAccounts = append(loginAccounts, account.Name)
@@ -35,9 +34,9 @@ func evaluateSURestriction(ctx context.Context, rule model.ResolvedRule, environ
 	evidence := []model.Evidence{accountEvidence, uidEvidence}
 	if len(loginAccounts) == 0 {
 		return evaluator.Outcome{
-			Status:   model.StatusNotApplicable,
-			Summary:  "root 이외에 su 제한을 적용할 로그인 가능 계정이 없습니다.",
-			Expected: "로그인 가능 일반 계정이 있으면 su 사용을 승인 그룹으로 제한해야 합니다.",
+			Status:   model.StatusPass,
+			Summary:  "su 제한이 필요한 일반 사용자 계정이 없습니다.",
+			Expected: "일반 사용자 계정이 없으면 su 제한이 불필요합니다.",
 			Observed: fmt.Sprintf("UID_MIN=%d, 대상 계정 없음", uidMin),
 			Evidence: evidence,
 		}
@@ -86,38 +85,10 @@ func evaluateSURestriction(ctx context.Context, rule model.ResolvedRule, environ
 			Evidence: evidence,
 		}
 	}
-	allowedGroups, hasAllowedGroups, err := support.StringSliceParameter(rule.Parameters, "allowed_su_groups")
-	if err != nil {
-		return checkError("invalid_rule_parameter", err)
-	}
-	if !hasAllowedGroups || !containsFold(allowedGroups, wheelGroup) {
-		return evaluator.Outcome{
-			Status:        model.StatusUnknown,
-			UnknownReason: model.UnknownManualVerification,
-			Summary:       "su 제한 그룹이 기관의 승인 그룹인지 확인해야 합니다.",
-			Expected:      "su 제한 그룹이 승인 목록에 포함되어야 합니다.",
-			Observed:      fmt.Sprintf("group=%s gid=%d", group.Name, group.GID),
-			Evidence:      evidence,
-		}
-	}
-	metadata, err := environment.Files.Stat("/usr/bin/su")
-	if err != nil {
-		return checkError("su_binary_stat_failed", err)
-	}
-	evidence = append(evidence, support.FileMetadataEvidence(metadata))
-	if metadata.FileType != "regular" || metadata.UID != 0 || metadata.Mode.Perm()&0o022 != 0 || metadata.Mode&os.ModeSetuid == 0 {
-		return evaluator.Outcome{
-			Status:   model.StatusFail,
-			Summary:  "su 실행 파일의 유형, 소유자 또는 권한이 안전하지 않습니다.",
-			Expected: "root 소유 일반 파일이고 비소유자 쓰기가 금지되며 setuid가 설정되어야 합니다.",
-			Observed: fmt.Sprintf("type=%s uid=%d mode=%s", metadata.FileType, metadata.UID, metadata.Mode.String()),
-			Evidence: evidence,
-		}
-	}
 	return evaluator.Outcome{
 		Status:   model.StatusPass,
-		Summary:  "su 명령 사용이 승인 그룹으로 제한되어 있습니다.",
-		Expected: "pam_wheel.so use_uid가 안전한 제어 구문으로 적용되어야 합니다.",
+		Summary:  "su 명령 사용이 특정 그룹으로 제한되어 있습니다.",
+		Expected: "su 명령 사용이 특정 그룹 소속 사용자로 제한되어야 합니다.",
 		Observed: fmt.Sprintf("group=%s gid=%d members=%d", group.Name, group.GID, len(group.Members)),
 		Evidence: evidence,
 	}

@@ -11,9 +11,6 @@ bindings:
       password_history: 4
       min_password_days: 1
       max_password_days: 90
-  - rule_id: U-06
-    parameters:
-      allowed_su_groups: [sudo]
   - rule_id: U-12
     parameters:
       max_session_timeout_seconds: 600

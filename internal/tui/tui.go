@@ -8,6 +8,7 @@ import (
 	"io"
 	"strings"
 	"time"
+	"unicode"
 
 	"charm.land/bubbles/v2/list"
 	"charm.land/bubbles/v2/textinput"
@@ -98,7 +99,7 @@ type scanProgressMsg struct {
 	open     bool
 }
 
-type scanTickMsg time.Time
+type scanTickMsg struct{ generation uint64 }
 
 type remediationPlanMsg struct {
 	remediator Remediator
@@ -158,6 +159,13 @@ type Model struct {
 	width                 int
 	height                int
 	showAll               bool
+	previewSelection      string
+	previewOffset         int
+	previewScrollMax      int
+	previewPageSize       int
+	previewWidth          int
+	previewLines          []string
+	resultListOffset      int
 	run                   model.ScanRun
 	reportPath            string
 	list                  list.Model
@@ -178,6 +186,9 @@ type Model struct {
 	scanProgress          engine.Progress
 	scanProgressCh        <-chan engine.Progress
 	scanStarted           time.Time
+	scanFinishedAt        time.Time
+	scanFinished          bool
+	scanGeneration        uint64
 	scanTicks             int
 	now                   func() time.Time
 	scanSettings          scanSettings
@@ -208,13 +219,19 @@ func NewModelWithWriterFactory(ctx context.Context, scanner Scanner, writerFacto
 }
 
 func newModel(ctx context.Context, scanner Scanner, writerFactory ScanWriterFactory, factory RemediatorFactory) *Model {
-	delegate := newResultDelegate(true)
+	delegate := newResultDelegate(false)
 	resultList := list.New(nil, delegate, 80, 20)
 	resultList.Title = "점검 결과"
+	resultList.Styles.Title = lipgloss.NewStyle().Bold(true).Foreground(textColor)
+	resultList.Styles.TitleBar = lipgloss.NewStyle().Padding(0, 0, 1, 2)
+	resultList.Styles.ActivePaginationDot = resultList.Styles.ActivePaginationDot.Foreground(accentColor)
 	resultList.SetFilteringEnabled(true)
-	resultList.SetShowStatusBar(true)
+	resultList.SetShowTitle(false)
+	resultList.SetShowStatusBar(false)
 	resultList.SetShowHelp(false)
 	resultList.SetStatusBarItemName("항목", "항목")
+	resultList.FilterInput.Prompt = "검색: "
+	resultList.FilterInput.Placeholder = "항목명 또는 코드"
 	resultList.KeyMap.CancelWhileFiltering.SetKeys("ctrl+g")
 	resultList.KeyMap.CancelWhileFiltering.SetHelp("ctrl+g", "검색 취소")
 	resultList.KeyMap.ClearFilter.SetKeys("ctrl+g")
@@ -256,8 +273,8 @@ func newResultDelegate(showDescription bool) resultDelegate {
 	delegate.SetSpacing(0)
 	delegate.Styles.NormalTitle = delegate.Styles.NormalTitle.Foreground(textColor)
 	delegate.Styles.NormalDesc = delegate.Styles.NormalDesc.Foreground(mutedColor)
-	delegate.Styles.SelectedTitle = delegate.Styles.SelectedTitle.BorderForeground(accentColor).Foreground(accentColor)
-	delegate.Styles.SelectedDesc = delegate.Styles.SelectedDesc.BorderForeground(accentColor).Foreground(textColor)
+	delegate.Styles.SelectedTitle = delegate.Styles.SelectedTitle.BorderForeground(accentColor).Foreground(textColor).Background(selectedColor)
+	delegate.Styles.SelectedDesc = delegate.Styles.SelectedDesc.BorderForeground(accentColor).Foreground(mutedColor).Background(selectedColor)
 	delegate.Styles.FilterMatch = delegate.Styles.FilterMatch.Foreground(warningColor)
 	return resultDelegate{DefaultDelegate: delegate}
 }
@@ -281,19 +298,50 @@ func (d resultDelegate) Render(writer io.Writer, view list.Model, index int, ite
 		containerStyle = styles.SelectedTitle
 		descriptionStyle = styles.SelectedDesc
 	}
-	textWidth := view.Width() - containerStyle.GetPaddingLeft() - containerStyle.GetPaddingRight()
+	textWidth := view.Width() - containerStyle.GetHorizontalFrameSize()
 	if textWidth <= 0 {
 		return
 	}
 
-	title := ansi.Truncate(result.Title(), textWidth, "…")
+	statusPadding := 14 - lipgloss.Width(statusLabel(result.result.Status))
+	if statusPadding < 0 || textWidth < 30 {
+		statusPadding = 0
+	}
+	title := result.Title()
+	if d.ShowDescription {
+		title = ansi.Truncate(title, textWidth-statusPadding, "…")
+	}
 	matchedRunes := []int(nil)
 	if isFiltered {
 		matchedRunes = view.MatchesForItem(index)
 	}
 	baseStyle := containerStyle.Inline(true)
-	styledTitle := renderResultTitle(result, title, baseStyle, styles.FilterMatch, matchedRunes, emptyFilter)
+	selected := isSelected && view.FilterState() != list.Filtering
+	styledTitle := renderResultTitle(result, title, baseStyle, styles.FilterMatch, matchedRunes, emptyFilter, selected, statusPadding)
+	if !d.ShowDescription {
+		// Keep result names readable without forcing every item to occupy the
+		// same number of lines. The list view accounts for the wrapped height.
+		prefixWidth := lipgloss.Width(statusLabel(result.result.Status)) + statusPadding +
+			2 + lipgloss.Width(presentation.Sanitize(result.result.RuleID)) + 2
+		nameWidth := textWidth - prefixWidth
+		if nameWidth >= 8 && ansi.StringWidth(styledTitle) > prefixWidth {
+			prefix := ansi.Cut(styledTitle, 0, prefixWidth)
+			name := ansi.Cut(styledTitle, prefixWidth, ansi.StringWidth(styledTitle))
+			name = ansi.Hardwrap(ansi.Wrap(name, nameWidth, ""), nameWidth, true)
+			lines := strings.Split(name, "\n")
+			styledTitle = prefix + lines[0]
+			for _, line := range lines[1:] {
+				styledTitle += "\n" + strings.Repeat(" ", prefixWidth) + line
+			}
+		} else {
+			styledTitle = ansi.Hardwrap(ansi.Wrap(styledTitle, textWidth, ""), textWidth, true)
+		}
+	}
 	titleContainer := containerStyle.UnsetForeground().UnsetBold()
+	if selected {
+		titleContainer = titleContainer.Width(view.Width())
+		descriptionStyle = descriptionStyle.Width(view.Width())
+	}
 	title = titleContainer.Render(styledTitle)
 
 	description := ""
@@ -314,7 +362,7 @@ func (d resultDelegate) Render(writer io.Writer, view list.Model, index int, ite
 	_, _ = fmt.Fprint(writer, title)
 }
 
-func renderResultTitle(item resultItem, title string, baseStyle, filterMatch lipgloss.Style, matchedRunes []int, dimmed bool) string {
+func renderResultTitle(item resultItem, title string, baseStyle, filterMatch lipgloss.Style, matchedRunes []int, dimmed, selected bool, statusPadding int) string {
 	runes := []rune(title)
 	if len(runes) == 0 {
 		return ""
@@ -329,6 +377,9 @@ func renderResultTitle(item resultItem, title string, baseStyle, filterMatch lip
 
 	var builder strings.Builder
 	for index, value := range runes {
+		if index == statusEnd && statusPadding > 0 {
+			builder.WriteString(baseStyle.Render(strings.Repeat(" ", statusPadding)))
+		}
 		style := baseStyle
 		if !dimmed {
 			switch {
@@ -337,6 +388,9 @@ func renderResultTitle(item resultItem, title string, baseStyle, filterMatch lip
 			case index >= ruleStart && index < ruleEnd:
 				style = codeStyle.Inline(true)
 			}
+		}
+		if selected {
+			style = style.Background(selectedColor)
 		}
 		if _, exists := matched[index]; exists {
 			style = style.Inherit(filterMatch)
@@ -372,17 +426,17 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.resize()
 		return m, nil
 	case scanProgressMsg:
-		if message.source != m.scanProgressCh || !message.open || m.screen != screenScanning {
+		if message.source != m.scanProgressCh || !message.open || m.screen != screenScanning || m.scanFinished {
 			return m, nil
 		}
 		m.scanProgress = message.progress
 		return m, waitForScanProgress(message.source)
 	case scanTickMsg:
-		if m.screen != screenScanning {
+		if m.screen != screenScanning || m.scanFinished || message.generation != m.scanGeneration {
 			return m, nil
 		}
 		m.scanTicks++
-		return m, scanTick()
+		return m, scanTick(message.generation)
 	case scanCompleteMsg:
 		m.cancelScan = nil
 		m.scanProgressCh = nil
@@ -409,7 +463,14 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.reportPath = message.reportPath
 		m.showAll = m.scanSettings.showAll
 		m.exitCode = message.run.Metadata.ExitCode
-		m.screen = screenResults
+		m.scanFinished = true
+		m.scanFinishedAt = m.now()
+		if m.run.Metadata.Complete {
+			if m.scanProgress.Total <= 0 {
+				m.scanProgress.Total = len(m.run.Results)
+			}
+			m.scanProgress.Completed = m.scanProgress.Total
+		}
 		m.updateItems()
 		return m, nil
 	case remediationPlanMsg:
@@ -569,8 +630,28 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				m.screen = screenOptions
 			}
 			return m, nil
+		case screenScanning:
+			if key == "enter" && m.scanFinished {
+				m.screen = screenResults
+			}
+			return m, nil
 		case screenResults:
 			switch key {
+			case "pgup", "pgdown":
+				if contentWidth(m.width) >= 114 && m.previewScrollMax > 0 {
+					step := m.previewPageSize
+					if key == "pgup" {
+						step = -step
+					}
+					m.previewOffset += step
+					if m.previewOffset < 0 {
+						m.previewOffset = 0
+					}
+					if m.previewOffset > m.previewScrollMax {
+						m.previewOffset = m.previewScrollMax
+					}
+					return m, nil
+				}
 			case "a":
 				m.showAll = !m.showAll
 				m.updateItems()
@@ -816,7 +897,9 @@ func (m *Model) navigateBack() (tea.Model, tea.Cmd) {
 	case screenOptionPicker, screenConfirmNoRedact:
 		m.screen = screenOptions
 	case screenScanning:
-		if m.cancelScan != nil {
+		if m.scanFinished {
+			m.screen = screenOptions
+		} else if m.cancelScan != nil {
 			m.scanBackRequested = true
 			m.cancelScan()
 		}
@@ -878,36 +961,9 @@ func (m *Model) View() tea.View {
 	case screenScanning:
 		content = m.scanningView()
 	case screenResults:
-		header := "문제 항목"
-		if m.showAll {
-			header = "전체 항목"
-		}
-		m.list.Title = header
-		helpValues := []string{"Enter", "상세", "A", "전체/문제", "/", "검색", "R", "다시 점검"}
-		if m.list.SettingFilter() {
-			helpValues = []string{"Enter", "검색 적용", "Ctrl+G", "검색 취소"}
-		}
-		availability := m.remediationAvailability()
-		if availability.enabled && !m.list.SettingFilter() {
-			helpValues = append(helpValues, "M", "조치 계획")
-		}
-		if !m.list.SettingFilter() {
-			helpValues = append(helpValues, "Q", "뒤로")
-		}
-		helpValues = append(helpValues, "Esc", "종료")
-		content = screenHeader("점검 결과") + "\n\n" + m.list.View()
-		if m.reportPath != "" {
-			pathWidth := m.width - 18
-			if pathWidth < 24 {
-				pathWidth = 24
-			}
-			content += "\n\n" + labelStyle.Render("보고서") + "  " + helpStyle.Render(truncateStart(m.reportPath, pathWidth))
-		}
-		content += "\n\n" + resultSummary(m.run.Metadata.Counts)
-		content += "\n\n" + remediationAvailabilityView(availability)
-		content += "\n\n" + optionKeyLegend(helpValues...)
+		content = m.resultsView()
 	case screenDetail:
-		content = screenHeader("항목 상세") + "\n\n" + m.viewport.View() + "\n\n" + helpStyle.Render("q: 결과 목록   Esc: 종료")
+		content = m.detailView()
 	case screenRemediationFailurePolicy:
 		content = titleStyle.Render("조치 실패 정책 선택") + "\n\n" +
 			"변경 세트 적용 또는 검증이 실패했을 때의 자동 롤백 범위를 선택해주세요.\n\n" +
@@ -973,14 +1029,15 @@ func (m *Model) readyView() string {
 		brand = titleStyle.Render(">_ OpenCIIP")
 	}
 
-	menu := readyMenuView(m.readySelection)
+	menu := framedPanel("시작", readyMenuView(m.readySelection), 38, readyMenuCount+2)
 	main := lipgloss.JoinVertical(lipgloss.Center,
 		brand,
-		subtitleStyle.Render("주요정보통신기반시설 보안 점검"),
+		"",
+		subtitleStyle.Render("주요정보통신기반시설 기술적 취약점 점검 도구"),
 		"",
 		menu,
 		"",
-		helpStyle.Render("↑/↓  이동     Enter  선택     Esc  종료"),
+		optionKeyLegend(0, "↑↓", "메뉴 이동", "Enter", "메뉴 선택", "Esc", "종료 확인"),
 	)
 
 	if m.platform.Privilege != "root" {
@@ -1033,7 +1090,7 @@ func (m *Model) quitConfirmationView() string {
 			lipgloss.PlaceHorizontal(contentWidth-10, lipgloss.Center, buttons),
 	)
 	content := screenHeader("종료") + "\n\n" + panel + "\n\n" +
-		optionKeyLegend("←/→", "이동", "Enter", "선택", "q 또는 Esc", "취소")
+		optionKeyLegend(contentWidth, "←/→", "선택 이동", "Enter", "선택 실행", "q 또는 Esc", "종료 취소")
 	return m.centerOptionContent(content, contentWidth)
 }
 
@@ -1052,12 +1109,12 @@ func readyMenuView(selected int) string {
 		marker := "  "
 		style := lipgloss.NewStyle().Foreground(textColor)
 		if index == selected {
-			marker = accentStyle.Render("› ")
-			style = keyStyle
+			marker = accentStyle.Copy().Background(selectedColor).Render("│ ")
+			style = keyStyle.Copy().Background(selectedColor)
 		}
 		row := marker + style.Render(item)
 		if index == selected {
-			row = selectedRowStyle.Copy().Width(rowWidth).Render(row)
+			row = fillSelectedRow(row, rowWidth)
 		} else {
 			row = lipgloss.NewStyle().Width(rowWidth).Render(row)
 		}
@@ -1076,20 +1133,13 @@ func readyFooter() string {
 		version += "+dirty"
 	}
 	version = presentation.Sanitize(version)
-	return helpStyle.Render("OpenCIIP " + version + "\n© 2026 yesidodo73  ·  Apache License 2.0")
+	return helpStyle.Render("OpenCIIP " + version + "\n© 2026 yellowcape  ·  Apache License 2.0")
 }
 
 func (m *Model) scanningView() string {
 	progress := m.scanProgress
 	spinner := spinnerFrames[m.scanTicks%len(spinnerFrames)]
 	contentWidth := m.scanningContentWidth()
-	if progress.Total <= 0 {
-		content := screenHeader("Linux 서버 보안 점검") + "\n\n" +
-			accentStyle.Render(spinner+" 점검 항목을 준비하고 있습니다") + "\n\n" +
-			statusRuleStyle.Render("─ 준비 중") + "\n" + helpStyle.Render("q  점검 취소     Esc  종료")
-		return m.centerScanningContent(content, contentWidth)
-	}
-
 	completed := progress.Completed
 	if completed < 0 {
 		completed = 0
@@ -1097,7 +1147,6 @@ func (m *Model) scanningView() string {
 	if completed > progress.Total {
 		completed = progress.Total
 	}
-	percent := completed * 100 / progress.Total
 	barWidth := contentWidth - 8
 	if barWidth < 24 {
 		barWidth = 24
@@ -1105,10 +1154,18 @@ func (m *Model) scanningView() string {
 	if barWidth > 64 {
 		barWidth = 64
 	}
-	filled := completed * barWidth / progress.Total
+	percent, filled := 0, 0
+	if progress.Total > 0 {
+		percent = completed * 100 / progress.Total
+		filled = completed * barWidth / progress.Total
+	}
 	bar := progressDoneStyle.Render(strings.Repeat("━", filled)) + progressPendingStyle.Render(strings.Repeat("━", barWidth-filled))
 
-	elapsed := m.now().Sub(m.scanStarted)
+	end := m.now()
+	if m.scanFinished && !m.scanFinishedAt.IsZero() {
+		end = m.scanFinishedAt
+	}
+	elapsed := end.Sub(m.scanStarted)
 	if elapsed < 0 {
 		elapsed = 0
 	}
@@ -1116,15 +1173,39 @@ func (m *Model) scanningView() string {
 	if current == "" {
 		current = "점검 항목 준비 중"
 	}
+	phase := accentStyle.Render(spinner + " 점검 준비 중")
+	counter := helpStyle.Render("점검 항목 확인 중")
+	percentText := ""
+	currentLabel := "진행 항목"
+	controls := optionKeyLegend(contentWidth, "q", "점검 중단", "Esc", "종료 확인")
+	if progress.Total > 0 {
+		phase = accentStyle.Render(spinner + " 점검 중")
+		counter = counterStyle.Render(fmt.Sprintf("%d / %d", completed, progress.Total))
+		percentText = percentStyle.Render(fmt.Sprintf("%3d%%", percent))
+	}
+	if m.scanFinished {
+		phase = successStyle.Render("✓ 점검 완료")
+		current = "점검 결과를 확인할 수 있습니다."
+		if progress.Total <= 0 {
+			counter = ""
+		}
+		if !m.run.Metadata.Complete {
+			phase = warningStyle.Render("! 점검 중단")
+			current = "중단된 점검의 결과를 확인할 수 있습니다."
+		}
+		currentLabel = "상태"
+		controls = optionKeyLegend(contentWidth, "Enter", "결과 보기", "q", "실행 옵션으로", "Esc", "종료 확인")
+	}
 
 	content := screenHeader("Linux 서버 보안 점검") + "\n\n" +
-		fmt.Sprintf("%s  %s\n\n", accentStyle.Render(spinner+" 점검 중"), counterStyle.Render(fmt.Sprintf("%d / %d", completed, progress.Total))) +
-		bar + "  " + percentStyle.Render(fmt.Sprintf("%3d%%", percent)) + "\n\n" +
-		labelStyle.Render("현재") + "  " + current + "\n" +
+		fmt.Sprintf("%s  %s\n\n", phase, counter) +
+		bar + "  " + percentText + "\n\n" +
+		labelStyle.Render(currentLabel) + "  " + current + "\n" +
 		labelStyle.Render("경과") + "  " + durationLabel(elapsed) + "\n\n" +
 		statusRuleStyle.Render(strings.Repeat("─", contentWidth)) + "\n" +
-		helpStyle.Render("q  점검 취소     Esc  종료")
-	return m.centerScanningContent(content, contentWidth)
+		controls
+	panel := framedPanel("점검 진행", content, contentWidth+4, lipgloss.Height(content)+2)
+	return m.centerScanningContent(panel, contentWidth+4)
 }
 
 func (m *Model) scanningContentWidth() int {
@@ -1155,7 +1236,7 @@ func (m *Model) centerScanningContent(content string, contentWidth int) string {
 }
 
 func screenHeader(section string) string {
-	return titleStyle.Render(">_ OpenCIIP") + "  " + subtitleStyle.Render(presentation.Sanitize(section))
+	return titleStyle.Render("OpenCIIP") + helpStyle.Render("  /  ") + keyStyle.Render(presentation.Sanitize(section))
 }
 
 func statusSeparator() string {
@@ -1180,6 +1261,10 @@ func durationLabel(value time.Duration) string {
 }
 
 func resultSummary(counts map[model.Status]int) string {
+	return resultSummaryWidth(counts, 0)
+}
+
+func resultSummaryWidth(counts map[model.Status]int, width int) string {
 	values := []model.Status{
 		model.StatusFail,
 		model.StatusUnknown,
@@ -1192,7 +1277,7 @@ func resultSummary(counts map[model.Status]int) string {
 	for _, status := range values {
 		parts = append(parts, statusStyle.Copy().Foreground(statusColor(status)).Render(fmt.Sprintf("%s %d", statusLabel(status), counts[status])))
 	}
-	return statusRuleStyle.Render("─ ") + strings.Join(parts, statusSeparator())
+	return wrapInline(parts, statusSeparator(), width)
 }
 
 func statusBadge(status model.Status) string {
@@ -1254,6 +1339,9 @@ func (m *Model) startScan() tea.Cmd {
 	m.screen = screenScanning
 	m.err = nil
 	m.scanStarted = m.now()
+	m.scanFinishedAt = time.Time{}
+	m.scanFinished = false
+	m.scanGeneration++
 	m.scanProgress = engine.Progress{}
 	m.scanTicks = 0
 	progress := make(chan engine.Progress, 1)
@@ -1274,7 +1362,7 @@ func (m *Model) startScan() tea.Cmd {
 		path, err := writer.WriteScan(scanContext, run)
 		return scanCompleteMsg{run: run, reportPath: path, err: err}
 	}
-	return tea.Batch(runScan, waitForScanProgress(progress), scanTick())
+	return tea.Batch(runScan, waitForScanProgress(progress), scanTick(m.scanGeneration))
 }
 
 func publishScanProgress(channel chan engine.Progress, progress engine.Progress) {
@@ -1300,9 +1388,9 @@ func waitForScanProgress(channel <-chan engine.Progress) tea.Cmd {
 	}
 }
 
-func scanTick() tea.Cmd {
-	return tea.Tick(time.Second, func(value time.Time) tea.Msg {
-		return scanTickMsg(value)
+func scanTick(generation uint64) tea.Cmd {
+	return tea.Tick(150*time.Millisecond, func(time.Time) tea.Msg {
+		return scanTickMsg{generation: generation}
 	})
 }
 
@@ -1561,8 +1649,7 @@ func remediationAvailabilityView(availability remediationAvailability) string {
 		status = successStyle.Render(label)
 		marker = successStyle.Render("●")
 	}
-	return marker + "  " + labelStyle.Render("자동 조치") + "  " + status + "\n" +
-		"   " + helpStyle.Render(reason)
+	return marker + "  " + labelStyle.Render("자동 조치") + "  " + status + helpStyle.Render("  ·  "+reason)
 }
 
 func (m *Model) hasUnusedRemediationPlan() bool {
@@ -1661,15 +1748,19 @@ func (m *Model) resize() {
 		viewportHeight = 8
 	}
 	m.list.SetSize(width, listHeight)
-	compactResults := m.height < 28
-	m.list.SetDelegate(newResultDelegate(!compactResults))
-	m.list.SetShowStatusBar(!compactResults)
+	m.list.SetDelegate(newResultDelegate(false))
+	m.list.SetShowStatusBar(false)
 	m.viewport.SetWidth(width)
 	m.viewport.SetHeight(viewportHeight)
 	m.optionInput.SetWidth(m.optionContentWidth() - 6)
 }
 
 func (m *Model) updateItems() {
+	m.resultListOffset = 0
+	m.previewSelection = ""
+	m.previewOffset = 0
+	m.previewScrollMax = 0
+	m.previewLines = nil
 	items := make([]list.Item, 0, len(m.run.Results))
 	for _, result := range model.SortedResultsByStatus(m.run.Results) {
 		if !m.showAll && result.Status != model.StatusFail && result.Status != model.StatusUnknown && result.Status != model.StatusError {
@@ -1696,16 +1787,12 @@ func detailContent(result model.CheckResult, width int) string {
 		&builder,
 		"%s  %s    %s  %s\n\n",
 		labelStyle.Render("중요도"),
-		presentation.Sanitize(string(result.Severity)),
+		severityLabel(result.Severity),
 		labelStyle.Render("분류"),
-		presentation.Sanitize(string(result.Category)),
+		categoryLabel(result.Category),
 	)
-	fmt.Fprintf(&builder, "%s\n%s\n\n", labelStyle.Render("판정 이유"), wrapDetailText(result.Summary, width))
-	if result.Expected != "" {
-		fmt.Fprintf(&builder, "%s\n%s\n\n", labelStyle.Render("기준"), wrapDetailText(result.Expected, width))
-	}
-	if result.Observed != "" {
-		fmt.Fprintf(&builder, "%s\n", labelStyle.Render("확인 결과"))
+	if len(result.DisplayDetails) > 0 || strings.TrimSpace(result.Observed) != "" {
+		fmt.Fprintf(&builder, "%s\n", labelStyle.Render("확인한 설정"))
 		if len(result.DisplayDetails) > 0 {
 			builder.WriteString(resultDetailText(result.DisplayDetails, width, result.Status))
 		} else {
@@ -1713,30 +1800,112 @@ func detailContent(result model.CheckResult, width int) string {
 		}
 		builder.WriteString("\n\n")
 	}
-	if result.UnknownReason != "" {
-		fmt.Fprintf(&builder, "%s  %s\n\n", labelStyle.Render("확정 불가 사유"), presentation.Sanitize(string(result.UnknownReason)))
+	fmt.Fprintf(&builder, "%s\n%s\n\n", labelStyle.Render("판정 이유"), wrapDetailText(result.Summary, width))
+	repeatedCriterion := false
+	for _, detail := range result.DisplayDetails {
+		if strings.TrimSpace(detail.Expected) != "" && strings.TrimSpace(detail.Expected) == strings.TrimSpace(result.Expected) {
+			repeatedCriterion = true
+			break
+		}
 	}
-	fmt.Fprintf(&builder, "%s\n%s, %v쪽\n", labelStyle.Render("가이드 근거"), presentation.Sanitize(result.Reference.Section), result.Reference.Pages)
+	if result.Expected != "" && !repeatedCriterion {
+		fmt.Fprintf(&builder, "%s\n%s\n\n", labelStyle.Render("점검 기준"), wrapDetailText(result.Expected, width))
+	}
+	if result.UnknownReason != "" {
+		fmt.Fprintf(&builder, "%s\n%s\n\n", labelStyle.Render("확정 불가 사유"), wrapDetailText(unknownReasonLabel(result.UnknownReason), width))
+	}
+	if strings.TrimSpace(result.Solution) != "" {
+		fmt.Fprintf(&builder, "%s\n%s\n\n", labelStyle.Render("조치 방법"), wrapDetailText(result.Solution, width))
+	}
+	guide := presentation.Sanitize(result.Reference.Section)
+	if len(result.Reference.Pages) > 0 {
+		pages := make([]string, 0, len(result.Reference.Pages))
+		for _, page := range result.Reference.Pages {
+			pages = append(pages, fmt.Sprint(page))
+		}
+		if guide != "" {
+			guide += ", "
+		}
+		guide += strings.Join(pages, ", ") + "쪽"
+	}
+	if guide != "" {
+		fmt.Fprintf(&builder, "%s\n%s\n", labelStyle.Render("가이드 근거"), wrapDetailText(guide, width))
+	}
 	return builder.String()
+}
+
+func severityLabel(value model.Severity) string {
+	switch value {
+	case model.SeverityHigh:
+		return "상"
+	case model.SeverityMedium:
+		return "중"
+	case model.SeverityLow:
+		return "하"
+	default:
+		return presentation.Sanitize(string(value))
+	}
+}
+
+func categoryLabel(value model.Category) string {
+	switch value {
+	case model.CategoryAccount:
+		return "계정 관리"
+	case model.CategoryFileDirectory:
+		return "파일 및 디렉터리"
+	case model.CategoryService:
+		return "서비스 관리"
+	case model.CategoryPatch:
+		return "패치 관리"
+	case model.CategoryLogging:
+		return "로그 관리"
+	default:
+		return presentation.Sanitize(string(value))
+	}
+}
+
+func unknownReasonLabel(value model.UnknownReason) string {
+	switch value {
+	case model.UnknownInsufficientEvidence:
+		return "확인할 수 있는 근거가 부족합니다."
+	case model.UnknownManualVerification:
+		return "직접 확인이 필요합니다."
+	case model.UnknownUnsupportedConfiguration:
+		return "현재 설정을 자동으로 확인할 수 없습니다."
+	case model.UnknownAmbiguousResult:
+		return "확인 결과만으로 판정하기 어렵습니다."
+	default:
+		return presentation.Sanitize(string(value))
+	}
 }
 
 func resultDetailText(details []model.ResultDetail, width int, status model.Status) string {
 	sections := make([]string, 0, len(details))
+	seenCriteria := make(map[string]struct{})
 	for _, detail := range details {
 		var section strings.Builder
 		section.WriteString(keyStyle.Render(presentation.Sanitize(detail.Label)))
-		section.WriteByte('\n')
-		if detail.Expected != "" {
-			section.WriteByte('\n')
-			section.WriteString(detailValueLine("기준", detail.Expected, width, detailLineStyle(status, true)))
+		expectedStyle := detailLineStyle(status, true)
+		currentStyle := detailLineStyle(status, false)
+		if detail.Label == "파일 권한" || detail.Label == "파일 상태" || detail.Label == "파일 존재 여부" {
+			// The overall item may be FAIL even when this particular file is safe.
+			expectedStyle, currentStyle = nil, nil
 		}
 		if detail.Current != "" {
 			section.WriteByte('\n')
-			section.WriteString(detailValueLine("현재", detail.Current, width, detailLineStyle(status, false)))
+			section.WriteString(detailValueLine("확인 결과", detail.Current, width, currentStyle))
 		}
 		if detail.Source != "" {
 			section.WriteByte('\n')
-			section.WriteString(detailValueLine("위치", detail.Source, width, nil))
+			section.WriteString(detailValueLine("확인한 곳", detail.Source, width, nil))
+		}
+		criterion := strings.TrimSpace(detail.Expected)
+		if criterion != "" {
+			if _, shown := seenCriteria[criterion]; !shown {
+				section.WriteByte('\n')
+				section.WriteString(detailValueLine("점검 기준", criterion, width, expectedStyle))
+				seenCriteria[criterion] = struct{}{}
+			}
 		}
 		sections = append(sections, section.String())
 	}
@@ -1755,10 +1924,13 @@ func detailLineStyle(status model.Status, expected bool) *lipgloss.Style {
 }
 
 func detailValueLine(label, value string, width int, emphasis *lipgloss.Style) string {
-	const labelWidth = 6
+	label = presentation.Sanitize(label)
+	labelWidth := lipgloss.Width(label) + 2
+	if labelWidth < 11 {
+		labelWidth = 11
+	}
 	wrapped := semanticDetailText(value, width-labelWidth)
 	wrapped = strings.ReplaceAll(wrapped, "\n", "\n"+strings.Repeat(" ", labelWidth))
-	label = presentation.Sanitize(label)
 	labelText := labelStyle.Render(label)
 	if emphasis != nil {
 		labelText = emphasis.Copy().Bold(true).Render(label)
@@ -1780,7 +1952,7 @@ func semanticDetailText(value string, width int) string {
 	for _, item := range items {
 		wrapped := wrapDetailText(item, width-2)
 		wrapped = strings.ReplaceAll(wrapped, "\n", "\n  ")
-		lines = append(lines, "- "+wrapped)
+		lines = append(lines, "· "+wrapped)
 	}
 	return strings.Join(lines, "\n")
 }
@@ -1799,10 +1971,64 @@ func splitDetailItems(value string) []string {
 }
 
 func wrapDetailText(value string, width int) string {
-	if width < 20 {
-		width = 20
+	if width < 1 {
+		width = 1
 	}
-	return ansi.Wrap(strings.TrimSpace(presentation.Sanitize(value)), width, "")
+	value = strings.ReplaceAll(strings.TrimSpace(presentation.Sanitize(value)), "\t", "    ")
+	lines := strings.Split(value, "\n")
+	for i, line := range lines {
+		lines[i] = wrapDetailLine(line, width)
+	}
+	return strings.Join(lines, "\n")
+}
+
+// Wrap at whitespace first; a hyphen within a permission string or path is not
+// a word boundary. Only split a token if it cannot fit on an empty line.
+func wrapDetailLine(value string, width int) string {
+	var out strings.Builder
+	column := 0
+	isBreak := func(r rune) bool { return unicode.IsSpace(r) && r != '\u00a0' }
+	for value != "" {
+		firstWord := strings.IndexFunc(value, func(r rune) bool { return !isBreak(r) })
+		if firstWord < 0 {
+			break
+		}
+		spaces := value[:firstWord]
+		value = value[firstWord:]
+		endWord := strings.IndexFunc(value, isBreak)
+		if endWord < 0 {
+			endWord = len(value)
+		}
+		word := value[:endWord]
+		value = value[endWord:]
+		wordWidth := ansi.StringWidth(word)
+		spaceWidth := ansi.StringWidth(spaces)
+		if column > 0 && column+spaceWidth+wordWidth > width {
+			out.WriteByte('\n')
+			column, spaces, spaceWidth = 0, "", 0
+		}
+		if column == 0 && spaceWidth+wordWidth > width {
+			spaces, spaceWidth = "", 0
+		}
+		out.WriteString(spaces)
+		column += spaceWidth
+		if wordWidth <= width {
+			out.WriteString(word)
+			column += wordWidth
+			continue
+		}
+		// A single unbroken token can exceed the viewport, so split it by
+		// grapheme width rather than dropping characters or overflowing.
+		chunks := strings.Split(ansi.Hardwrap(word, width, false), "\n")
+		for i, chunk := range chunks {
+			if i > 0 {
+				out.WriteByte('\n')
+			}
+			out.WriteString(chunk)
+		}
+		column = ansi.StringWidth(chunks[len(chunks)-1])
+	}
+	return out.String()
 }
 
 func remediationPlanContent(planned workflow.PlanResult, approved bool) string {
@@ -2045,14 +2271,14 @@ func closeRemediator(remediator Remediator) error {
 }
 
 var (
-	accentColor   = lipgloss.Color("#58A6FF")
-	textColor     = lipgloss.Color("#E6EDF3")
-	mutedColor    = lipgloss.Color("#7D8590")
-	borderColor   = lipgloss.Color("#30363D")
-	selectedColor = lipgloss.Color("#161B22")
-	successColor  = lipgloss.Color("#3FB950")
-	warningColor  = lipgloss.Color("#D29922")
-	errorColor    = lipgloss.Color("#F85149")
+	accentColor   = lipgloss.Color("#66A5FF")
+	textColor     = lipgloss.Color("#EEEEEE")
+	mutedColor    = lipgloss.Color("#A0A0A0")
+	borderColor   = lipgloss.Color("#444444")
+	selectedColor = lipgloss.Color("#242424")
+	successColor  = lipgloss.Color("#64C98E")
+	warningColor  = lipgloss.Color("#E8B765")
+	errorColor    = lipgloss.Color("#F47777")
 
 	frameStyle           = lipgloss.NewStyle().Padding(1, 2)
 	titleStyle           = lipgloss.NewStyle().Bold(true).Foreground(accentColor)
@@ -2066,9 +2292,9 @@ var (
 	accentStyle          = lipgloss.NewStyle().Bold(true).Foreground(accentColor)
 	successStyle         = lipgloss.NewStyle().Bold(true).Foreground(successColor)
 	keyStyle             = lipgloss.NewStyle().Bold(true).Foreground(textColor)
-	sectionStyle         = lipgloss.NewStyle().Bold(true).Foreground(accentColor)
+	sectionStyle         = lipgloss.NewStyle().Bold(true).Foreground(textColor)
 	selectedRowStyle     = lipgloss.NewStyle().Background(selectedColor)
-	keyCapStyle          = lipgloss.NewStyle().Bold(true).Foreground(textColor).Background(borderColor).Padding(0, 1)
+	keyCapStyle          = lipgloss.NewStyle().Bold(true).Foreground(textColor)
 	disabledStyle        = lipgloss.NewStyle().Foreground(mutedColor)
 	statusRuleStyle      = lipgloss.NewStyle().Foreground(borderColor)
 	counterStyle         = lipgloss.NewStyle().Bold(true).Foreground(textColor)

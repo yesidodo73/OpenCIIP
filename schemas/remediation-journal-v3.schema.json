@@ -1,0 +1,2757 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/yesidodo73/OpenCIIP/main/schemas/remediation-journal-v3.schema.json",
+  "title": "OpenCIIP Remediation Journal",
+  "description": "OpenCIIP 자동 조치 실행 저널 형식입니다. 스키마 버전 3은 점검 실행 바이너리 식별값, 승인된 계획, 실행 상태, 복구 및 롤백 기록을 함께 보존합니다.",
+  "$comment": "계획 digest 일치, 배열 간 ID 참조, 순서의 단조 증가, 시간 마커의 선후 관계, 스냅샷 fingerprint 및 file_metadata 전후 값의 동일성은 표준 JSON Schema로 표현할 수 없어 Go 검증기가 추가로 확인합니다.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "revision",
+    "run_id",
+    "scan_run_id",
+    "scan_tool_version",
+    "scan_tool_commit",
+    "scan_tool_executable_sha256",
+    "rule_set_version",
+    "platform",
+    "remediation_build",
+    "state",
+    "failure_policy",
+    "plan_digest",
+    "host",
+    "started_at",
+    "updated_at",
+    "change_sets",
+    "conflict_graph"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 3
+    },
+    "revision": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 18446744073709551615
+    },
+    "run_id": {
+      "$ref": "#/$defs/safeIdentifier"
+    },
+    "scan_run_id": {
+      "$ref": "#/$defs/nonBlankString"
+    },
+    "scan_tool_version": {
+      "$ref": "#/$defs/nonBlankString"
+    },
+    "scan_tool_commit": {
+      "$ref": "#/$defs/nonBlankString"
+    },
+    "scan_tool_executable_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "rule_set_version": {
+      "$ref": "#/$defs/nonBlankString"
+    },
+    "platform": {
+      "$ref": "#/$defs/platformInfo"
+    },
+    "remediation_build": {
+      "$ref": "#/$defs/remediationBuildIdentity"
+    },
+    "state": {
+      "$ref": "#/$defs/runState"
+    },
+    "failure_policy": {
+      "$ref": "#/$defs/failurePolicy"
+    },
+    "plan_digest": {
+      "$ref": "#/$defs/sha256"
+    },
+    "host": {
+      "$ref": "#/$defs/hostIdentity"
+    },
+    "started_at": {
+      "$ref": "#/$defs/timestamp"
+    },
+    "updated_at": {
+      "$ref": "#/$defs/timestamp"
+    },
+    "change_sets": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/changeSet"
+      }
+    },
+    "conflict_graph": {
+      "$ref": "#/$defs/conflictGraph"
+    },
+    "rollback_attempts": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/rollbackAttempt"
+      }
+    },
+    "unresolved_change_sets": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/nonBlankString"
+      }
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "error": {
+      "$ref": "#/$defs/journalError"
+    }
+  },
+  "allOf": [
+    {
+      "$comment": "approved 실행은 모든 변경 세트의 승인 기록을 포함해야 합니다.",
+      "if": {
+        "properties": {
+          "state": {
+            "const": "approved"
+          }
+        },
+        "required": [
+          "state"
+        ]
+      },
+      "then": {
+        "properties": {
+          "change_sets": {
+            "items": {
+              "required": [
+                "approval"
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "state": {
+            "enum": [
+              "completed",
+              "rolled_back",
+              "completed_with_rollbacks",
+              "canceled",
+              "failed"
+            ]
+          }
+        },
+        "required": [
+          "state"
+        ]
+      },
+      "then": {
+        "properties": {
+          "unresolved_change_sets": {
+            "maxItems": 0
+          },
+          "rollback_attempts": {
+            "items": {
+              "required": [
+                "completed_at"
+              ]
+            }
+          },
+          "change_sets": {
+            "items": {
+              "properties": {
+                "state": {
+                  "enum": [
+                    "planned",
+                    "verified",
+                    "apply_failed",
+                    "rolled_back"
+                  ]
+                }
+              },
+              "allOf": [
+                {
+                  "if": {
+                    "properties": {
+                      "state": {
+                        "const": "planned"
+                      }
+                    },
+                    "required": [
+                      "state"
+                    ]
+                  },
+                  "then": {
+                    "properties": {
+                      "operations": {
+                        "items": {
+                          "properties": {
+                            "state": {
+                              "const": "planned"
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                },
+                {
+                  "if": {
+                    "properties": {
+                      "state": {
+                        "const": "apply_failed"
+                      }
+                    },
+                    "required": [
+                      "state"
+                    ]
+                  },
+                  "then": {
+                    "properties": {
+                      "operations": {
+                        "items": {
+                          "properties": {
+                            "state": {
+                              "enum": [
+                                "planned",
+                                "failed"
+                              ]
+                            }
+                          },
+                          "allOf": [
+                            {
+                              "$comment": "정상 종결된 failed 작업의 observed_after는 Go 검증기에서 durable before와 fingerprint 및 파일/부모 identity가 정확히 같은지 확인합니다.",
+                              "if": {
+                                "properties": {
+                                  "state": {
+                                    "const": "failed"
+                                  }
+                                },
+                                "required": [
+                                  "state"
+                                ]
+                              },
+                              "then": {
+                                "required": [
+                                  "observed_after",
+                                  "backup",
+                                  "apply_intent_at",
+                                  "error"
+                                ],
+                                "not": {
+                                  "anyOf": [
+                                    {
+                                      "required": [
+                                        "applied_at"
+                                      ]
+                                    },
+                                    {
+                                      "required": [
+                                        "rollback_intent_at"
+                                      ]
+                                    },
+                                    {
+                                      "required": [
+                                        "observed_rollback"
+                                      ]
+                                    },
+                                    {
+                                      "required": [
+                                        "rolled_back_at"
+                                      ]
+                                    }
+                                  ]
+                                }
+                              }
+                            }
+                          ]
+                        }
+                      }
+                    }
+                  }
+                },
+                {
+                  "if": {
+                    "properties": {
+                      "state": {
+                        "const": "verified"
+                      }
+                    },
+                    "required": [
+                      "state"
+                    ]
+                  },
+                  "then": {
+                    "properties": {
+                      "operations": {
+                        "items": {
+                          "properties": {
+                            "state": {
+                              "const": "verified"
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                },
+                {
+                  "if": {
+                    "properties": {
+                      "state": {
+                        "const": "rolled_back"
+                      }
+                    },
+                    "required": [
+                      "state"
+                    ]
+                  },
+                  "then": {
+                    "properties": {
+                      "operations": {
+                        "items": {
+                          "properties": {
+                            "state": {
+                              "enum": [
+                                "planned",
+                                "rolled_back",
+                                "failed"
+                              ]
+                            }
+                          },
+                          "allOf": [
+                            {
+                              "if": {
+                                "properties": {
+                                  "state": {
+                                    "const": "failed"
+                                  }
+                                },
+                                "required": [
+                                  "state"
+                                ]
+                              },
+                              "then": {
+                                "$ref": "#/$defs/noEffectFailedOperation"
+                              }
+                            }
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "state": {
+            "const": "completed"
+          }
+        },
+        "required": [
+          "state"
+        ]
+      },
+      "then": {
+        "properties": {
+          "change_sets": {
+            "items": {
+              "properties": {
+                "state": {
+                  "const": "verified"
+                }
+              },
+              "required": [
+                "state"
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "state": {
+            "const": "rolled_back"
+          }
+        },
+        "required": [
+          "state"
+        ]
+      },
+      "then": {
+        "properties": {
+          "change_sets": {
+            "items": {
+              "properties": {
+                "state": {
+                  "enum": [
+                    "planned",
+                    "rolled_back"
+                  ]
+                }
+              },
+              "required": [
+                "state"
+              ]
+            },
+            "contains": {
+              "properties": {
+                "state": {
+                  "const": "rolled_back"
+                }
+              },
+              "required": [
+                "state"
+              ]
+            },
+            "minContains": 1
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "state": {
+            "const": "completed_with_rollbacks"
+          }
+        },
+        "required": [
+          "state"
+        ]
+      },
+      "then": {
+        "properties": {
+          "change_sets": {
+            "items": {
+              "properties": {
+                "state": {
+                  "enum": [
+                    "planned",
+                    "verified",
+                    "rolled_back"
+                  ]
+                }
+              },
+              "required": [
+                "state"
+              ]
+            },
+            "allOf": [
+              {
+                "contains": {
+                  "properties": {
+                    "state": {
+                      "const": "verified"
+                    }
+                  },
+                  "required": [
+                    "state"
+                  ]
+                },
+                "minContains": 1
+              },
+              {
+                "contains": {
+                  "properties": {
+                    "state": {
+                      "const": "rolled_back"
+                    }
+                  },
+                  "required": [
+                    "state"
+                  ]
+                },
+                "minContains": 1
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "state": {
+            "const": "canceled"
+          }
+        },
+        "required": [
+          "state"
+        ]
+      },
+      "then": {
+        "properties": {
+          "change_sets": {
+            "items": {
+              "properties": {
+                "state": {
+                  "const": "planned"
+                }
+              },
+              "required": [
+                "state"
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "state": {
+            "const": "failed"
+          }
+        },
+        "required": [
+          "state"
+        ]
+      },
+      "then": {
+        "properties": {
+          "change_sets": {
+            "items": {
+              "properties": {
+                "state": {
+                  "enum": [
+                    "planned",
+                    "verified",
+                    "apply_failed",
+                    "rolled_back"
+                  ]
+                }
+              },
+              "required": [
+                "state"
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "state": {
+            "enum": [
+              "rolled_back",
+              "completed_with_rollbacks"
+            ]
+          }
+        },
+        "required": [
+          "state"
+        ]
+      },
+      "then": {
+        "properties": {
+          "rollback_attempts": {
+            "contains": {
+              "properties": {
+                "outcome": {
+                  "const": "succeeded"
+                }
+              },
+              "required": [
+                "outcome",
+                "completed_at"
+              ]
+            },
+            "minContains": 1
+          }
+        },
+        "required": [
+          "rollback_attempts"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "state": {
+            "const": "failed"
+          },
+          "change_sets": {
+            "contains": {
+              "properties": {
+                "state": {
+                  "const": "rolled_back"
+                }
+              },
+              "required": [
+                "state"
+              ]
+            },
+            "minContains": 1
+          }
+        },
+        "required": [
+          "state",
+          "change_sets"
+        ]
+      },
+      "then": {
+        "properties": {
+          "rollback_attempts": {
+            "contains": {
+              "properties": {
+                "outcome": {
+                  "const": "succeeded"
+                }
+              },
+              "required": [
+                "outcome",
+                "completed_at"
+              ]
+            },
+            "minContains": 1
+          }
+        },
+        "required": [
+          "rollback_attempts"
+        ]
+      }
+    }
+  ],
+  "$defs": {
+    "timestamp": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "nonBlankString": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "\\S",
+      "not": {
+        "pattern": "\\u0000"
+      }
+    },
+    "canonicalNonBlankString": {
+      "type": "string",
+      "pattern": "^\\S(?:[\\s\\S]*\\S)?$",
+      "not": {
+        "pattern": "\\u0000"
+      }
+    },
+    "verificationEnvironment": {
+      "type": "string",
+      "pattern": "^\\S(?:[^\\r\\n]*\\S)?$",
+      "not": {
+        "pattern": "\\u0000"
+      }
+    },
+    "canonicalString": {
+      "type": "string",
+      "pattern": "^(?:|\\S(?:[\\s\\S]*\\S)?)$",
+      "not": {
+        "pattern": "\\u0000"
+      }
+    },
+    "safeIdentifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9._-]+$",
+      "not": {
+        "enum": [
+          ".",
+          ".."
+        ]
+      }
+    },
+    "relativeArtifactPath": {
+      "type": "string",
+      "minLength": 1,
+      "not": {
+        "anyOf": [
+          {
+            "pattern": "^(?:[A-Za-z]:|[\\\\/])"
+          },
+          {
+            "pattern": "(?:^|[\\\\/])\\.\\.(?:[\\\\/]|$)"
+          },
+          {
+            "pattern": "\\u0000"
+          }
+        ]
+      }
+    },
+    "runState": {
+      "type": "string",
+      "enum": [
+        "planned",
+        "approved",
+        "applying",
+        "verifying",
+        "completed",
+        "rolling_back",
+        "rolled_back",
+        "completed_with_rollbacks",
+        "canceling",
+        "canceled",
+        "cancel_failed",
+        "failed",
+        "rollback_failed",
+        "partially_rolled_back",
+        "recovery_required"
+      ]
+    },
+    "changeSetState": {
+      "type": "string",
+      "enum": [
+        "planned",
+        "prepared",
+        "applying",
+        "applied",
+        "verifying",
+        "verified",
+        "apply_failed",
+        "rolling_back",
+        "rolled_back",
+        "rollback_blocked",
+        "rollback_failed",
+        "partially_rolled_back",
+        "recovery_required"
+      ]
+    },
+    "operationState": {
+      "type": "string",
+      "enum": [
+        "planned",
+        "apply_intent_durable",
+        "applied",
+        "verified",
+        "rollback_intent_durable",
+        "rolled_back",
+        "failed",
+        "ambiguous"
+      ]
+    },
+    "noEffectFailedOperation": {
+      "$comment": "observed_after와 durable before의 fingerprint 및 파일/부모 identity 정확한 동일성은 Go 검증기가 확인합니다.",
+      "type": "object",
+      "required": [
+        "state",
+        "observed_after",
+        "backup",
+        "apply_intent_at",
+        "error"
+      ],
+      "properties": {
+        "state": {
+          "const": "failed"
+        }
+      },
+      "not": {
+        "anyOf": [
+          {
+            "required": [
+              "applied_at"
+            ]
+          },
+          {
+            "required": [
+              "rollback_intent_at"
+            ]
+          },
+          {
+            "required": [
+              "observed_rollback"
+            ]
+          },
+          {
+            "required": [
+              "rolled_back_at"
+            ]
+          }
+        ]
+      }
+    },
+    "failurePolicy": {
+      "type": "string",
+      "enum": [
+        "rollback_item",
+        "rollback_run"
+      ]
+    },
+    "resourceRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "id"
+      ],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "file",
+            "service"
+          ]
+        },
+        "id": {
+          "$ref": "#/$defs/nonBlankString"
+        }
+      }
+    },
+    "fileResourceRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "id"
+      ],
+      "properties": {
+        "kind": {
+          "const": "file"
+        },
+        "id": {
+          "$ref": "#/$defs/nonBlankString"
+        }
+      }
+    },
+    "serviceResourceRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "id"
+      ],
+      "properties": {
+        "kind": {
+          "const": "service"
+        },
+        "id": {
+          "$ref": "#/$defs/nonBlankString"
+        }
+      }
+    },
+    "canonicalResource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "reference",
+        "key"
+      ],
+      "properties": {
+        "reference": {
+          "$ref": "#/$defs/resourceRef"
+        },
+        "key": {
+          "$ref": "#/$defs/nonBlankString"
+        },
+        "alias_keys": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/nonBlankString"
+          }
+        }
+      }
+    },
+    "fileCanonicalResource": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/canonicalResource"
+        },
+        {
+          "properties": {
+            "reference": {
+              "$ref": "#/$defs/fileResourceRef"
+            }
+          }
+        }
+      ]
+    },
+    "serviceCanonicalResource": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/canonicalResource"
+        },
+        {
+          "properties": {
+            "reference": {
+              "$ref": "#/$defs/serviceResourceRef"
+            }
+          }
+        }
+      ]
+    },
+    "zeroResourceSnapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "reference",
+        "fingerprint"
+      ],
+      "properties": {
+        "reference": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "reference",
+            "key"
+          ],
+          "properties": {
+            "reference": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "kind",
+                "id"
+              ],
+              "properties": {
+                "kind": {
+                  "const": ""
+                },
+                "id": {
+                  "const": ""
+                }
+              }
+            },
+            "key": {
+              "const": ""
+            }
+          }
+        },
+        "fingerprint": {
+          "const": ""
+        }
+      }
+    },
+    "fileSnapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "exists",
+        "file_type",
+        "mode",
+        "uid",
+        "gid",
+        "size",
+        "device",
+        "inode",
+        "nlink",
+        "parent_device",
+        "parent_inode",
+        "captured_at"
+      ],
+      "properties": {
+        "path": {
+          "$ref": "#/$defs/nonBlankString"
+        },
+        "exists": {
+          "type": "boolean"
+        },
+        "file_type": {
+          "type": "string"
+        },
+        "mode": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295
+        },
+        "uid": {
+          "type": "integer"
+        },
+        "gid": {
+          "type": "integer"
+        },
+        "size": {
+          "type": "integer"
+        },
+        "sha256": {
+          "type": "string"
+        },
+        "link_target": {
+          "type": "string"
+        },
+        "device": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18446744073709551615
+        },
+        "inode": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18446744073709551615
+        },
+        "nlink": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18446744073709551615
+        },
+        "parent_device": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18446744073709551615
+        },
+        "parent_inode": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18446744073709551615
+        },
+        "xattr_digest": {
+          "type": "string"
+        },
+        "acl_digest": {
+          "type": "string"
+        },
+        "selinux_context": {
+          "type": "string"
+        },
+        "metadata_digest": {
+          "type": "string"
+        },
+        "captured_at": {
+          "$ref": "#/$defs/timestamp"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "exists": {
+                "const": true
+              }
+            },
+            "required": [
+              "exists"
+            ]
+          },
+          "then": {
+            "properties": {
+              "file_type": {
+                "$ref": "#/$defs/nonBlankString"
+              },
+              "uid": {
+                "minimum": 0
+              },
+              "gid": {
+                "minimum": 0
+              },
+              "size": {
+                "minimum": 0
+              },
+              "xattr_digest": {
+                "$ref": "#/$defs/sha256"
+              },
+              "acl_digest": {
+                "$ref": "#/$defs/sha256"
+              },
+              "metadata_digest": {
+                "$ref": "#/$defs/sha256"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "exists": {
+                "const": true
+              },
+              "file_type": {
+                "const": "regular"
+              }
+            },
+            "required": [
+              "exists",
+              "file_type"
+            ]
+          },
+          "then": {
+            "required": [
+              "sha256"
+            ],
+            "properties": {
+              "sha256": {
+                "$ref": "#/$defs/sha256"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "existingSingleLinkRegularFileSnapshot": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/fileSnapshot"
+        },
+        {
+          "required": [
+            "sha256"
+          ],
+          "properties": {
+            "exists": {
+              "const": true
+            },
+            "file_type": {
+              "const": "regular"
+            },
+            "nlink": {
+              "const": 1
+            },
+            "sha256": {
+              "$ref": "#/$defs/sha256"
+            }
+          }
+        }
+      ]
+    },
+    "serviceSnapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "manager",
+        "name",
+        "load_state",
+        "active_state",
+        "sub_state",
+        "unit_file_state",
+        "masked",
+        "need_daemon_reload",
+        "manager_boot_id",
+        "captured_at"
+      ],
+      "properties": {
+        "manager": {
+          "$ref": "#/$defs/nonBlankString"
+        },
+        "name": {
+          "$ref": "#/$defs/nonBlankString"
+        },
+        "load_state": {
+          "type": "string"
+        },
+        "active_state": {
+          "type": "string"
+        },
+        "sub_state": {
+          "type": "string"
+        },
+        "unit_file_state": {
+          "type": "string"
+        },
+        "masked": {
+          "type": "boolean"
+        },
+        "need_daemon_reload": {
+          "type": "boolean"
+        },
+        "manager_boot_id": {
+          "type": "string"
+        },
+        "captured_at": {
+          "$ref": "#/$defs/timestamp"
+        }
+      }
+    },
+    "resourceSnapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "reference",
+        "fingerprint"
+      ],
+      "properties": {
+        "reference": {
+          "$ref": "#/$defs/canonicalResource"
+        },
+        "fingerprint": {
+          "$ref": "#/$defs/sha256"
+        },
+        "file": {
+          "$ref": "#/$defs/fileSnapshot"
+        },
+        "service": {
+          "$ref": "#/$defs/serviceSnapshot"
+        }
+      },
+      "oneOf": [
+        {
+          "required": [
+            "file"
+          ],
+          "not": {
+            "required": [
+              "service"
+            ]
+          },
+          "properties": {
+            "reference": {
+              "$ref": "#/$defs/fileCanonicalResource"
+            }
+          }
+        },
+        {
+          "required": [
+            "service"
+          ],
+          "not": {
+            "required": [
+              "file"
+            ]
+          },
+          "properties": {
+            "reference": {
+              "$ref": "#/$defs/serviceCanonicalResource"
+            }
+          }
+        }
+      ]
+    },
+    "existingSingleLinkRegularFileResourceSnapshot": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/resourceSnapshot"
+        },
+        {
+          "required": [
+            "file"
+          ],
+          "not": {
+            "required": [
+              "service"
+            ]
+          },
+          "properties": {
+            "reference": {
+              "$ref": "#/$defs/fileCanonicalResource"
+            },
+            "file": {
+              "$ref": "#/$defs/existingSingleLinkRegularFileSnapshot"
+            }
+          }
+        }
+      ]
+    },
+    "backupArtifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "metadata_path",
+        "content_size",
+        "metadata_sha256",
+        "durable"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/nonBlankString"
+        },
+        "content_path": {
+          "$ref": "#/$defs/relativeArtifactPath"
+        },
+        "metadata_path": {
+          "$ref": "#/$defs/relativeArtifactPath"
+        },
+        "content_size": {
+          "type": "integer"
+        },
+        "content_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "metadata_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "durable": {
+          "const": true
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "content_path"
+            ]
+          },
+          "then": {
+            "required": [
+              "content_sha256"
+            ],
+            "properties": {
+              "content_size": {
+                "minimum": 0
+              }
+            }
+          }
+        }
+      ]
+    },
+    "approval": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source",
+        "plan_digest",
+        "approved_at"
+      ],
+      "properties": {
+        "source": {
+          "$ref": "#/$defs/nonBlankString"
+        },
+        "template_id": {
+          "type": "string"
+        },
+        "plan_digest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "approved_at": {
+          "$ref": "#/$defs/timestamp"
+        }
+      }
+    },
+    "platformSelector": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "version"
+      ],
+      "properties": {
+        "os": {
+          "$ref": "#/$defs/canonicalString"
+        },
+        "family": {
+          "$ref": "#/$defs/canonicalString"
+        },
+        "id": {
+          "$ref": "#/$defs/canonicalNonBlankString"
+        },
+        "version": {
+          "$ref": "#/$defs/canonicalNonBlankString"
+        },
+        "architecture": {
+          "$ref": "#/$defs/canonicalString"
+        }
+      }
+    },
+    "recipeIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "selector",
+        "definition_sha256"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
+        },
+        "selector": {
+          "$ref": "#/$defs/platformSelector"
+        },
+        "definition_sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "verification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "environments",
+        "verified_at"
+      ],
+      "properties": {
+        "state": {
+          "const": "verified"
+        },
+        "environments": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/verificationEnvironment"
+          }
+        },
+        "verified_at": {
+          "$ref": "#/$defs/timestamp"
+        }
+      }
+    },
+    "reference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "guide",
+        "section",
+        "item",
+        "pages"
+      ],
+      "properties": {
+        "guide": {
+          "$ref": "#/$defs/nonBlankString"
+        },
+        "section": {
+          "type": "string"
+        },
+        "item": {
+          "type": "string",
+          "pattern": "^U-[0-9]{2}$"
+        },
+        "pages": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 1
+          }
+        }
+      }
+    },
+    "ruleIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "title",
+        "category",
+        "severity",
+        "evaluator",
+        "verification",
+        "binding_sources",
+        "reference"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^U-[0-9]{2}$"
+        },
+        "title": {
+          "$ref": "#/$defs/nonBlankString"
+        },
+        "category": {
+          "type": "string",
+          "enum": [
+            "account",
+            "file_directory",
+            "service",
+            "patch",
+            "logging"
+          ]
+        },
+        "severity": {
+          "type": "string",
+          "enum": [
+            "high",
+            "medium",
+            "low"
+          ]
+        },
+        "evaluator": {
+          "$ref": "#/$defs/nonBlankString"
+        },
+        "verification": {
+          "$ref": "#/$defs/verification"
+        },
+        "binding_sources": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/canonicalNonBlankString"
+          }
+        },
+        "reference": {
+          "$ref": "#/$defs/reference"
+        }
+      }
+    },
+    "operationKind": {
+      "type": "string",
+      "enum": [
+        "file_create",
+        "file_remove",
+        "file_metadata",
+        "service_enable",
+        "service_disable",
+        "service_mask",
+        "service_unmask",
+        "service_start",
+        "service_stop",
+        "service_reload",
+        "service_restart",
+        "daemon_reload"
+      ]
+    },
+    "recoveryMode": {
+      "type": "string",
+      "enum": [
+        "state_inferable",
+        "rollback_replay_safe",
+        "manual"
+      ]
+    },
+    "operationRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "sequence",
+        "rollback_sequence",
+        "kind",
+        "recovery_mode",
+        "state",
+        "resource",
+        "expected_before",
+        "before",
+        "desired"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/safeIdentifier"
+        },
+        "sequence": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "rollback_sequence": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "kind": {
+          "$ref": "#/$defs/operationKind"
+        },
+        "recovery_mode": {
+          "$ref": "#/$defs/recoveryMode"
+        },
+        "state": {
+          "$ref": "#/$defs/operationState"
+        },
+        "resource": {
+          "$ref": "#/$defs/canonicalResource"
+        },
+        "expected_before": {
+          "$ref": "#/$defs/resourceSnapshot"
+        },
+        "before": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/zeroResourceSnapshot"
+            },
+            {
+              "$ref": "#/$defs/resourceSnapshot"
+            }
+          ]
+        },
+        "desired": {
+          "$ref": "#/$defs/resourceSnapshot"
+        },
+        "observed_after": {
+          "$ref": "#/$defs/resourceSnapshot"
+        },
+        "observed_rollback": {
+          "$ref": "#/$defs/resourceSnapshot"
+        },
+        "backup": {
+          "$ref": "#/$defs/backupArtifact"
+        },
+        "apply_intent_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "applied_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "rollback_intent_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "rolled_back_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "error": {
+          "$ref": "#/$defs/journalError"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "not": {
+                  "const": "planned"
+                }
+              }
+            },
+            "required": [
+              "state"
+            ]
+          },
+          "then": {
+            "required": [
+              "backup",
+              "apply_intent_at"
+            ],
+            "properties": {
+              "before": {
+                "$ref": "#/$defs/resourceSnapshot"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "enum": [
+                  "applied",
+                  "verified"
+                ]
+              }
+            },
+            "required": [
+              "state"
+            ]
+          },
+          "then": {
+            "required": [
+              "observed_after",
+              "applied_at"
+            ]
+          }
+        },
+        {
+          "$comment": "상태와 무관하게 적용 완료 마커가 존재하면 해당 durable intent와 관측도 보존해야 합니다.",
+          "if": {
+            "required": [
+              "applied_at"
+            ]
+          },
+          "then": {
+            "required": [
+              "apply_intent_at",
+              "observed_after"
+            ]
+          }
+        },
+        {
+          "$comment": "롤백 관측 또는 완료 마커는 durable rollback intent 없이 존재할 수 없습니다.",
+          "if": {
+            "anyOf": [
+              {
+                "required": [
+                  "observed_rollback"
+                ]
+              },
+              {
+                "required": [
+                  "rolled_back_at"
+                ]
+              }
+            ]
+          },
+          "then": {
+            "required": [
+              "rollback_intent_at"
+            ]
+          }
+        },
+        {
+          "$comment": "rollback intent는 선행 durable apply intent 없이 존재할 수 없습니다.",
+          "if": {
+            "required": [
+              "rollback_intent_at"
+            ]
+          },
+          "then": {
+            "required": [
+              "apply_intent_at"
+            ]
+          }
+        },
+        {
+          "$comment": "롤백 완료 마커는 정확한 롤백 관측을 함께 보존해야 합니다.",
+          "if": {
+            "required": [
+              "rolled_back_at"
+            ]
+          },
+          "then": {
+            "required": [
+              "observed_rollback"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "apply_intent_durable"
+              }
+            },
+            "required": [
+              "state"
+            ]
+          },
+          "then": {
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "applied_at"
+                  ]
+                },
+                {
+                  "required": [
+                    "observed_after"
+                  ]
+                },
+                {
+                  "required": [
+                    "rollback_intent_at"
+                  ]
+                },
+                {
+                  "required": [
+                    "observed_rollback"
+                  ]
+                },
+                {
+                  "required": [
+                    "rolled_back_at"
+                  ]
+                }
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "rolled_back"
+              }
+            },
+            "required": [
+              "state"
+            ]
+          },
+          "then": {
+            "required": [
+              "observed_rollback",
+              "rollback_intent_at",
+              "rolled_back_at"
+            ]
+          }
+        },
+        {
+          "if": {
+            "allOf": [
+              {
+                "properties": {
+                  "state": {
+                    "const": "failed"
+                  }
+                },
+                "required": [
+                  "state",
+                  "observed_after"
+                ]
+              },
+              {
+                "not": {
+                  "required": [
+                    "rollback_intent_at"
+                  ]
+                }
+              }
+            ]
+          },
+          "then": {
+            "$ref": "#/$defs/noEffectFailedOperation"
+          }
+        },
+        {
+          "$comment": "file_metadata의 expected_before와 desired는 경로, inode, 부모, 내용, 링크, xattr, ACL, SELinux context가 같고 UID/GID/mode만 달라야 하며 desired mode는 before에 없던 권한 또는 특수 비트를 추가할 수 없습니다. applied는 durable intent 뒤 확인된 부분 전이를 안전한 롤백 후보로 보존할 수 있지만 verified와 verifying은 desired와 정확히 같아야 합니다. observed_rollback은 before와 정확히 같아야 하며 값 간 동일성은 Go 검증기가 확인합니다.",
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "file_metadata"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "resource": {
+                "$ref": "#/$defs/fileCanonicalResource"
+              },
+              "expected_before": {
+                "$ref": "#/$defs/existingSingleLinkRegularFileResourceSnapshot"
+              },
+              "before": {
+                "oneOf": [
+                  {
+                    "$ref": "#/$defs/zeroResourceSnapshot"
+                  },
+                  {
+                    "$ref": "#/$defs/existingSingleLinkRegularFileResourceSnapshot"
+                  }
+                ]
+              },
+              "desired": {
+                "$ref": "#/$defs/existingSingleLinkRegularFileResourceSnapshot"
+              },
+              "observed_after": {
+                "$ref": "#/$defs/existingSingleLinkRegularFileResourceSnapshot"
+              },
+              "observed_rollback": {
+                "$ref": "#/$defs/existingSingleLinkRegularFileResourceSnapshot"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "changeSet": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "rule_id",
+        "rule_identity",
+        "recipe_identity",
+        "sequence",
+        "risk",
+        "state",
+        "resources",
+        "operations",
+        "dry_run",
+        "expected_impact"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/safeIdentifier"
+        },
+        "rule_id": {
+          "type": "string",
+          "pattern": "^U-[0-9]{2}$"
+        },
+        "rule_identity": {
+          "$ref": "#/$defs/ruleIdentity"
+        },
+        "recipe_identity": {
+          "$ref": "#/$defs/recipeIdentity"
+        },
+        "sequence": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "risk": {
+          "type": "string",
+          "enum": [
+            "SAFE",
+            "CAUTION",
+            "DANGEROUS"
+          ]
+        },
+        "state": {
+          "$ref": "#/$defs/changeSetState"
+        },
+        "rollback_group": {
+          "type": "string"
+        },
+        "depends_on": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/nonBlankString"
+          }
+        },
+        "resources": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/canonicalResource"
+          }
+        },
+        "before": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/resourceSnapshot"
+          }
+        },
+        "after": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/resourceSnapshot"
+          }
+        },
+        "operations": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/operationRecord"
+          }
+        },
+        "dry_run": {
+          "$ref": "#/$defs/nonBlankString"
+        },
+        "expected_impact": {
+          "$ref": "#/$defs/nonBlankString"
+        },
+        "approval": {
+          "$ref": "#/$defs/approval"
+        },
+        "prepared_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "applied_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "verified_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "rolled_back_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "error": {
+          "$ref": "#/$defs/journalError"
+        }
+      },
+      "allOf": [
+        {
+          "$comment": "prepared와 applying 변경 세트는 영속 preparation marker를 가져야 합니다. marker 간 실제 시간 순서는 Go 검증기가 확인합니다.",
+          "if": {
+            "properties": {
+              "state": {
+                "enum": [
+                  "prepared",
+                  "applying"
+                ]
+              }
+            },
+            "required": [
+              "state"
+            ]
+          },
+          "then": {
+            "required": [
+              "prepared_at"
+            ]
+          }
+        },
+        {
+          "$comment": "preparation marker는 승인 기록 없이 존재할 수 없습니다.",
+          "if": {
+            "required": [
+              "prepared_at"
+            ]
+          },
+          "then": {
+            "required": [
+              "approval"
+            ]
+          }
+        },
+        {
+          "$comment": "작업 하나라도 durable apply intent를 가지면 변경 세트의 preparation marker가 먼저 존재해야 합니다.",
+          "if": {
+            "properties": {
+              "operations": {
+                "contains": {
+                  "required": [
+                    "apply_intent_at"
+                  ]
+                },
+                "minContains": 1
+              }
+            },
+            "required": [
+              "operations"
+            ]
+          },
+          "then": {
+            "required": [
+              "prepared_at"
+            ]
+          }
+        },
+        {
+          "$comment": "변경 세트 apply completion marker는 preparation marker와 모든 작업의 apply completion marker를 함께 보존해야 합니다.",
+          "if": {
+            "required": [
+              "applied_at"
+            ]
+          },
+          "then": {
+            "required": [
+              "prepared_at"
+            ],
+            "properties": {
+              "operations": {
+                "items": {
+                  "required": [
+                    "applied_at"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        {
+          "$comment": "변경 세트 verification marker는 apply completion marker 없이 존재할 수 없습니다.",
+          "if": {
+            "required": [
+              "verified_at"
+            ]
+          },
+          "then": {
+            "required": [
+              "applied_at"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "not": {
+                  "enum": [
+                    "planned",
+                    "apply_failed"
+                  ]
+                }
+              }
+            },
+            "required": [
+              "state"
+            ]
+          },
+          "then": {
+            "required": [
+              "before"
+            ],
+            "properties": {
+              "before": {
+                "minItems": 1
+              },
+              "operations": {
+                "items": {
+                  "properties": {
+                    "before": {
+                      "$ref": "#/$defs/resourceSnapshot"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "enum": [
+                  "applied",
+                  "verifying",
+                  "verified"
+                ]
+              }
+            },
+            "required": [
+              "state"
+            ]
+          },
+          "then": {
+            "required": [
+              "after",
+              "prepared_at",
+              "applied_at"
+            ],
+            "properties": {
+              "after": {
+                "minItems": 1
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "enum": [
+                  "applied",
+                  "verifying"
+                ]
+              }
+            },
+            "required": [
+              "state"
+            ]
+          },
+          "then": {
+            "properties": {
+              "operations": {
+                "items": {
+                  "properties": {
+                    "state": {
+                      "const": "applied"
+                    }
+                  },
+                  "required": [
+                    "state"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "verified"
+              }
+            },
+            "required": [
+              "state"
+            ]
+          },
+          "then": {
+            "required": [
+              "verified_at"
+            ],
+            "properties": {
+              "operations": {
+                "items": {
+                  "properties": {
+                    "state": {
+                      "const": "verified"
+                    }
+                  },
+                  "required": [
+                    "state"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "apply_failed"
+              }
+            },
+            "required": [
+              "state"
+            ]
+          },
+          "then": {
+            "properties": {
+              "operations": {
+                "items": {
+                  "oneOf": [
+                    {
+                      "properties": {
+                        "state": {
+                          "const": "planned"
+                        }
+                      },
+                      "required": [
+                        "state"
+                      ]
+                    },
+                    {
+                      "$ref": "#/$defs/noEffectFailedOperation"
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "rolled_back"
+              }
+            },
+            "required": [
+              "state"
+            ]
+          },
+          "then": {
+            "required": [
+              "rolled_back_at"
+            ],
+            "properties": {
+              "operations": {
+                "items": {
+                  "oneOf": [
+                    {
+                      "properties": {
+                        "state": {
+                          "const": "planned"
+                        }
+                      },
+                      "required": [
+                        "state"
+                      ]
+                    },
+                    {
+                      "properties": {
+                        "state": {
+                          "const": "rolled_back"
+                        }
+                      },
+                      "required": [
+                        "state"
+                      ]
+                    },
+                    {
+                      "$ref": "#/$defs/noEffectFailedOperation"
+                    }
+                  ]
+                },
+                "contains": {
+                  "properties": {
+                    "state": {
+                      "const": "rolled_back"
+                    }
+                  },
+                  "required": [
+                    "state"
+                  ]
+                },
+                "minContains": 1
+              }
+            }
+          }
+        }
+      ]
+    },
+    "conflictEdge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "from",
+        "to",
+        "reason"
+      ],
+      "properties": {
+        "from": {
+          "$ref": "#/$defs/nonBlankString"
+        },
+        "to": {
+          "$ref": "#/$defs/nonBlankString"
+        },
+        "reason": {
+          "type": "string",
+          "enum": [
+            "shared_resource",
+            "explicit_dependency",
+            "rollback_group"
+          ]
+        },
+        "resources": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/nonBlankString"
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "reason": {
+                "const": "shared_resource"
+              }
+            },
+            "required": [
+              "reason"
+            ]
+          },
+          "then": {
+            "required": [
+              "resources"
+            ],
+            "properties": {
+              "resources": {
+                "minItems": 1
+              }
+            }
+          }
+        }
+      ]
+    },
+    "rollbackGroup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "change_sets"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/nonBlankString"
+        },
+        "change_sets": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/nonBlankString"
+          }
+        }
+      }
+    },
+    "conflictGraph": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "nodes",
+        "edges"
+      ],
+      "properties": {
+        "nodes": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/nonBlankString"
+          }
+        },
+        "edges": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/conflictEdge"
+          }
+        },
+        "groups": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/rollbackGroup"
+          }
+        }
+      }
+    },
+    "rollbackAttempt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "scope",
+        "trigger",
+        "expanded_change_sets",
+        "cascade_approved",
+        "started_at"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/nonBlankString"
+        },
+        "scope": {
+          "type": "string",
+          "enum": [
+            "item",
+            "run"
+          ]
+        },
+        "trigger": {
+          "type": "string",
+          "enum": [
+            "user_request",
+            "apply_failure",
+            "verification_failure",
+            "crash_recovery"
+          ]
+        },
+        "executor_build": {
+          "$ref": "#/$defs/remediationBuildIdentity"
+        },
+        "observed_by_build": {
+          "$ref": "#/$defs/remediationBuildIdentity"
+        },
+        "requested_change_sets": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/nonBlankString"
+          }
+        },
+        "expanded_change_sets": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/nonBlankString"
+          }
+        },
+        "cascade_approved": {
+          "type": "boolean"
+        },
+        "outcome": {
+          "type": "string",
+          "enum": [
+            "succeeded",
+            "partially_succeeded",
+            "failed",
+            "blocked"
+          ]
+        },
+        "started_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "completed_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "errors": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/journalError"
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "completed_at"
+            ]
+          },
+          "then": {
+            "required": [
+              "outcome"
+            ]
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "outcome"
+            ]
+          },
+          "then": {
+            "required": [
+              "completed_at"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "trigger": {
+                "const": "crash_recovery"
+              }
+            },
+            "required": [
+              "trigger"
+            ]
+          },
+          "then": {
+            "required": [
+              "observed_by_build"
+            ],
+            "not": {
+              "required": [
+                "executor_build"
+              ]
+            }
+          },
+          "else": {
+            "required": [
+              "executor_build"
+            ]
+          }
+        },
+        {
+          "$comment": "사용자 요청 롤백은 현재 clean stable 실행 파일을 기록합니다. item requested 집합이 expanded 집합에 포함되는지는 Go 검증기가 확인합니다.",
+          "if": {
+            "properties": {
+              "trigger": {
+                "const": "user_request"
+              }
+            },
+            "required": [
+              "trigger"
+            ]
+          },
+          "then": {
+            "properties": {
+              "executor_build": {
+                "$ref": "#/$defs/stableRemediationBuildIdentity"
+              }
+            },
+            "allOf": [
+              {
+                "if": {
+                  "properties": {
+                    "scope": {
+                      "const": "item"
+                    }
+                  },
+                  "required": [
+                    "scope"
+                  ]
+                },
+                "then": {
+                  "required": [
+                    "requested_change_sets"
+                  ],
+                  "properties": {
+                    "requested_change_sets": {
+                      "minItems": 1
+                    }
+                  }
+                }
+              },
+              {
+                "if": {
+                  "properties": {
+                    "scope": {
+                      "const": "run"
+                    }
+                  },
+                  "required": [
+                    "scope"
+                  ]
+                },
+                "then": {
+                  "properties": {
+                    "requested_change_sets": {
+                      "maxItems": 0
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        }
+      ]
+    },
+    "journalError": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "phase",
+        "message",
+        "retryable",
+        "occurred_at"
+      ],
+      "properties": {
+        "code": {
+          "type": "string",
+          "enum": [
+            "journal_corrupt",
+            "journal_revision_conflict",
+            "unsupported_schema",
+            "host_mismatch",
+            "boot_changed",
+            "lock_unavailable",
+            "backup_missing",
+            "backup_hash_mismatch",
+            "precondition_failed",
+            "external_change_detected",
+            "unsupported_resource",
+            "apply_failed",
+            "verification_failed",
+            "rollback_dependency_conflict",
+            "rollback_failed",
+            "service_state_unavailable",
+            "persist_failed",
+            "cancel_failed",
+            "recovery_ambiguous"
+          ]
+        },
+        "phase": {
+          "$ref": "#/$defs/nonBlankString"
+        },
+        "change_set_id": {
+          "type": "string"
+        },
+        "operation_id": {
+          "type": "string"
+        },
+        "resource": {
+          "$ref": "#/$defs/resourceRef"
+        },
+        "message": {
+          "$ref": "#/$defs/nonBlankString"
+        },
+        "retryable": {
+          "type": "boolean"
+        },
+        "occurred_at": {
+          "$ref": "#/$defs/timestamp"
+        }
+      }
+    },
+    "platformInfo": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "hostname",
+        "os",
+        "id",
+        "name",
+        "version_id",
+        "family",
+        "architecture",
+        "kernel_release",
+        "init_system",
+        "package_manager",
+        "privilege",
+        "scan_support",
+        "remediation_support"
+      ],
+      "properties": {
+        "hostname": {
+          "type": "string"
+        },
+        "os": {
+          "$ref": "#/$defs/canonicalNonBlankString"
+        },
+        "id": {
+          "$ref": "#/$defs/canonicalNonBlankString"
+        },
+        "name": {
+          "type": "string"
+        },
+        "version_id": {
+          "$ref": "#/$defs/canonicalNonBlankString"
+        },
+        "family": {
+          "$ref": "#/$defs/canonicalNonBlankString"
+        },
+        "architecture": {
+          "$ref": "#/$defs/canonicalNonBlankString"
+        },
+        "kernel_release": {
+          "type": "string"
+        },
+        "init_system": {
+          "type": "string"
+        },
+        "package_manager": {
+          "type": "string"
+        },
+        "privilege": {
+          "type": "string"
+        },
+        "scan_support": {
+          "const": "tested"
+        },
+        "remediation_support": {
+          "const": "verified"
+        }
+      }
+    },
+    "remediationBuildIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "commit",
+        "executable_sha256",
+        "modified"
+      ],
+      "properties": {
+        "version": {
+          "$ref": "#/$defs/canonicalNonBlankString"
+        },
+        "commit": {
+          "$ref": "#/$defs/canonicalNonBlankString"
+        },
+        "executable_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "modified": {
+          "type": "boolean"
+        }
+      }
+    },
+    "stableRemediationBuildIdentity": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/remediationBuildIdentity"
+        },
+        {
+          "properties": {
+            "version": {
+              "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"
+            },
+            "commit": {
+              "pattern": "^(?!(?:0{40}|0{64})$)(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+            },
+            "modified": {
+              "const": false
+            }
+          }
+        }
+      ]
+    },
+    "hostIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "machine_id_hash",
+        "system_root",
+        "root_device",
+        "root_inode",
+        "boot_id"
+      ],
+      "properties": {
+        "machine_id_hash": {
+          "$ref": "#/$defs/sha256"
+        },
+        "system_root": {
+          "$ref": "#/$defs/canonicalNonBlankString"
+        },
+        "root_device": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 18446744073709551615
+        },
+        "root_inode": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 18446744073709551615
+        },
+        "boot_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        }
+      }
+    }
+  }
+}

@@ -28,162 +28,52 @@ type sudoersObjectSet struct {
 }
 
 func evaluateSudoersPermissions(ctx context.Context, rule model.ResolvedRule, environment evaluator.Environment) evaluator.Outcome {
-	installed, packageEvidence, err := sudoPackageInstalled(ctx, environment)
+	assessment, err := support.InspectPermissions(ctx, environment.Files, environment.Commands, "/etc/sudoers", support.PermissionPolicy{
+		AllowedUIDs: map[int]struct{}{0: {}}, AllowedMode: 0o640,
+		AllowedTypes: map[string]struct{}{"regular": {}},
+		SkipACL:      true,
+	})
 	if err != nil {
-		return sudoersError("sudo_package_inspection_failed", err, nil)
+		return sudoersError("sudoers_permission_failed", err, nil)
 	}
-	evidence := []model.Evidence{packageEvidence}
-	mainExists, err := environment.Files.Exists("/etc/sudoers")
-	if err != nil {
-		return sudoersError("sudoers_stat_failed", err, evidence)
-	}
-	if !installed && !mainExists && !environment.Commands.Available("visudo") {
+	if !assessment.Exists {
 		return evaluator.Outcome{
 			Status:   model.StatusNotApplicable,
-			Summary:  "sudo 패키지와 로컬 sudoers 정책이 없습니다.",
-			Expected: "sudo가 설치되어 사용될 때 로컬 정책 파일의 소유자와 권한을 점검합니다.",
-			Observed: "sudo RPM, visudo, /etc/sudoers 없음",
-			Evidence: evidence,
+			Summary:  "/etc/sudoers 파일이 없습니다.",
+			Expected: rule.Criteria.Pass,
+			Observed: "파일 없음",
+			Evidence: assessment.Evidence,
 		}
 	}
-	if !mainExists {
-		return evaluator.Outcome{
-			Status:        model.StatusUnknown,
-			UnknownReason: model.UnknownUnsupportedConfiguration,
-			Summary:       "sudo가 존재하지만 기본 로컬 sudoers 파일이 없습니다.",
-			Expected:      rule.Criteria.Pass,
-			Observed:      "/etc/sudoers 없음; 중앙 정책 또는 비표준 경로 사용 여부를 확정할 수 없음",
-			Evidence:      evidence,
-		}
-	}
-	if !environment.Commands.Available("visudo") {
-		return evaluator.Outcome{
-			Status:        model.StatusUnknown,
-			UnknownReason: model.UnknownUnsupportedConfiguration,
-			Summary:       "sudoers 전체 include와 구문을 검증할 visudo가 없습니다.",
-			Expected:      rule.Criteria.Pass,
-			Observed:      "/etc/sudoers는 존재하지만 visudo를 사용할 수 없음",
-			Evidence:      evidence,
-		}
-	}
-
-	validationSpec := executor.Spec{
-		Name: "visudo", Arguments: []string{"-c", "-f", "/etc/sudoers"},
-		Timeout: 30 * time.Second, MaxOutput: 2 << 20,
-	}
-	validation, err := environment.Commands.Run(ctx, validationSpec)
-	if err != nil {
-		return sudoersError("sudoers_validation_failed", err, evidence)
-	}
-	evidence = append(evidence, privateCommandSummary(validationSpec, validation))
-	if validation.ExitCode != 0 || validation.Truncated {
-		return sudoersError("sudoers_validation_failed", fmt.Errorf("visudo exit=%d truncated=%t", validation.ExitCode, validation.Truncated), evidence)
-	}
-
-	objects, err := collectSudoersObjects(ctx, environment)
-	if err != nil {
-		return sudoersError("sudoers_include_collection_failed", err, evidence)
-	}
-	evidence = append(evidence, objects.Evidence...)
-	violations := make([]string, 0)
-	unknowns := make([]string, 0)
-	for _, directory := range objects.Directories {
-		assessment, inspectErr := support.InspectPermissions(ctx, environment.Files, environment.Commands, directory, support.PermissionPolicy{
-			AllowedUIDs: map[int]struct{}{0: {}}, AllowedMode: 0o755,
-			AllowedTypes: map[string]struct{}{"directory": {}}, CheckDefaultACL: true,
-		})
-		if inspectErr != nil {
-			return sudoersError("sudoers_directory_permission_failed", inspectErr, evidence)
-		}
-		evidence = append(evidence, assessment.Evidence...)
-		appendPermissionFindings(directory, assessment, &violations, &unknowns)
-	}
-	for _, filePath := range objects.Files {
-		assessment, inspectErr := support.InspectPermissions(ctx, environment.Files, environment.Commands, filePath, support.PermissionPolicy{
-			AllowedUIDs: map[int]struct{}{0: {}}, AllowedMode: 0o640,
-			AllowedTypes: map[string]struct{}{"regular": {}},
-		})
-		if inspectErr != nil {
-			return sudoersError("sudoers_file_permission_failed", inspectErr, evidence)
-		}
-		evidence = append(evidence, assessment.Evidence...)
-		appendPermissionFindings(filePath, assessment, &violations, &unknowns)
-	}
-
-	selinuxEnforcing, selinuxKnown, selinuxEvidence, err := sudoersSELinuxState(ctx, environment)
-	if err != nil {
-		return sudoersError("selinux_state_failed", err, evidence)
-	}
-	evidence = append(evidence, selinuxEvidence...)
-	if !selinuxKnown {
-		unknowns = append(unknowns, "SELinux Enforcing 상태를 확정할 수 없음")
-	} else if selinuxEnforcing {
-		if !environment.Commands.Available("matchpathcon") {
-			unknowns = append(unknowns, "SELinux 기본 context 검증 도구가 없음")
-		} else {
-			allPaths := append(append([]string(nil), objects.Directories...), objects.Files...)
-			for _, objectPath := range allPaths {
-				spec := executor.Spec{Name: "matchpathcon", Arguments: []string{"-V", objectPath}, Timeout: 15 * time.Second, MaxOutput: 1 << 20}
-				result, runErr := environment.Commands.Run(ctx, spec)
-				if runErr != nil {
-					return sudoersError("sudoers_selinux_context_failed", runErr, evidence)
-				}
-				evidence = append(evidence, privateCommandSummary(spec, result))
-				if result.Truncated {
-					return sudoersError("sudoers_selinux_context_failed", fmt.Errorf("matchpathcon output truncated for %s", objectPath), evidence)
-				}
-				switch result.ExitCode {
-				case 0:
-					if len(result.Stderr) > 0 {
-						return sudoersError("sudoers_selinux_context_failed", fmt.Errorf("matchpathcon emitted diagnostics for %s", objectPath), evidence)
-					}
-				case 1:
-					output := strings.TrimSpace(string(result.Stdout))
-					if len(result.Stderr) > 0 || output == "" || strings.Contains(output, " error: ") || !strings.Contains(output, " should be ") {
-						return sudoersError("sudoers_selinux_context_failed", fmt.Errorf("matchpathcon could not verify %s", objectPath), evidence)
-					}
-					unknowns = append(unknowns, objectPath+": SELinux context가 정책 기본값과 다름")
-				default:
-					return sudoersError("sudoers_selinux_context_failed", fmt.Errorf("matchpathcon exit=%d for %s", result.ExitCode, objectPath), evidence)
-				}
-			}
-		}
-	}
-	if !objects.Complete {
-		unknowns = append(unknowns, "비표준 또는 동적 include 경로를 완전히 열거할 수 없음")
-	}
-	sort.Strings(violations)
-	sort.Strings(unknowns)
-	evidence = append(evidence, support.FactEvidence("sudoers 권한 파생 정보", map[string]any{
-		"file_count": len(objects.Files), "directory_count": len(objects.Directories),
-		"violation_count": len(violations), "unknown_count": len(unknowns),
-		"include_graph_complete": objects.Complete, "selinux_enforcing": selinuxEnforcing, "selinux_state_known": selinuxKnown,
-	}))
-	if len(violations) > 0 {
+	if len(assessment.Violations) > 0 {
 		return evaluator.Outcome{
 			Status:   model.StatusFail,
-			Summary:  "sudoers 정책 경로에 허용되지 않은 소유자, 권한 또는 ACL이 있습니다.",
+			Summary:  "/etc/sudoers 파일의 소유자 또는 권한이 기준을 충족하지 않습니다.",
 			Expected: rule.Criteria.Pass,
-			Observed: fmt.Sprintf("명백한 위반 %d건", len(violations)),
-			Evidence: evidence,
+			Observed: strings.Join(assessment.Violations, "\n"),
+			Evidence: assessment.Evidence,
 		}
 	}
-	if len(unknowns) > 0 {
+	if len(assessment.Unknowns) > 0 {
 		return evaluator.Outcome{
-			Status:        model.StatusUnknown,
-			UnknownReason: model.UnknownUnsupportedConfiguration,
-			Summary:       "일부 sudoers include, 파일 유형, ACL 또는 SELinux 상태를 확정할 수 없습니다.",
-			Expected:      rule.Criteria.Pass,
-			Observed:      fmt.Sprintf("확정 불가 %d건", len(unknowns)),
-			Evidence:      evidence,
+			Status: model.StatusUnknown, UnknownReason: model.UnknownUnsupportedConfiguration,
+			Summary:  "/etc/sudoers 파일의 소유자 또는 권한을 확정할 수 없습니다.",
+			Expected: rule.Criteria.Pass, Observed: strings.Join(assessment.Unknowns, "\n"), Evidence: assessment.Evidence,
+		}
+	}
+	if assessment.Metadata.Mode.Perm() != 0o640 {
+		return evaluator.Outcome{
+			Status: model.StatusUnknown, UnknownReason: model.UnknownAmbiguousResult,
+			Summary:  "/etc/sudoers 파일 권한이 가이드의 양호 조건과 취약 조건 어느 쪽에도 해당하지 않습니다.",
+			Expected: rule.Criteria.Pass, Observed: fmt.Sprintf("uid=%d mode=%04o", assessment.Metadata.UID, assessment.Metadata.Mode.Perm()), Evidence: assessment.Evidence,
 		}
 	}
 	return evaluator.Outcome{
 		Status:   model.StatusPass,
-		Summary:  "visudo 구문 검증을 통과한 모든 sudoers 경로의 소유자와 권한이 안전합니다.",
+		Summary:  "/etc/sudoers 파일의 소유자와 권한이 기준을 충족합니다.",
 		Expected: rule.Criteria.Pass,
-		Observed: fmt.Sprintf("파일 %d개와 include 디렉터리 %d개 확인", len(objects.Files), len(objects.Directories)),
-		Evidence: evidence,
+		Observed: fmt.Sprintf("uid=%d mode=%04o", assessment.Metadata.UID, assessment.Metadata.Mode.Perm()),
+		Evidence: assessment.Evidence,
 	}
 }
 

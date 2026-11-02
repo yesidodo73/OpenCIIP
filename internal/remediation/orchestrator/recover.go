@@ -116,7 +116,7 @@ func (m *Manager) claimRecoveryAttempt(
 	if value.SchemaVersion == 2 {
 		return value, nil
 	}
-	if value.SchemaVersion != model.RemediationSchemaVersion {
+	if !model.HasRemediationBuildProvenance(value.SchemaVersion) {
 		return value, &Error{Code: CodeInvalidState, Operation: "claim recovery attempt", RunID: value.RunID, Err: fmt.Errorf("unsupported remediation schema version %d", value.SchemaVersion)}
 	}
 	attempt, incomplete := incompleteRollbackAttempt(value)
@@ -835,7 +835,7 @@ func (m *Manager) ensureCrashRecoveryRollbackAttempt(
 }
 
 func recoveryAttemptObserver(value *model.RemediationJournal, observedByBuild model.RemediationBuildIdentity) *model.RemediationBuildIdentity {
-	if value == nil || value.SchemaVersion != model.RemediationSchemaVersion {
+	if value == nil || !model.HasRemediationBuildProvenance(value.SchemaVersion) {
 		return nil
 	}
 	copy := observedByBuild

@@ -53,7 +53,7 @@ func TestFreshEffectGateChecksOnlyCurrentChangeSet(t *testing.T) {
 	}
 }
 
-func TestExecutionBuildIdentityRequiresStableCleanRelease(t *testing.T) {
+func TestExecutionBuildIdentityRequiresCleanVersionedBuild(t *testing.T) {
 	t.Parallel()
 
 	digest := strings.Repeat("a", 64)
@@ -73,6 +73,11 @@ func TestExecutionBuildIdentityRequiresStableCleanRelease(t *testing.T) {
 	if err := validateExecutionBuildIdentity(stable, cleanProvenance(stable.Commit), true); err != nil {
 		t.Fatalf("stable clean build was rejected: %v", err)
 	}
+	prerelease := stable
+	prerelease.Version = "0.1.1-alpha.13"
+	if err := validateExecutionBuildIdentity(prerelease, cleanProvenance(prerelease.Commit), true); err != nil {
+		t.Fatalf("clean prerelease build was rejected: %v", err)
+	}
 	stable.Commit = strings.Repeat("0123456789abcdef", 4)
 	if err := validateExecutionBuildIdentity(stable, cleanProvenance(stable.Commit), true); err != nil {
 		t.Fatalf("stable clean SHA-256 build was rejected: %v", err)
@@ -89,7 +94,7 @@ func TestExecutionBuildIdentityRequiresStableCleanRelease(t *testing.T) {
 		{name: "leading zero", value: model.RemediationBuildIdentity{Version: "01.2.3", Commit: stable.Commit, ExecutableSHA256: digest}},
 		{name: "version prefix", value: model.RemediationBuildIdentity{Version: "v1.2.3", Commit: stable.Commit, ExecutableSHA256: digest}},
 		{name: "unknown commit", value: model.RemediationBuildIdentity{Version: stable.Version, Commit: "unknown", ExecutableSHA256: digest}},
-		{name: "prerelease", value: model.RemediationBuildIdentity{Version: "0.1.0-alpha.37", Commit: stable.Commit, ExecutableSHA256: digest}},
+		{name: "invalid prerelease number", value: model.RemediationBuildIdentity{Version: "0.1.0-alpha.037", Commit: stable.Commit, ExecutableSHA256: digest}},
 		{name: "build metadata", value: model.RemediationBuildIdentity{Version: "0.1.0+build.37", Commit: stable.Commit, ExecutableSHA256: digest}},
 		{name: "dirty metadata without modified flag", value: model.RemediationBuildIdentity{Version: "0.1.0+dirty", Commit: stable.Commit, ExecutableSHA256: digest}},
 		{name: "modified", value: model.RemediationBuildIdentity{Version: stable.Version, Commit: stable.Commit, ExecutableSHA256: digest, Modified: true}},
@@ -105,7 +110,7 @@ func TestExecutionBuildIdentityRequiresStableCleanRelease(t *testing.T) {
 			t.Parallel()
 			provenance := cleanProvenance(test.value.Commit)
 			if err := validateExecutionBuildIdentity(test.value, provenance, true); err == nil {
-				t.Fatal("release-only execution accepted an unsafe build identity")
+				t.Fatal("execution accepted an unsafe build identity")
 			}
 			if err := validateExecutionBuildIdentity(test.value, provenance, false); err != nil {
 				t.Fatalf("planning rejected a structurally valid build identity: %v", err)
@@ -173,7 +178,7 @@ func TestExecutionBuildIdentityRequiresGoVCSProvenance(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 			if err := validateExecutionBuildIdentity(build, test.provenance, true); err == nil {
-				t.Fatal("release-only execution accepted missing or inconsistent Go VCS provenance")
+				t.Fatal("execution accepted missing or inconsistent Go VCS provenance")
 			}
 			if err := validateExecutionBuildIdentity(build, test.provenance, false); err != nil {
 				t.Fatalf("planning rejected a structurally valid development build: %v", err)

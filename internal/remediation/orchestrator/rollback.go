@@ -385,6 +385,11 @@ func rollbackAttemptExecutor(
 		if err := executorBuild.ValidateRollbackExecutor(); err != nil {
 			return nil, fmt.Errorf("invalid user rollback executor build: %w", err)
 		}
+		if value.SchemaVersion == 3 {
+			if err := executorBuild.ValidateLegacyRollbackExecutor(); err != nil {
+				return nil, fmt.Errorf("version 3 rollback requires a stable build to preserve the existing journal format: %w", err)
+			}
+		}
 	case model.RollbackApplyFailure, model.RollbackVerifyFailure:
 		if executorBuild != value.RemediationBuild {
 			return nil, fmt.Errorf("automatic rollback executor differs from the remediation build")
@@ -395,7 +400,7 @@ func rollbackAttemptExecutor(
 	if value.SchemaVersion == 2 {
 		return nil, nil
 	}
-	if value.SchemaVersion != model.RemediationSchemaVersion {
+	if !model.HasRemediationBuildProvenance(value.SchemaVersion) {
 		return nil, fmt.Errorf("unsupported remediation schema version %d", value.SchemaVersion)
 	}
 	copy := executorBuild

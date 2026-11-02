@@ -189,6 +189,7 @@ func TestScanRunRedactsDeepCopyWithoutMutatingInput(t *testing.T) {
 			Title:    "password=title-secret",
 			Summary:  "token=summary-secret",
 			Expected: "secret=criteria-secret",
+			Solution: "secret=solution-secret",
 			Observed: "token=top-secret",
 			DisplayDetails: []model.ResultDetail{{
 				Label: "token=label-secret", Current: "password=detail-secret",
@@ -260,6 +261,7 @@ func TestScanRunRedactsDeepCopyWithoutMutatingInput(t *testing.T) {
 		clone.Results[0].Title,
 		clone.Results[0].Summary,
 		clone.Results[0].Expected,
+		clone.Results[0].Solution,
 		clone.Results[0].Observed,
 		clone.Results[0].DisplayDetails[0].Label,
 		clone.Results[0].DisplayDetails[0].Current,
