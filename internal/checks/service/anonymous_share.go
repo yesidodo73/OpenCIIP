@@ -40,12 +40,12 @@ func evaluateAnonymousShare(ctx context.Context, rule model.ResolvedRule, enviro
 		return evaluator.Outcome{Status: model.StatusFail, Summary: "활성 공유 서비스에 명시적인 익명 또는 무제한 접근 경로가 있습니다.", Expected: rule.Criteria.Pass, Observed: fmt.Sprintf("명백한 익명 접근 서비스 %d개", counts["fail"]), Evidence: evidence}
 	}
 	if counts["unknown"] > 0 {
-		return evaluator.Outcome{Status: model.StatusUnknown, UnknownReason: model.UnknownManualVerification, Summary: "일부 공유 서비스의 접근 범위를 승인 정책과 대조하거나 완전히 해석할 수 없습니다.", Expected: rule.Criteria.Pass, Observed: fmt.Sprintf("확정 불가 서비스 %d개", counts["unknown"]), Evidence: evidence}
+		return evaluator.Outcome{Status: model.StatusUnknown, UnknownReason: model.UnknownManualVerification, Summary: "일부 공유 서비스의 익명 접근 설정을 완전히 해석할 수 없습니다.", Expected: rule.Criteria.Pass, Observed: fmt.Sprintf("확정 불가 서비스 %d개", counts["unknown"]), Evidence: evidence}
 	}
 	if counts["pass"] == 0 {
-		return evaluator.Outcome{Status: model.StatusNotApplicable, Summary: "활성 FTP, Samba 또는 NFS 공유 서비스가 없습니다.", Expected: rule.Criteria.Pass, Observed: "공유 endpoint 없음", Evidence: evidence}
+		return evaluator.Outcome{Status: model.StatusPass, Summary: "활성 FTP, Samba 또는 NFS 공유 서비스가 없어 익명 접근 경로가 없습니다.", Expected: rule.Criteria.Pass, Observed: "공유 서비스 없음", Evidence: evidence}
 	}
-	return evaluator.Outcome{Status: model.StatusPass, Summary: "모든 활성 공유 서비스에서 익명 접근이 차단되거나 승인된 client로 제한됩니다.", Expected: rule.Criteria.Pass, Observed: fmt.Sprintf("서비스 %d개 확인", counts["pass"]), Evidence: evidence}
+	return evaluator.Outcome{Status: model.StatusPass, Summary: "모든 활성 공유 서비스에서 익명 접근이 차단되어 있습니다.", Expected: rule.Criteria.Pass, Observed: fmt.Sprintf("서비스 %d개 확인", counts["pass"]), Evidence: evidence}
 }
 
 func inspectAnonymousFTP(ctx context.Context, environment evaluator.Environment) warningFinding {
@@ -305,68 +305,24 @@ func inspectAnonymousNFS(ctx context.Context, rule model.ResolvedRule, environme
 		finding.State, finding.Reason = "not_applicable", "활성 NFS export 없음"
 		return finding
 	}
-	approvedClients, clientsSet, err := support.StringSliceParameter(rule.Parameters, "approved_nfs_clients")
-	if err != nil {
-		finding.State, finding.Reason = "error", err.Error()
-		return finding
-	}
-	approvedFlavors, flavorsSet, err := support.StringSliceParameter(rule.Parameters, "approved_nfs_security_flavors")
-	if err != nil {
-		finding.State, finding.Reason = "error", err.Error()
-		return finding
-	}
-	clientPolicy, err := makePolicySet(approvedClients, "approved_nfs_clients")
-	if err != nil {
-		finding.State, finding.Reason = "error", err.Error()
-		return finding
-	}
-	flavorPolicy, err := makePolicySet(approvedFlavors, "approved_nfs_security_flavors")
-	if err != nil {
-		finding.State, finding.Reason = "error", err.Error()
-		return finding
-	}
 	unsafe := 0
-	outsidePolicy := 0
-	unknown := 0
 	for _, export := range exports {
-		if export.Client == "*" || export.Client == "<world>" {
+		if _, hasUID := export.Options["anonuid"]; hasUID {
 			unsafe++
-		} else if !clientsSet {
-			unknown++
-		} else if !clientPolicy[export.Client] {
-			outsidePolicy++
-		}
-		flavors := strings.Split(export.Options["sec"], ":")
-		if export.Options["sec"] == "" {
-			unknown++
 			continue
 		}
-		for _, flavor := range flavors {
-			if flavor == "none" {
-				unsafe++
-			} else if !flavorsSet {
-				unknown++
-			} else if !flavorPolicy[flavor] {
-				outsidePolicy++
-			}
-		}
-		if !nfsSquashPolicyExplicitlyKnown(export.Options) {
-			unknown++
+		if _, hasGID := export.Options["anongid"]; hasGID {
+			unsafe++
 		}
 	}
 	finding.Evidence = append(finding.Evidence, support.FactEvidence("nfs-anonymous-summary", map[string]any{
-		"export_count": len(exports), "unrestricted_or_sec_none_count": unsafe, "outside_policy_count": outsidePolicy,
-		"unknown_policy_count": unknown, "selectors_redacted": true,
+		"export_count": len(exports), "explicit_anonymous_option_count": unsafe, "selectors_redacted": true,
 	}))
-	if unsafe > 0 || outsidePolicy > 0 {
-		finding.State, finding.Reason = "fail", "world/sec=none 또는 승인 정책 밖 NFS export가 있음"
+	if unsafe > 0 {
+		finding.State, finding.Reason = "fail", "anonuid 또는 anongid 옵션이 설정된 NFS export가 있음"
 		return finding
 	}
-	if unknown > 0 {
-		finding.State, finding.Reason = "unknown", "승인 client/security flavor 정책과 대조할 수 없음"
-		return finding
-	}
-	finding.State, finding.Reason = "pass", "모든 NFS export가 승인 client와 security flavor로 제한됨"
+	finding.State, finding.Reason = "pass", "NFS export에 anonuid 또는 anongid 옵션이 없음"
 	return finding
 }
 

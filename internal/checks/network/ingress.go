@@ -42,8 +42,8 @@ func evaluateIngressRestriction(ctx context.Context, rule model.ResolvedRule, en
 	evidence := []model.Evidence{listenerEvidence}
 	if listeners.total == 0 {
 		return evaluator.Outcome{
-			Status:   model.StatusNotApplicable,
-			Summary:  "외부 인터페이스에서 수신하는 TCP 또는 UDP 소켓이 없어 이 점검을 적용하지 않습니다.",
+			Status:   model.StatusPass,
+			Summary:  "외부 인터페이스에서 수신하는 TCP 또는 UDP 서비스가 없습니다.",
 			Expected: rule.Criteria.Pass,
 			Observed: "원격 접속 가능한 수신 소켓 0개",
 			Evidence: evidence,

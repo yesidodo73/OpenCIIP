@@ -32,19 +32,6 @@ func evaluateLoginWarning(ctx context.Context, rule model.ResolvedRule, environm
 	if err != nil {
 		return loginWarningError("invalid_rule_parameter", err, nil)
 	}
-	knownInadequateIssueHashes, err := configuredWarningHashes(rule.Parameters, "known_inadequate_issue_hashes")
-	if err != nil {
-		return loginWarningError("invalid_rule_parameter", err, nil)
-	}
-	for digest := range knownInadequateIssueHashes {
-		if _, conflict := approved[digest]; conflict {
-			return loginWarningError(
-				"invalid_rule_parameter",
-				fmt.Errorf("known_inadequate_issue_hashes conflicts with approved_login_warnings"),
-				nil,
-			)
-		}
-	}
 	findings := make([]warningFinding, 0, 8)
 
 	issue, err := inspectWarningFile(
@@ -55,7 +42,7 @@ func evaluateLoginWarning(ctx context.Context, rule model.ResolvedRule, environm
 		approved,
 		policySet,
 		true,
-		knownInadequateIssueHashes,
+		nil,
 	)
 	if err != nil {
 		return loginWarningError("issue_inspection_failed", err, nil)
@@ -114,14 +101,14 @@ func evaluateLoginWarning(ctx context.Context, rule model.ResolvedRule, environm
 		"error_count": counts["error"], "approved_policy_set": policySet, "content_redacted": true,
 	}))
 	if counts["error"] > 0 {
-		return evaluator.Outcome{Status: model.StatusError, Summary: "일부 로그인 endpoint의 경고 메시지를 수집하거나 해석하지 못했습니다.", ErrorCode: "login_warning_endpoint_failed", ErrorMessage: strings.Join(reasons["error"], "; "), Evidence: evidence}
+		return evaluator.Outcome{Status: model.StatusError, Summary: "일부 로그인 대상의 경고 메시지를 수집하거나 해석하지 못했습니다.", ErrorCode: "login_warning_endpoint_failed", ErrorMessage: strings.Join(reasons["error"], "; "), Evidence: evidence}
 	}
 	if counts["fail"] > 0 {
 		return evaluator.Outcome{
 			Status:   model.StatusFail,
-			Summary:  "적용 로그인 endpoint에 경고 메시지가 없거나 승인된 문구와 일치하지 않습니다.",
+			Summary:  "로그인 경고 적용 대상에 경고 메시지가 없거나 승인된 문구와 일치하지 않습니다.",
 			Expected: rule.Criteria.Pass,
-			Observed: fmt.Sprintf("명백한 위반 endpoint %d개", counts["fail"]),
+			Observed: fmt.Sprintf("명백한 위반 대상 %d개", counts["fail"]),
 			Details:  loginWarningDetails(reasons["fail"], reasons["unknown"], rule.Criteria.Pass),
 			Evidence: evidence,
 		}
@@ -134,21 +121,21 @@ func evaluateLoginWarning(ctx context.Context, rule model.ResolvedRule, environm
 		return evaluator.Outcome{
 			Status:        model.StatusUnknown,
 			UnknownReason: reason,
-			Summary:       "일부 endpoint의 실제 경고 문구 또는 기관 승인 여부를 확정할 수 없습니다.",
+			Summary:       "일부 대상의 실제 경고 문구 또는 기관 승인 여부를 확정할 수 없습니다.",
 			Expected:      rule.Criteria.Pass,
-			Observed:      fmt.Sprintf("확정 불가 endpoint %d개", counts["unknown"]),
+			Observed:      fmt.Sprintf("확정 불가 대상 %d개", counts["unknown"]),
 			Details:       loginWarningDetails(nil, reasons["unknown"], rule.Criteria.Pass),
 			Evidence:      evidence,
 		}
 	}
 	if counts["pass"] == 0 {
-		return evaluator.Outcome{Status: model.StatusNotApplicable, Summary: "적용 가능한 로그인 endpoint가 없습니다.", Expected: rule.Criteria.Pass, Observed: "활성 endpoint 없음", Evidence: evidence}
+		return evaluator.Outcome{Status: model.StatusNotApplicable, Summary: "적용 가능한 로그인 대상이 없습니다.", Expected: rule.Criteria.Pass, Observed: "활성 대상 없음", Evidence: evidence}
 	}
 	return evaluator.Outcome{
 		Status:   model.StatusPass,
-		Summary:  "모든 확인 가능한 로그인 endpoint가 승인된 경고 메시지를 사용합니다.",
+		Summary:  "모든 확인 가능한 로그인 대상이 승인된 경고 메시지를 사용합니다.",
 		Expected: rule.Criteria.Pass,
-		Observed: fmt.Sprintf("승인 문구와 일치한 endpoint %d개", counts["pass"]),
+		Observed: fmt.Sprintf("승인 문구와 일치한 대상 %d개", counts["pass"]),
 		Evidence: evidence,
 	}
 }
@@ -157,14 +144,14 @@ func loginWarningDetails(failures, unknowns []string, expected string) []model.R
 	details := make([]model.ResultDetail, 0, 2)
 	if len(failures) > 0 {
 		details = append(details, model.ResultDetail{
-			Label: "취약 endpoint", Current: strings.Join(failures, "; "),
-			Expected: expected, Source: "활성 로그인 endpoint",
+			Label: "취약 대상", Current: strings.Join(failures, "; "),
+			Expected: expected, Source: "활성 로그인 대상",
 		})
 	}
 	if len(unknowns) > 0 {
 		details = append(details, model.ResultDetail{
-			Label: "수동 확인 endpoint", Current: strings.Join(unknowns, "; "),
-			Expected: "실효 경고 문구와 기관 승인 여부 확인", Source: "활성 로그인 endpoint",
+			Label: "수동 확인 대상", Current: strings.Join(unknowns, "; "),
+			Expected: "실효 경고 문구와 기관 승인 여부 확인", Source: "활성 로그인 대상",
 		})
 	}
 	return details

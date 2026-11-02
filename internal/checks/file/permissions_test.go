@@ -20,7 +20,7 @@ func TestHostsLPDMissingConclusionDoesNotPassActiveOrUnknownInitPath(t *testing.
 	}
 }
 
-func TestStaticPermissionEvaluatorTreatsMissingACLCollectorAsUnsupportedUnknown(t *testing.T) {
+func TestStaticPermissionEvaluatorUsesOnlyGuideOwnerAndMode(t *testing.T) {
 	outcome := staticPermissionEvaluator(permissionPolicy{path: "/etc/passwd", allowedMode: 0o644})(
 		context.Background(),
 		model.ResolvedRule{},
@@ -29,10 +29,10 @@ func TestStaticPermissionEvaluatorTreatsMissingACLCollectorAsUnsupportedUnknown(
 			Commands: nonOwnerACLFixtureRunner{},
 		},
 	)
-	if outcome.Status != model.StatusUnknown || outcome.UnknownReason != model.UnknownUnsupportedConfiguration {
-		t.Fatalf("outcome = %#v, want UNKNOWN unsupported_configuration", outcome)
+	if outcome.Status != model.StatusPass {
+		t.Fatalf("outcome = %#v, want PASS", outcome)
 	}
-	if len(outcome.Evidence) < 2 || outcome.Evidence[len(outcome.Evidence)-1].Source != "posix_acl" {
-		t.Fatalf("evidence = %#v, want file metadata and ACL collector availability", outcome.Evidence)
+	if len(outcome.Evidence) != 1 || outcome.Evidence[0].Source != "/etc/passwd" {
+		t.Fatalf("evidence = %#v, want only guide file metadata", outcome.Evidence)
 	}
 }

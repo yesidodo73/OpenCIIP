@@ -18,8 +18,8 @@ import (
 
 const remediationJournalSchemaResource = "https://raw.githubusercontent.com/yesidodo73/OpenCIIP/main/schemas/remediation-journal.schema.json"
 
-func TestRemediationJournalV3SchemaRuntimeParity(t *testing.T) {
-	schema := compileRemediationJournalV3Schema(t)
+func TestRemediationJournalV4SchemaRuntimeParity(t *testing.T) {
+	schema := compileRemediationJournalV4Schema(t)
 
 	valid := []struct {
 		name    string
@@ -299,7 +299,7 @@ func remediationJournalPreparedCorpus() RemediationJournal {
 }
 
 func TestRemediationJournalChronologyRemainsRuntimeOnly(t *testing.T) {
-	schema := compileRemediationJournalV3Schema(t)
+	schema := compileRemediationJournalV4Schema(t)
 	tests := []struct {
 		name    string
 		journal func() RemediationJournal
@@ -353,7 +353,7 @@ func TestRemediationJournalChronologyRemainsRuntimeOnly(t *testing.T) {
 }
 
 func TestRemediationJournalCrossReferencesRemainRuntimeOnly(t *testing.T) {
-	schema := compileRemediationJournalV3Schema(t)
+	schema := compileRemediationJournalV4Schema(t)
 	value := journalContractCompleted()
 	value.Error = journalContractError("verification", value.UpdatedAt)
 	value.Error.ChangeSetID = "missing-change"
@@ -368,7 +368,7 @@ func TestRemediationJournalCrossReferencesRemainRuntimeOnly(t *testing.T) {
 }
 
 func TestLegacyRemediationJournalRuntimeCompatibilityAndPublicSchemaBoundary(t *testing.T) {
-	schema := compileRemediationJournalV3Schema(t)
+	schema := compileRemediationJournalV4Schema(t)
 
 	tests := []struct {
 		name            string
@@ -434,7 +434,7 @@ func TestLegacyRemediationJournalRuntimeCompatibilityAndPublicSchemaBoundary(t *
 				t.Fatalf("decode legacy fixture for public schema error = %v", err)
 			}
 			if err := schema.Validate(document); err == nil {
-				t.Fatal("public v3 schema accepted a legacy v2 journal")
+				t.Fatal("public v4 schema accepted a legacy v2 journal")
 			}
 		})
 	}
@@ -463,10 +463,14 @@ func readLegacyV2RemediationJournalFixture(t *testing.T, name string) ([]byte, R
 	return data, value
 }
 
-func compileRemediationJournalV3Schema(t *testing.T) *jsonschema.Schema {
+func compileRemediationJournalV4Schema(t *testing.T) *jsonschema.Schema {
 	t.Helper()
+	return compileRemediationJournalSchema(t, "remediation-journal.schema.json", remediationJournalSchemaResource)
+}
 
-	schemaPath := filepath.Join("..", "..", "schemas", "remediation-journal.schema.json")
+func compileRemediationJournalSchema(t *testing.T, name, resource string) *jsonschema.Schema {
+	t.Helper()
+	schemaPath := filepath.Join("..", "..", "schemas", name)
 	data, err := os.ReadFile(schemaPath)
 	if err != nil {
 		t.Fatalf("ReadFile(%q) error = %v", schemaPath, err)
@@ -480,10 +484,10 @@ func compileRemediationJournalV3Schema(t *testing.T) *jsonschema.Schema {
 	compiler.DefaultDraft(jsonschema.Draft2020)
 	compiler.UseRegexpEngine(compileRemediationJournalECMARegexp)
 	compiler.AssertFormat()
-	if err := compiler.AddResource(remediationJournalSchemaResource, document); err != nil {
+	if err := compiler.AddResource(resource, document); err != nil {
 		t.Fatalf("AddResource(remediation journal schema) error = %v", err)
 	}
-	schema, err := compiler.Compile(remediationJournalSchemaResource)
+	schema, err := compiler.Compile(resource)
 	if err != nil {
 		t.Fatalf("Compile(remediation journal schema) error = %v", err)
 	}

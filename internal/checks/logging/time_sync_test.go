@@ -118,7 +118,7 @@ func TestEvaluateTimeSyncDoesNotChooseOneOfTwoActiveManagers(t *testing.T) {
 		}
 		inspected[evidence.Command.Arguments[len(evidence.Command.Arguments)-1]] = true
 	}
-	for _, unit := range []string{"chronyd.service", "systemd-timesyncd.service"} {
+	for _, unit := range []string{"chronyd.service", "ntp.service", "systemd-timesyncd.service"} {
 		if !inspected[unit] {
 			t.Fatalf("outcome evidence does not include %s: %#v", unit, outcome.Evidence)
 		}
@@ -134,6 +134,15 @@ func (timeSyncUnitFixtureRunner) Run(_ context.Context, spec executor.Spec) (exe
 	unit := spec.Arguments[len(spec.Arguments)-1]
 	switch unit {
 	case "chronyd.service", "systemd-timesyncd.service":
+	case "ntp.service":
+		return executor.Result{
+			Executable: spec.Name,
+			Arguments:  append([]string(nil), spec.Arguments...),
+			ExitCode:   0,
+			Stdout: []byte(
+				"Id=ntp.service\nLoadState=not-found\nActiveState=inactive\nSubState=dead\nUnitFileState=\nFragmentPath=\nDropInPaths=\n",
+			),
+		}, nil
 	default:
 		return executor.Result{}, fmt.Errorf("unexpected systemd unit: %s", unit)
 	}
@@ -176,7 +185,7 @@ func TestEvaluateSystemdTimesyncdSupportsOldAndCurrentTimedatectl(t *testing.T) 
 				show: executor.Result{ExitCode: 1, Stderr: []byte("timedatectl: unrecognized option '--all'\n")},
 			},
 			wantStatus: model.StatusUnknown,
-			wantReason: model.UnknownManualVerification,
+			wantReason: model.UnknownInsufficientEvidence,
 		},
 		{
 			name: "current systemd validates the effective approved source",

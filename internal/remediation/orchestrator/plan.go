@@ -403,7 +403,7 @@ func requireCurrentExecutableBoundPlan(value *model.RemediationJournal, operatio
 	if value == nil {
 		return &Error{Code: CodeInvalidState, Operation: operation, Err: fmt.Errorf("remediation journal is missing")}
 	}
-	if value.SchemaVersion != model.RemediationSchemaVersion ||
+	if !model.HasRemediationBuildProvenance(value.SchemaVersion) ||
 		value.ScanToolExecutableSHA256 == "" {
 		return &Error{
 			Code:      CodeUnsupportedOperation,

@@ -20,6 +20,7 @@ type Criteria struct {
 	Summary              string `json:"summary" yaml:"summary"`
 	Pass                 string `json:"pass" yaml:"pass"`
 	Fail                 string `json:"fail" yaml:"fail"`
+	Solution             string `json:"solution,omitempty" yaml:"solution,omitempty"`
 	ManualReviewRequired bool   `json:"manual_review_required,omitempty" yaml:"manual_review_required,omitempty"`
 }
 

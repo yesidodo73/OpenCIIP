@@ -31,14 +31,6 @@ import (
 
 var (
 	ruleIDPattern = regexp.MustCompile(`^U-[0-9]{2}$`)
-
-	strictSemanticVersionPattern = regexp.MustCompile(
-		`^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-((0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(\.(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*))?(\+([0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*))?$`,
-	)
-	stableSemanticVersionPattern = regexp.MustCompile(
-		`^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$`,
-	)
-	canonicalGitCommitPattern = regexp.MustCompile(`^([0-9a-f]{40}|[0-9a-f]{64})$`)
 )
 
 type Workflow struct {
@@ -113,20 +105,8 @@ func validateExecutionBuildIdentity(build model.RemediationBuildIdentity, proven
 	if !requireRelease {
 		return nil
 	}
-	if !strictSemanticVersionPattern.MatchString(build.Version) {
-		return fmt.Errorf("실제 조치나 롤백에는 Semantic Versioning 형식의 정식 버전이 필요합니다")
-	}
-	if !stableSemanticVersionPattern.MatchString(build.Version) {
-		return fmt.Errorf("사전 릴리스 또는 build metadata가 포함된 빌드에서는 실제 조치나 롤백을 수행할 수 없습니다")
-	}
-	if !canonicalGitCommitPattern.MatchString(build.Commit) {
-		return fmt.Errorf("실제 조치나 롤백에는 전체 길이의 canonical Git commit이 필요합니다")
-	}
-	if strings.Trim(build.Commit, "0") == "" {
-		return fmt.Errorf("null Git commit으로는 실제 조치나 롤백을 수행할 수 없습니다")
-	}
-	if build.Modified {
-		return fmt.Errorf("수정된 빌드에서는 실제 조치나 롤백을 수행할 수 없습니다")
+	if err := build.ValidateRollbackExecutor(); err != nil {
+		return fmt.Errorf("실제 조치나 롤백에 사용할 수 없는 빌드입니다: %w", err)
 	}
 	if !provenance.RevisionPresent || !provenance.ModifiedPresent {
 		return fmt.Errorf("Go VCS provenance가 없는 빌드에서는 실제 조치나 롤백을 수행할 수 없습니다")
@@ -375,7 +355,7 @@ func (w *Workflow) verifyJournalExecutionIdentities(
 	if journalValue == nil {
 		return executionGateScope{}, fmt.Errorf("조치 저널이 없습니다")
 	}
-	if journalValue.SchemaVersion != model.RemediationSchemaVersion ||
+	if !model.HasRemediationBuildProvenance(journalValue.SchemaVersion) ||
 		journalValue.ScanToolExecutableSHA256 == "" {
 		return executionGateScope{}, fmt.Errorf("이전 형식의 조치 계획은 새로 승인하거나 적용할 수 없습니다. 다시 점검한 뒤 새 계획을 만들어야 합니다")
 	}

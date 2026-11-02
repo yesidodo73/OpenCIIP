@@ -50,6 +50,73 @@ func TestUserRollbackAttemptsRecordCurrentExecutorBuild(t *testing.T) {
 	})
 }
 
+func TestCleanPrereleaseRollbackUsesCurrentJournalFormat(t *testing.T) {
+	value := faultVerifiedJournal(t, 1, false, model.FailureRollbackItem, model.RunCompleted)
+	fixture := newRollbackCrashCutFixture(t, value)
+	preview, err := fixture.manager.PreviewRollbackItem(context.Background(), value.RunID, "change-a")
+	if err != nil {
+		t.Fatalf("PreviewRollbackItem() error = %v", err)
+	}
+	executor := faultUserRollbackBuild()
+	executor.Version = "1.0.0-alpha.1"
+	attempt, err := fixture.manager.RollbackItem(context.Background(), value.RunID, "change-a", false, preview.PreviewDigest, executor)
+	if err != nil {
+		t.Fatalf("RollbackItem() error = %v", err)
+	}
+	assertRollbackExecutor(t, attempt, executor)
+	assertRollbackExecutor(t, fixture.harness.state.RollbackAttempts[0], executor)
+}
+
+func TestVersion3RollbackKeepsExistingJournalContract(t *testing.T) {
+	value := faultVerifiedJournal(t, 1, false, model.FailureRollbackItem, model.RunCompleted)
+	value.SchemaVersion = 3
+	faultSealJournal(t, value)
+	fixture := newRollbackCrashCutFixture(t, value)
+	preview, err := fixture.manager.PreviewRollbackItem(context.Background(), value.RunID, "change-a")
+	if err != nil {
+		t.Fatalf("PreviewRollbackItem() error = %v", err)
+	}
+	executor := faultUserRollbackBuild()
+	executor.Version = "1.0.0-alpha.1"
+	_, err = fixture.manager.RollbackItem(context.Background(), value.RunID, "change-a", false, preview.PreviewDigest, executor)
+	if CodeOf(err) != CodeInvalidInput {
+		t.Fatalf("RollbackItem() error = %v, want version 3 rejection", err)
+	}
+	if len(fixture.runtime.mutationCalls) != 0 || len(fixture.harness.state.RollbackAttempts) != 0 {
+		t.Fatalf("version 3 rejection changed state: mutations=%v attempts=%v", fixture.runtime.mutationCalls, fixture.harness.state.RollbackAttempts)
+	}
+	executor.Version = "1.0.0"
+	attempt, err := fixture.manager.RollbackItem(context.Background(), value.RunID, "change-a", false, preview.PreviewDigest, executor)
+	if err != nil {
+		t.Fatalf("stable version 3 rollback error = %v", err)
+	}
+	assertRollbackExecutor(t, attempt, executor)
+}
+
+func TestVersion3RecoveryPreservesJournalAndDoesNotRestore(t *testing.T) {
+	value := recoverApplyIntentJournal(t)
+	value.SchemaVersion = 3
+	faultSealJournal(t, value)
+	harness := newFaultStoreHarness(t, value)
+	before := faultCloneSnapshot(value.ChangeSets[0].Operations[0].Before)
+	runtime := &scriptedFileRuntime{
+		capture: func(context.Context, model.CanonicalResource) (model.ResourceSnapshot, error) {
+			return faultCloneSnapshot(before), nil
+		},
+		restore: func(context.Context, model.OperationRecord, model.BackupArtifact) (model.ResourceSnapshot, error) {
+			t.Fatal("Recover() must not restore target resources")
+			return model.ResourceSnapshot{}, nil
+		},
+	}
+	manager := newFaultManager(t, harness, runtime, []string{"v3-recovery"})
+	if _, err := manager.Recover(context.Background(), value.RunID, faultRecoveryObserverBuild()); err != nil {
+		t.Fatalf("Recover(version 3) error = %v", err)
+	}
+	if harness.state.SchemaVersion != 3 || harness.state.State != model.RunFailed || len(runtime.mutationCalls) != 0 {
+		t.Fatalf("version 3 recovery state = schema %d, run %s, mutations %v", harness.state.SchemaVersion, harness.state.State, runtime.mutationCalls)
+	}
+}
+
 func TestAutomaticRollbackAttemptsRecordOriginalRemediationBuild(t *testing.T) {
 	for _, trigger := range []model.RollbackTrigger{model.RollbackApplyFailure, model.RollbackVerifyFailure} {
 		t.Run(string(trigger), func(t *testing.T) {
@@ -100,7 +167,8 @@ func TestUserRollbackRejectsUnsafeExecutorBeforeStateAccess(t *testing.T) {
 	value := faultVerifiedJournal(t, 1, false, model.FailureRollbackItem, model.RunCompleted)
 	fixture := newRollbackCrashCutFixture(t, value)
 	unsafe := faultUserRollbackBuild()
-	unsafe.Version = "1.0.0-alpha.1"
+	unsafe.Version = "1.0.0-alpha.1+dirty"
+	unsafe.Modified = true
 	revision := fixture.harness.state.Revision
 
 	_, err := fixture.manager.RollbackItem(

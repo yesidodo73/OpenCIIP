@@ -60,6 +60,7 @@ type CheckResult struct {
 	UnknownReason  UnknownReason  `json:"unknown_reason,omitempty"`
 	Summary        string         `json:"summary"`
 	Expected       string         `json:"expected,omitempty"`
+	Solution       string         `json:"solution,omitempty"`
 	Observed       string         `json:"observed,omitempty"`
 	DisplayDetails []ResultDetail `json:"-"`
 	Evaluator      string         `json:"evaluator"`

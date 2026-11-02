@@ -1,9 +1,13 @@
 package tui
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
+
+	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/yesidodo73/OpenCIIP/internal/engine"
 	"github.com/yesidodo73/OpenCIIP/internal/model"
@@ -23,6 +27,75 @@ func TestDurationLabel(t *testing.T) {
 		if got := durationLabel(test.value); got != test.want {
 			t.Errorf("durationLabel(%s) = %q, want %q", test.value, got, test.want)
 		}
+	}
+}
+
+func TestScanningPanelDoesNotJumpBetweenPreparationAndProgress(t *testing.T) {
+	started := time.Date(2026, time.July, 12, 0, 0, 0, 0, time.UTC)
+	view := &Model{width: 100, height: 36, scanStarted: started, now: func() time.Time { return started.Add(time.Second) }}
+	preparation := ansi.Strip(view.scanningView())
+	view.scanProgress = engine.Progress{Completed: 1, Total: 20, RuleID: "U-01", Title: "root 계정"}
+	progress := ansi.Strip(view.scanningView())
+	positions := func(content string) (int, int) {
+		top, bottom := -1, -1
+		for i, line := range strings.Split(content, "\n") {
+			if strings.Contains(line, "╭─ 점검 진행") {
+				top = i
+			}
+			if strings.Contains(line, "╰") {
+				bottom = i
+			}
+		}
+		return top, bottom
+	}
+	prepTop, prepBottom := positions(preparation)
+	runTop, runBottom := positions(progress)
+	if prepTop < 0 || prepTop != runTop || prepBottom != runBottom {
+		t.Fatalf("panel moved: preparing %d..%d, running %d..%d", prepTop, prepBottom, runTop, runBottom)
+	}
+	if !strings.Contains(preparation, "준비") || !strings.Contains(progress, "1 / 20") {
+		t.Fatalf("progress states missing: preparing=%q running=%q", preparation, progress)
+	}
+}
+
+func TestScanCompletionWaitsForResultConfirmation(t *testing.T) {
+	view := newModel(context.Background(), nil, nil, nil)
+	view.width, view.height = 100, 30
+	view.screen = screenScanning
+	view.scanStarted = time.Now()
+	view.scanProgress = engine.Progress{Completed: 1, Total: 2}
+	run := model.ScanRun{Metadata: model.RunMetadata{Complete: true}, Results: []model.CheckResult{
+		{RuleID: "U-01", Status: model.StatusFail}, {RuleID: "U-02", Status: model.StatusPass},
+	}}
+	view.Update(scanCompleteMsg{run: run, reportPath: "/reports/fixture"})
+	if view.screen != screenScanning {
+		t.Fatalf("scan jumped directly to screen %d", view.screen)
+	}
+	content := ansi.Strip(view.scanningView())
+	for _, expected := range []string{"점검 완료", "2 / 2", "100%", "Enter", "결과 보기"} {
+		if !strings.Contains(content, expected) {
+			t.Fatalf("completion view is missing %q: %q", expected, content)
+		}
+	}
+	view.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
+	if view.screen != screenResults {
+		t.Fatalf("enter after completion did not open results: %d", view.screen)
+	}
+}
+
+func TestIncompleteScanIsNotPresentedAsComplete(t *testing.T) {
+	view := newModel(context.Background(), nil, nil, nil)
+	view.width, view.height = 100, 30
+	view.screen = screenScanning
+	view.scanStarted = time.Now()
+	view.scanProgress = engine.Progress{Completed: 1, Total: 2}
+	view.Update(scanCompleteMsg{run: model.ScanRun{Metadata: model.RunMetadata{Complete: false}}})
+	content := ansi.Strip(view.scanningView())
+	if strings.Contains(content, "점검 완료") || strings.Contains(content, "100%") {
+		t.Fatalf("incomplete scan shown as complete: %q", content)
+	}
+	if !strings.Contains(content, "점검 중단") {
+		t.Fatalf("incomplete scan status missing: %q", content)
 	}
 }
 
@@ -81,8 +154,40 @@ func TestReadyViewLeavesRemediationInExecutionOptions(t *testing.T) {
 func TestReadyFooterUsesProjectCopyrightHolder(t *testing.T) {
 	t.Parallel()
 	footer := readyFooter()
-	if !strings.Contains(footer, "© 2026 yesidodo73") || strings.Contains(footer, "contributors") {
+	if !strings.Contains(footer, "© 2026 yellowcape") || strings.Contains(footer, "yesidodo73") {
 		t.Fatalf("ready footer copyright = %q", footer)
+	}
+}
+
+func TestReadyViewSeparatesLogoFromSubtitle(t *testing.T) {
+	view := &Model{width: 100, height: 30, platform: model.PlatformInfo{Privilege: "root"}}
+	lines := strings.Split(ansi.Strip(view.readyView()), "\n")
+	logoEnd, subtitle := -1, -1
+	for i, line := range lines {
+		if strings.Contains(line, "/_/") {
+			logoEnd = i
+		}
+		if strings.Contains(line, "주요정보통신기반시설 기술적 취약점 점검 도구") {
+			subtitle = i
+		}
+	}
+	if logoEnd < 0 || subtitle-logoEnd < 2 || strings.TrimSpace(lines[logoEnd+1]) != "" {
+		t.Fatalf("logo and subtitle are not separated: %#v", lines)
+	}
+}
+
+func TestOldScanTicksCannotAnimateNewOrFinishedScan(t *testing.T) {
+	view := newModel(context.Background(), nil, nil, nil)
+	view.screen = screenScanning
+	view.scanGeneration = 2
+	_, command := view.Update(scanTickMsg{generation: 1})
+	if command != nil || view.scanTicks != 0 {
+		t.Fatalf("old tick affected current scan: %d, %v", view.scanTicks, command)
+	}
+	view.scanFinished = true
+	_, command = view.Update(scanTickMsg{generation: 2})
+	if command != nil || view.scanTicks != 0 {
+		t.Fatalf("finished scan is still animating: %d, %v", view.scanTicks, command)
 	}
 }
 

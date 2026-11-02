@@ -1347,7 +1347,12 @@ func compactFindings(findings []pathFinding, limit int) string {
 		}
 		label := finding.Path
 		if finding.Account != "" {
-			label = finding.Account + ":" + label
+			names := strings.Split(finding.Account, ",")
+			if len(names) > 1 {
+				label = fmt.Sprintf("계정 %d개(%s):%s", len(names), strings.Join(names, ", "), label)
+			} else {
+				label = finding.Account + ":" + label
+			}
 		}
 		values = append(values, label+"("+finding.Reason+")")
 	}

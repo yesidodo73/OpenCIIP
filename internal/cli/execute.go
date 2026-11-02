@@ -73,6 +73,9 @@ func newRootCommand(stdin io.Reader, stdout, stderr io.Writer, resultCode *int) 
 			return nil
 		},
 	}
+	versionInfo := buildinfo.Current()
+	command.Version = versionInfo.Version
+	command.SetVersionTemplate(fmt.Sprintf("OpenCIIP %s\ncommit: %s\nbuild date: %s\n", versionInfo.Version, versionInfo.Commit, versionInfo.BuildDate))
 	command.SetIn(stdin)
 	command.SetOut(stdout)
 	command.SetErr(stderr)
@@ -169,7 +172,7 @@ func newScanCommand(stdout io.Writer, resultCode *int) *cobra.Command {
 	flags.StringSliceVar(&options.categories, "category", nil, "점검 분류")
 	flags.StringSliceVar(&options.severities, "severity", nil, "중요도")
 	flags.StringVar(&options.evidence, "evidence", "problems", "증적 저장 범위: problems, all, none")
-	flags.StringVar(&options.reportDir, "report-dir", report.DefaultDirectory(), "보고서 저장 디렉터리")
+	flags.StringVar(&options.reportDir, "report-dir", "", "보고서 저장 디렉터리 (기본값: 현재 디렉터리의 reports)")
 	flags.BoolVar(&options.all, "all", false, "정상 항목을 포함한 모든 결과를 표시합니다")
 	flags.BoolVar(&options.quiet, "quiet", false, "최소 결과만 표시합니다")
 	flags.BoolVar(&options.noColor, "no-color", false, "색상 출력을 사용하지 않습니다")

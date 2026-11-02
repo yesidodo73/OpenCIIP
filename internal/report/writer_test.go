@@ -130,6 +130,35 @@ func TestHumanReportFallbackSplitsFindingDelimitersOnly(t *testing.T) {
 	}
 }
 
+func TestRenderProblemsIncludesSolutionOnlyWhenPresent(t *testing.T) {
+	t.Parallel()
+	run := model.ScanRun{Results: []model.CheckResult{
+		{
+			RuleID:   "U-01",
+			Title:    "root 계정 원격 접속 제한",
+			Status:   model.StatusFail,
+			Summary:  "SSH에서 root 직접 로그인이 허용되는 실효 구성이 있습니다.",
+			Expected: "root 직접 접속을 차단한 경우 양호합니다.",
+			Solution: "원격 접속 시 root 계정으로 접속할 수 없도록 파일 내용 설정",
+		},
+		{
+			RuleID:   "U-02",
+			Title:    "비밀번호 관리정책 설정",
+			Status:   model.StatusFail,
+			Summary:  "비밀번호 관리 정책이 가이드 기준을 충족하지 않습니다.",
+			Expected: "비밀번호 관리 정책이 설정된 경우 양호합니다.",
+		},
+	}}
+
+	output := renderProblems(run)
+	if !strings.Contains(output, "조치 방법: 원격 접속 시 root 계정으로 접속할 수 없도록 파일 내용 설정") {
+		t.Fatalf("problems output lacks solution section: %q", output)
+	}
+	if count := strings.Count(output, "조치 방법"); count != 1 {
+		t.Fatalf("solution section count = %d, want exactly one for the result that defines it", count)
+	}
+}
+
 func TestOrderedStatusesUsesUserFacingPriority(t *testing.T) {
 	t.Parallel()
 	statuses := orderedStatuses()
@@ -355,6 +384,9 @@ func TestWriteScanHonorsRedactionMetadataWithoutMutatingInput(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			reportRoot := t.TempDir()
+			if err := os.Chmod(reportRoot, 0o700); err != nil {
+				t.Fatalf("make report root private: %v", err)
+			}
 			reportRootInfo, err := os.Stat(reportRoot)
 			if err != nil {
 				t.Fatalf("stat report root: %v", err)

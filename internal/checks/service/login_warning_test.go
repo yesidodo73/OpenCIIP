@@ -77,7 +77,7 @@ func TestLoginWarningDetailsSeparateFailureAndUnknownReasons(t *testing.T) {
 	if len(details) != 2 {
 		t.Fatalf("details = %#v, want separate failure and unknown sections", details)
 	}
-	if details[0].Label != "취약 endpoint" || details[1].Label != "수동 확인 endpoint" {
+	if details[0].Label != "취약 대상" || details[1].Label != "수동 확인 대상" {
 		t.Fatalf("detail labels = %q, %q", details[0].Label, details[1].Label)
 	}
 	if strings.Contains(details[0].Current, "동적 MOTD") {

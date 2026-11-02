@@ -2,6 +2,7 @@ package account
 
 import (
 	"context"
+	"fmt"
 	"reflect"
 	"strconv"
 	"strings"
@@ -123,7 +124,7 @@ func TestSessionTimeoutUsesFinalSourcedStartupState(t *testing.T) {
 	}
 }
 
-func TestCompactSessionTimeoutItemsLimitsHumanDetail(t *testing.T) {
+func TestSessionTimeoutItemsShowsAllHumanDetails(t *testing.T) {
 	t.Parallel()
 
 	items := []string{
@@ -133,51 +134,49 @@ func TestCompactSessionTimeoutItemsLimitsHumanDetail(t *testing.T) {
 		"/etc/profile:4 명령 치환",
 		"/etc/profile:5 불명확한 분기",
 	}
-	got := compactSessionTimeoutItems(items, 3)
-	for _, expected := range []string{items[0], items[1], items[2], "외 2건은 증적에서 확인할 수 있습니다."} {
+	got := sessionTimeoutItems(items)
+	for _, expected := range items {
 		if !strings.Contains(got, expected) {
-			t.Fatalf("compactSessionTimeoutItems() lacks %q: %q", expected, got)
-		}
-	}
-	for _, hidden := range items[3:] {
-		if strings.Contains(got, hidden) {
-			t.Fatalf("compactSessionTimeoutItems() did not hide overflow %q: %q", hidden, got)
+			t.Fatalf("sessionTimeoutItems() lacks %q: %q", expected, got)
 		}
 	}
 	if strings.Contains(got, "; ") {
-		t.Fatalf("compactSessionTimeoutItems() retained semicolon delimiters: %q", got)
+		t.Fatalf("sessionTimeoutItems() retained semicolon delimiters: %q", got)
 	}
 }
 
-func TestCompactSessionTimeoutFormattingDoesNotMutateEvidenceSlices(t *testing.T) {
+func TestSessionTimeoutFormattingDoesNotMutateEvidenceSlices(t *testing.T) {
 	t.Parallel()
 
 	items := []string{"z 조건", "a 조건", "z 조건", "b 조건"}
 	originalItems := append([]string(nil), items...)
-	_ = compactSessionTimeoutItems(items, 3)
+	_ = sessionTimeoutItems(items)
 	if !reflect.DeepEqual(items, originalItems) {
 		t.Fatalf("compactSessionTimeoutItems() mutated input = %#v, want %#v", items, originalItems)
 	}
 
 	paths := []string{"/etc/profile", "/etc/bashrc", "/etc/profile", "/root/.bashrc"}
 	originalPaths := append([]string(nil), paths...)
-	_ = compactSessionTimeoutSource(paths)
+	_ = sessionTimeoutSource(paths)
 	if !reflect.DeepEqual(paths, originalPaths) {
 		t.Fatalf("compactSessionTimeoutSource() mutated input = %#v, want %#v", paths, originalPaths)
 	}
 }
 
-func TestCompactSessionTimeoutDetailsCapsContexts(t *testing.T) {
+func TestSessionTimeoutShowsEveryAffectedContext(t *testing.T) {
 	t.Parallel()
-
-	details := make([]model.ResultDetail, 10)
-	for index := range details {
-		details[index] = model.ResultDetail{Label: "context-" + strconv.Itoa(index)}
+	var passwd strings.Builder
+	for index := 0; index < 6; index++ {
+		fmt.Fprintf(&passwd, "user%d:x:%d:%d:user:/home/user%d:/bin/bash\n", index, 1000+index, 1000+index, index)
 	}
-	got := compactSessionTimeoutDetails(details, "expected")
-	if len(got) != 9 || got[8].Label != "추가 확인 항목" ||
-		!strings.Contains(got[8].Current, "외 2개") {
-		t.Fatalf("compactSessionTimeoutDetails() = %#v", got)
+	outcome := evaluateSessionTimeout(context.Background(), model.ResolvedRule{}, evaluator.Environment{
+		Files: newAccountFixtureReader(map[string]string{}), Commands: getentPasswdFixture(passwd.String()),
+	})
+	if outcome.Status != model.StatusFail || len(outcome.Details) != 12 {
+		t.Fatalf("session timeout contexts omitted: %#v", outcome)
+	}
+	if !strings.HasPrefix(outcome.Details[11].Label, "user5/") {
+		t.Fatalf("last account is missing: %#v", outcome.Details)
 	}
 }
 

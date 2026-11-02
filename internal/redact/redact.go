@@ -216,6 +216,7 @@ func ScanRun(run model.ScanRun) model.ScanRun {
 		clone.Results[index].Title = Text(result.Title)
 		clone.Results[index].Summary = Text(result.Summary)
 		clone.Results[index].Expected = Text(result.Expected)
+		clone.Results[index].Solution = Text(result.Solution)
 		clone.Results[index].Evaluator = Text(result.Evaluator)
 		clone.Results[index].ErrorCode = Text(result.ErrorCode)
 		clone.Results[index].BindingSources = redactStrings(result.BindingSources)

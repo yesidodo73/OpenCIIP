@@ -72,6 +72,7 @@ func (r *Registry) Evaluate(ctx context.Context, rule model.ResolvedRule, enviro
 		Category:       rule.Category,
 		Severity:       rule.Severity,
 		Evaluator:      rule.Evaluator,
+		Solution:       rule.Criteria.Solution,
 		Verification:   rule.Verification,
 		BindingSources: append([]string(nil), rule.BindingSources...),
 		Reference:      rule.Reference,
@@ -120,14 +121,31 @@ func (r *Registry) Evaluate(ctx context.Context, rule model.ResolvedRule, enviro
 	}
 
 	outcome := evaluate(ctx, rule, environment)
+	expected := strings.TrimSpace(rule.Criteria.Pass)
+	if expected == "" {
+		expected = strings.TrimSpace(outcome.Expected)
+	}
+	outcome.Expected = expected
 	result.Status = outcome.Status
 	result.UnknownReason = outcome.UnknownReason
 	result.Summary = outcome.Summary
-	result.Expected = outcome.Expected
+	result.Expected = expected
 	result.Observed = outcome.Observed
 	result.DisplayDetails = append([]model.ResultDetail(nil), outcome.Details...)
 	if len(result.DisplayDetails) == 0 && strings.TrimSpace(outcome.Observed) != "" {
 		result.DisplayDetails = defaultDisplayDetails(outcome)
+	}
+	for _, metadata := range fileMetadataDetails(outcome.Evidence) {
+		duplicate := false
+		for _, detail := range result.DisplayDetails {
+			if detail.Label == "파일 권한" && detail.Source != "" && detail.Source == metadata.Source {
+				duplicate = true
+				break
+			}
+		}
+		if !duplicate {
+			result.DisplayDetails = append(result.DisplayDetails, metadata)
+		}
 	}
 	result.Evidence = append([]model.Evidence(nil), outcome.Evidence...)
 	result.ErrorCode = outcome.ErrorCode
@@ -136,9 +154,8 @@ func (r *Registry) Evaluate(ctx context.Context, rule model.ResolvedRule, enviro
 }
 
 func defaultDisplayDetails(outcome Outcome) []model.ResultDetail {
-	sources := make([]string, 0, 3)
+	sources := make([]string, 0, len(outcome.Evidence))
 	seen := make(map[string]struct{})
-	remaining := 0
 	for _, evidence := range outcome.Evidence {
 		source := strings.TrimSpace(evidence.Source)
 		if source == "" {
@@ -148,16 +165,9 @@ func defaultDisplayDetails(outcome Outcome) []model.ResultDetail {
 			continue
 		}
 		seen[source] = struct{}{}
-		if len(sources) < 3 {
-			sources = append(sources, source)
-		} else {
-			remaining++
-		}
+		sources = append(sources, source)
 	}
 	source := strings.Join(sources, ", ")
-	if remaining > 0 {
-		source += fmt.Sprintf(" 외 %d개", remaining)
-	}
 	return []model.ResultDetail{{
 		Label: "판정 결과", Current: outcome.Observed,
 		Expected: outcome.Expected, Source: source,

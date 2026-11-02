@@ -325,7 +325,7 @@ func TestEvaluateSchedulerPermissionsRequiresRootOwnedCronAndAtJobs(t *testing.T
 	}
 }
 
-func TestSchedulerPermissionDetailsLimitEachCategory(t *testing.T) {
+func TestSchedulerPermissionDetailsShowEveryFinding(t *testing.T) {
 	violations := make([]string, 22)
 	unknowns := make([]string, 21)
 	for index := range violations {
@@ -340,11 +340,11 @@ func TestSchedulerPermissionDetailsLimitEachCategory(t *testing.T) {
 	if len(details) != 2 {
 		t.Fatalf("details = %#v, want two categories", details)
 	}
-	if strings.Count(details[0].Current, "\n") != 20 || !strings.HasSuffix(details[0].Current, "... 외 2건") {
-		t.Errorf("violation detail = %q, want 20 samples and omitted count", details[0].Current)
+	if details[0].Current != strings.Join(violations, "\n") {
+		t.Errorf("violation detail = %q, want all findings", details[0].Current)
 	}
-	if strings.Count(details[1].Current, "\n") != 20 || !strings.HasSuffix(details[1].Current, "... 외 1건") {
-		t.Errorf("uncertainty detail = %q, want 20 samples and omitted count", details[1].Current)
+	if details[1].Current != strings.Join(unknowns, "\n") {
+		t.Errorf("uncertainty detail = %q, want all findings", details[1].Current)
 	}
 }
 

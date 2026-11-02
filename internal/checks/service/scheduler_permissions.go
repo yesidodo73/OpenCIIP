@@ -346,7 +346,7 @@ func schedulerRegularObjectClass(class schedulerObjectClass) bool {
 }
 
 func schedulerPermissionPolicy(class schedulerObjectClass) support.PermissionPolicy {
-	policy := support.PermissionPolicy{AllowedTypes: map[string]struct{}{"regular": {}}}
+	policy := support.PermissionPolicy{AllowedTypes: map[string]struct{}{"regular": {}}, SkipACL: true}
 	switch class {
 	case schedulerCommand:
 		policy.AllowedUIDs = map[int]struct{}{0: {}}
@@ -495,7 +495,7 @@ func schedulerPermissionDetails(violations, unknowns []string, expected string) 
 	if len(violations) > 0 {
 		details = append(details, model.ResultDetail{
 			Label:    "확인된 위반",
-			Current:  schedulerPermissionDetailCurrent(violations, 20),
+			Current:  strings.Join(violations, "\n"),
 			Expected: expected,
 			Source:   "cron/at 명령 및 관련 파일 권한",
 		})
@@ -503,20 +503,12 @@ func schedulerPermissionDetails(violations, unknowns []string, expected string) 
 	if len(unknowns) > 0 {
 		details = append(details, model.ResultDetail{
 			Label:    "추가 확인 필요",
-			Current:  schedulerPermissionDetailCurrent(unknowns, 20),
+			Current:  strings.Join(unknowns, "\n"),
 			Expected: expected,
 			Source:   "cron/at 명령 및 관련 파일 권한",
 		})
 	}
 	return details
-}
-
-func schedulerPermissionDetailCurrent(values []string, limit int) string {
-	visible := schedulerLimitedStrings(values, limit)
-	if len(values) > len(visible) {
-		visible = append(visible, fmt.Sprintf("... 외 %d건", len(values)-len(visible)))
-	}
-	return strings.Join(visible, "\n")
 }
 
 func schedulerLimitedStrings(values []string, limit int) []string {

@@ -41,17 +41,8 @@ func evaluateDNSZoneTransfer(ctx context.Context, rule model.ResolvedRule, envir
 	if terminal != nil {
 		return *terminal
 	}
-	approved, policySet, err := support.StringSliceParameter(rule.Parameters, "approved_dns_transfer_selectors")
-	if err != nil {
-		return dnsConfigError("invalid_rule_parameter", err, evidence)
-	}
-	approvedSet, err := makePolicySet(approved, "approved_dns_transfer_selectors")
-	if err != nil {
-		return dnsConfigError("invalid_rule_parameter", err, evidence)
-	}
 	unsafe := 0
 	unknown := 0
-	outsidePolicy := 0
 	for _, zone := range zones {
 		directive, state := effectiveBINDDirective(root, zone, "allow-transfer")
 		if state != "ok" {
@@ -72,30 +63,18 @@ func evaluateDNSZoneTransfer(ctx context.Context, rule model.ResolvedRule, envir
 			unsafe++
 			continue
 		}
-		if !policySet {
-			unknown++
-			continue
-		}
-		for _, selector := range selectors {
-			if !approvedSet[selector] {
-				outsidePolicy++
-			}
-		}
 	}
 	evidence = append(evidence, support.FactEvidence("BIND allow-transfer 파생 정보", map[string]any{
 		"authoritative_zone_count": len(zones), "unsafe_zone_count": unsafe,
-		"outside_policy_count": outsidePolicy, "unknown_zone_count": unknown, "details_redacted": true,
+		"unknown_zone_count": unknown, "details_redacted": true,
 	}))
 	if unsafe > 0 {
 		return evaluator.Outcome{Status: model.StatusFail, Summary: "모든 호스트에 DNS zone transfer를 허용하는 zone이 있습니다.", Expected: "zone transfer를 비활성화하거나 승인 secondary/TSIG로만 제한해야 합니다.", Observed: fmt.Sprintf("allow-transfer any 적용 zone %d개", unsafe), Evidence: evidence}
 	}
-	if outsidePolicy > 0 {
-		return evaluator.Outcome{Status: model.StatusFail, Summary: "DNS zone transfer 허용 범위가 승인 정책보다 넓습니다.", Expected: "모든 transfer selector가 approved_dns_transfer_selectors에 포함되어야 합니다.", Observed: fmt.Sprintf("승인 목록 밖 selector를 가진 zone %d건", outsidePolicy), Evidence: evidence}
-	}
 	if unknown > 0 {
-		return evaluator.Outcome{Status: model.StatusUnknown, UnknownReason: model.UnknownManualVerification, Summary: "일부 DNS zone transfer 정책을 패키지 기본값 또는 승인 목록과 대조할 수 없습니다.", Expected: "모든 authoritative zone의 allow-transfer를 명시적으로 제한해야 합니다.", Observed: fmt.Sprintf("확정 불가 zone %d개", unknown), Evidence: evidence}
+		return evaluator.Outcome{Status: model.StatusUnknown, UnknownReason: model.UnknownUnsupportedConfiguration, Summary: "일부 DNS zone transfer 제한을 확정할 수 없습니다.", Expected: rule.Criteria.Pass, Observed: fmt.Sprintf("확정 불가 zone %d개", unknown), Evidence: evidence}
 	}
-	return evaluator.Outcome{Status: model.StatusPass, Summary: "모든 authoritative DNS zone의 transfer가 비활성 또는 승인 selector로 제한되어 있습니다.", Expected: "zone transfer를 비활성화하거나 승인 secondary/TSIG로만 제한해야 합니다.", Observed: fmt.Sprintf("authoritative zone %d개 확인", len(zones)), Evidence: evidence}
+	return evaluator.Outcome{Status: model.StatusPass, Summary: "모든 authoritative DNS zone의 transfer가 비활성화되었거나 특정 대상으로 제한되어 있습니다.", Expected: rule.Criteria.Pass, Observed: fmt.Sprintf("authoritative zone %d개 확인", len(zones)), Evidence: evidence}
 }
 
 func evaluateDNSDynamicUpdate(ctx context.Context, rule model.ResolvedRule, environment evaluator.Environment) evaluator.Outcome {
@@ -103,17 +82,8 @@ func evaluateDNSDynamicUpdate(ctx context.Context, rule model.ResolvedRule, envi
 	if terminal != nil {
 		return *terminal
 	}
-	approved, policySet, err := support.StringSliceParameter(rule.Parameters, "approved_dns_update_identities")
-	if err != nil {
-		return dnsConfigError("invalid_rule_parameter", err, evidence)
-	}
-	approvedSet, err := makePolicySet(approved, "approved_dns_update_identities")
-	if err != nil {
-		return dnsConfigError("invalid_rule_parameter", err, evidence)
-	}
 	unsafe := 0
 	unknown := 0
-	outsidePolicy := 0
 	for _, zone := range zones {
 		if zone.Type != "master" && zone.Type != "primary" {
 			forwarding, state := effectiveBINDDirective(root, zone, "allow-update-forwarding")
@@ -142,18 +112,7 @@ func evaluateDNSDynamicUpdate(ctx context.Context, rule model.ResolvedRule, envi
 				unknown++
 				continue
 			}
-			if len(identities) == 0 {
-				continue
-			}
-			if !policySet {
-				unknown++
-				continue
-			}
-			for _, identity := range identities {
-				if !approvedSet[identity] {
-					outsidePolicy++
-				}
-			}
+			_ = identities
 			continue
 		}
 		if updateState != "ok" {
@@ -171,38 +130,18 @@ func evaluateDNSDynamicUpdate(ctx context.Context, rule model.ResolvedRule, envi
 		if isOnlySelector(selectors, "none") {
 			continue
 		}
-		keyIdentities := make([]string, 0)
-		for _, selector := range selectors {
-			if !strings.HasPrefix(selector, "key:") {
-				unknown++
-				continue
-			}
-			keyIdentities = append(keyIdentities, strings.TrimPrefix(selector, "key:"))
-		}
-		if len(keyIdentities) > 0 && !policySet {
-			unknown++
-			continue
-		}
-		for _, identity := range keyIdentities {
-			if !approvedSet[identity] && !approvedSet["key:"+identity] {
-				outsidePolicy++
-			}
-		}
 	}
 	evidence = append(evidence, support.FactEvidence("BIND dynamic update 파생 정보", map[string]any{
 		"authoritative_zone_count": len(zones), "unsafe_zone_count": unsafe,
-		"outside_policy_count": outsidePolicy, "unknown_zone_count": unknown, "details_redacted": true,
+		"unknown_zone_count": unknown, "details_redacted": true,
 	}))
 	if unsafe > 0 {
 		return evaluator.Outcome{Status: model.StatusFail, Summary: "모든 주체에 DNS 동적 업데이트를 허용하는 zone이 있습니다.", Expected: "동적 업데이트를 비활성화하거나 승인 TSIG/update-policy 주체로만 제한해야 합니다.", Observed: fmt.Sprintf("무제한 update zone %d개", unsafe), Evidence: evidence}
 	}
-	if outsidePolicy > 0 {
-		return evaluator.Outcome{Status: model.StatusFail, Summary: "DNS 동적 업데이트 주체가 승인 정책보다 넓습니다.", Expected: "모든 update identity가 approved_dns_update_identities에 포함되어야 합니다.", Observed: fmt.Sprintf("승인 목록 밖 identity %d건", outsidePolicy), Evidence: evidence}
-	}
 	if unknown > 0 {
-		return evaluator.Outcome{Status: model.StatusUnknown, UnknownReason: model.UnknownManualVerification, Summary: "일부 DNS 동적 업데이트 정책을 결정적으로 해석하거나 승인 목록과 대조할 수 없습니다.", Expected: "동적 업데이트를 비활성화하거나 승인 TSIG/update-policy 주체로만 제한해야 합니다.", Observed: fmt.Sprintf("확정 불가 zone/조건 %d건", unknown), Evidence: evidence}
+		return evaluator.Outcome{Status: model.StatusUnknown, UnknownReason: model.UnknownUnsupportedConfiguration, Summary: "일부 DNS 동적 업데이트 접근 통제를 확정할 수 없습니다.", Expected: rule.Criteria.Pass, Observed: fmt.Sprintf("확정 불가 zone/조건 %d건", unknown), Evidence: evidence}
 	}
-	return evaluator.Outcome{Status: model.StatusPass, Summary: "DNS 동적 업데이트가 비활성 또는 승인된 서명 주체로 제한되어 있습니다.", Expected: "동적 업데이트를 비활성화하거나 승인 TSIG/update-policy 주체로만 제한해야 합니다.", Observed: fmt.Sprintf("authoritative zone %d개 확인", len(zones)), Evidence: evidence}
+	return evaluator.Outcome{Status: model.StatusPass, Summary: "DNS 동적 업데이트가 비활성화되었거나 접근 통제가 설정되어 있습니다.", Expected: rule.Criteria.Pass, Observed: fmt.Sprintf("authoritative zone %d개 확인", len(zones)), Evidence: evidence}
 }
 
 func inspectBINDConfig(ctx context.Context, environment evaluator.Environment) ([]bindNode, []bindZone, []model.Evidence, *evaluator.Outcome) {

@@ -27,7 +27,7 @@ func specialKey(code rune) tea.KeyPressMsg {
 func TestObservedDetailTextSplitsFindingsAndWrapsContinuation(t *testing.T) {
 	value := "PASS_MAX_DAYS=99999; PASS_MIN_DAYS=0; password-auth에서 pwquality보다 pam_unix가 먼저 실행됨"
 	got := observedDetailText(value, 34)
-	for _, expected := range []string{"- PASS_MAX_DAYS=99999", "- PASS_MIN_DAYS=0", "- password-auth에서"} {
+	for _, expected := range []string{"· PASS_MAX_DAYS=99999", "· PASS_MIN_DAYS=0", "· password-auth에서"} {
 		if !strings.Contains(got, expected) {
 			t.Fatalf("observedDetailText() is missing %q: %q", expected, got)
 		}
@@ -76,7 +76,7 @@ func TestDetailContentPrefersStructuredResultDetails(t *testing.T) {
 		}},
 	}
 	content := ansi.Strip(detailContent(result, 60))
-	for _, expected := range []string{"사용 기간", "현재", "최소 0일 / 최대 99999일", "기준", "최소 1일 / 최대 90일", "위치", "/etc/login.defs"} {
+	for _, expected := range []string{"사용 기간", "확인 결과", "최소 0일 / 최대 99999일", "점검 기준", "최소 1일 / 최대 90일", "확인한 곳", "/etc/login.defs"} {
 		if !strings.Contains(content, expected) {
 			t.Fatalf("structured detail is missing %q: %q", expected, content)
 		}
@@ -84,8 +84,8 @@ func TestDetailContentPrefersStructuredResultDetails(t *testing.T) {
 	if strings.Contains(content, "raw fallback text") {
 		t.Fatalf("structured detail rendered the legacy fallback: %q", content)
 	}
-	if strings.Index(content, "기준") > strings.Index(content, "현재") {
-		t.Fatalf("structured detail renders current before expected: %q", content)
+	if strings.Index(content, "확인 결과") > strings.Index(content, "점검 기준") {
+		t.Fatalf("structured detail renders expected before current: %q", content)
 	}
 }
 
@@ -116,7 +116,7 @@ func TestRegistryFallbackDetailsUseSemanticFormatterWithoutChangingObserved(t *t
 	if strings.Contains(content, "first finding; second finding") {
 		t.Fatalf("semantic formatter kept findings on one line: %q", content)
 	}
-	for _, expected := range []string{"- first finding", "- second finding", "- value=a;b"} {
+	for _, expected := range []string{"· first finding", "· second finding", "· value=a;b"} {
 		if !strings.Contains(content, expected) {
 			t.Fatalf("semantic formatter is missing %q: %q", expected, content)
 		}
@@ -133,6 +133,8 @@ func TestFailDetailColorsExpectedGreenAndCurrentRed(t *testing.T) {
 
 func TestFilterInputOwnsShortcutKeysWhileEditing(t *testing.T) {
 	view := newModel(context.Background(), nil, nil, nil)
+	view.width, view.height = 100, 30
+	view.resize()
 	view.screen = screenResults
 	view.run.Results = []model.CheckResult{{RuleID: "U-01", Title: "root 계정", Status: model.StatusFail}}
 	view.updateItems()
@@ -140,6 +142,9 @@ func TestFilterInputOwnsShortcutKeysWhileEditing(t *testing.T) {
 	view.Update(printableKey("/"))
 	if !view.list.SettingFilter() {
 		t.Fatal("slash did not open the list filter")
+	}
+	if content := ansi.Strip(view.View().Content); !strings.Contains(content, "검색:") {
+		t.Fatalf("active filter is not visible: %q", content)
 	}
 	for _, value := range []string{"a", "r", "q"} {
 		view.Update(printableKey(value))

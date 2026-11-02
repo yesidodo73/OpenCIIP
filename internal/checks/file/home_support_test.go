@@ -129,3 +129,18 @@ func (runner nonOwnerACLFixtureRunner) Run(_ context.Context, spec executor.Spec
 	}
 	return runner.result, runner.err
 }
+
+func TestCompactFindingsLabelsMultiAccountGroups(t *testing.T) {
+	t.Parallel()
+
+	findings := []pathFinding{
+		{Account: "_apt,frr,messagebus", Path: "/nonexistent", Reason: "홈 디렉터리가 없음"},
+		{Account: "svc", Path: "/home/svc", Reason: "홈 디렉터리가 없음"},
+	}
+
+	got := compactFindings(findings, 10)
+	want := "svc:/home/svc(홈 디렉터리가 없음), 계정 3개(_apt, frr, messagebus):/nonexistent(홈 디렉터리가 없음)"
+	if got != want {
+		t.Fatalf("compactFindings = %q, want %q", got, want)
+	}
+}

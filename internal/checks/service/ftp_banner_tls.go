@@ -118,11 +118,12 @@ func evaluateFTPBanner(ctx context.Context, rule model.ResolvedRule, environment
 	}
 	if mismatches > 0 {
 		return evaluator.Outcome{
-			Status:   model.StatusFail,
-			Summary:  "FTP 배너가 기관의 승인된 경고 문구와 일치하지 않습니다.",
-			Expected: rule.Criteria.Pass,
-			Observed: fmt.Sprintf("승인 정책과 다른 배너 조각 %d개", mismatches),
-			Evidence: evidence,
+			Status:        model.StatusUnknown,
+			UnknownReason: model.UnknownManualVerification,
+			Summary:       "FTP 배너가 확인된 안전 문구와 일치하지 않아 정보 노출 여부를 확인해야 합니다.",
+			Expected:      rule.Criteria.Pass,
+			Observed:      fmt.Sprintf("안전 문구와 다른 배너 조각 %d개", mismatches),
+			Evidence:      evidence,
 		}
 	}
 	return evaluator.Outcome{
@@ -236,6 +237,13 @@ func evaluatePlaintextFTPDisabled(ctx context.Context, rule model.ResolvedRule, 
 					Observed:      "배포판 패키지 데이터베이스와 표준 systemd unit에서 구성요소 부재를 모두 확인하지 못했습니다.",
 					Evidence:      terminal.Evidence,
 				}
+			}
+			return evaluator.Outcome{
+				Status:   model.StatusPass,
+				Summary:  "FTP 서버 구성요소가 없어 암호화되지 않은 FTP 서비스가 비활성 상태입니다.",
+				Expected: rule.Criteria.Pass,
+				Observed: "FTP 서버 패키지, unit, 프로세스 및 listener 없음",
+				Evidence: terminal.Evidence,
 			}
 		}
 		return *terminal

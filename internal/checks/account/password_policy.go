@@ -9,11 +9,9 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/yesidodo73/OpenCIIP/internal/checks/support"
 	"github.com/yesidodo73/OpenCIIP/internal/evaluator"
-	"github.com/yesidodo73/OpenCIIP/internal/executor"
 	"github.com/yesidodo73/OpenCIIP/internal/model"
 )
 
@@ -47,58 +45,13 @@ func evaluatePasswordPolicy(ctx context.Context, rule model.ResolvedRule, enviro
 		return checkError("invalid_rule_parameter", err)
 	}
 
-	pamStacks := make([]string, 0, 2)
+	pamStacks := make([]string, 0, 1)
 	evidence := make([]model.Evidence, 0)
-	authselectHistoryRequired := false
-	pamPolicyUncertainty := ""
-	pamPolicyUnknownReason := model.UnknownInsufficientEvidence
-	pamPolicyUnknownSummary := ""
-	var authselectCurrent executor.Result
 	switch environment.Platform.Family {
 	case "rhel":
-		currentSpec := executor.Spec{Name: "authselect", Arguments: []string{"current"}, Timeout: 10 * time.Second}
-		current, runErr := environment.Commands.Run(ctx, currentSpec)
-		if runErr != nil {
-			return checkError("authselect_current_failed", runErr)
-		}
-		authselectCurrent = current
-		evidence = append(evidence, support.CommandEvidence(currentSpec, current))
-		if current.ExitCode != 0 || current.Truncated {
-			pamPolicyUncertainty = fmt.Sprintf(
-				"authselect 관리 여부와 PAM 품질·이력 적용 경로를 확정할 수 없음 (current exit=%d truncated=%t)",
-				current.ExitCode,
-				current.Truncated,
-			)
-			pamPolicyUnknownReason = model.UnknownUnsupportedConfiguration
-			pamPolicyUnknownSummary = "authselect에서 관리되는 PAM 경로를 확인할 수 없어 비밀번호 품질·이력 정책을 자동 확정할 수 없습니다."
-			break
-		}
-		checkSpec := executor.Spec{Name: "authselect", Arguments: []string{"check"}, Timeout: 10 * time.Second}
-		check, runErr := environment.Commands.Run(ctx, checkSpec)
-		if runErr != nil {
-			return checkError("authselect_check_failed", runErr)
-		}
-		evidence = append(evidence, support.CommandEvidence(checkSpec, check))
-		if check.ExitCode != 0 || check.Truncated {
-			pamPolicyUncertainty = fmt.Sprintf(
-				"authselect 구성이 일관되지 않아 PAM 품질·이력 적용 경로를 확정할 수 없음 (check exit=%d truncated=%t)",
-				check.ExitCode,
-				check.Truncated,
-			)
-			pamPolicyUnknownReason = model.UnknownAmbiguousResult
-			pamPolicyUnknownSummary = "authselect 구성이 수정되었거나 일관되지 않아 비밀번호 품질·이력 정책을 자동 확정할 수 없습니다."
-			break
-		}
-		pamStacks = append(pamStacks, "system-auth", "password-auth")
-		authselectHistoryRequired = true
+		pamStacks = append(pamStacks, "system-auth")
 	case "debian":
 		pamStacks = append(pamStacks, "common-password")
-		evidence = append(evidence, support.FactEvidence("PAM policy platform", map[string]any{
-			"family":          environment.Platform.Family,
-			"id":              environment.Platform.ID,
-			"version_id":      environment.Platform.VersionID,
-			"password_stacks": append([]string(nil), pamStacks...),
-		}))
 	default:
 		return evaluator.Outcome{
 			Status:        model.StatusUnknown,
@@ -111,6 +64,10 @@ func evaluatePasswordPolicy(ctx context.Context, rule model.ResolvedRule, enviro
 			})},
 		}
 	}
+	evidence = append(evidence, support.FactEvidence("PAM policy platform", map[string]any{
+		"family": environment.Platform.Family, "id": environment.Platform.ID,
+		"version_id": environment.Platform.VersionID, "password_stacks": append([]string(nil), pamStacks...),
+	}))
 
 	pwquality := make(map[string]configSetting)
 	pwhistory := make(map[string]configSetting)
@@ -148,65 +105,34 @@ func evaluatePasswordPolicy(ctx context.Context, rule model.ResolvedRule, enviro
 
 	violations := make([]string, 0)
 	unknowns := make([]string, 0)
-	if pamPolicyUncertainty != "" {
-		unknowns = append(unknowns, pamPolicyUncertainty)
-	}
 	lengthDetails := make([]model.ResultDetail, 0)
+	confirmedDetails := make([]model.ResultDetail, 0)
 	qualityMissing := make([]string, 0)
 	classFindings := make([]string, 0)
-	allowedClassFindings := make([]string, 0)
-	allowedClassSources := make([]string, 0)
 	rootQualityMissing := make([]string, 0)
 	historyMissing := make([]string, 0)
 	historyCountFindings := make([]string, 0)
 	historyCountSources := make([]string, 0)
 	rootHistoryMissing := make([]string, 0)
-	pamControlFindings := make([]string, 0)
-	pamControlSources := make([]string, 0)
+	historyFileFindings := make([]string, 0)
 	pamFlowFindings := make([]string, 0)
-	accountPeriodFindings := make([]string, 0)
 	var loginPeriodDetail *model.ResultDetail
-	if authselectHistoryRequired && !containsToken(string(authselectCurrent.Stdout), "with-pwhistory") {
-		violations = append(violations, "authselect with-pwhistory 기능이 활성화되지 않음")
-		historyMissing = append(historyMissing, "authselect with-pwhistory 비활성")
-	}
 	for _, stack := range pamStacks {
 		rules := pamRules[stack]
-		unresolvedPaths := []string(nil)
-		if environment.Platform.Family == "debian" {
-			unresolvedPaths = unresolvedDebianPasswordPolicyPaths(rules)
-			if len(unresolvedPaths) > 0 {
-				unknowns = append(unknowns, stack+"의 대체 또는 외부 비밀번호 변경 경로를 자동 확정할 수 없음: "+strings.Join(unresolvedPaths, ", "))
-			}
-		}
-		standardPolicyUncertain := len(unresolvedPaths) > 0
-		flowViolations, flowUnknowns := assessPasswordPolicyPAMFlowWithAlternatives(stack, rules, standardPolicyUncertain)
+		flowViolations, flowUnknowns := passwordPolicyModuleOrderFindings(stack, rules)
 		stackViolations := append([]string(nil), flowViolations...)
 		unknowns = append(unknowns, flowUnknowns...)
-		if !standardPolicyUncertain {
-			pamFlowFindings = append(pamFlowFindings, flowViolations...)
-		}
+		pamFlowFindings = append(pamFlowFindings, flowViolations...)
 
 		qualityRule, state := singlePasswordModule(rules, "pam_pwquality.so")
 		switch state {
 		case moduleMissing:
 			finding := stack + "에 pam_pwquality가 없음"
 			stackViolations = append(stackViolations, finding)
-			if !standardPolicyUncertain {
-				qualityMissing = append(qualityMissing, stack+" pam_pwquality 없음")
-			}
+			qualityMissing = append(qualityMissing, fmt.Sprintf("%s 인증 설정에서 비밀번호 품질 검사 모듈(pam_pwquality)을 찾지 못했습니다.", stack))
 		case moduleAmbiguous:
 			unknowns = append(unknowns, stack+"의 pam_pwquality 적용 경로가 여러 개임")
 		case modulePresent:
-			if control := passwordModuleControl(qualityRule.Control); control == moduleControlBypassable {
-				stackViolations = append(stackViolations, stack+"의 pam_pwquality 제어 플래그가 정책 실패를 강제하지 않음")
-				if !standardPolicyUncertain {
-					pamControlFindings = append(pamControlFindings, fmt.Sprintf("%s pam_pwquality control=%s", stack, qualityRule.Control))
-					pamControlSources = append(pamControlSources, pamRuleSource(qualityRule))
-				}
-			} else if control == moduleControlAmbiguous {
-				unknowns = append(unknowns, stack+"의 pam_pwquality PAM 제어 흐름을 확정할 수 없음")
-			}
 			qualitySettings, overrideErr := applyPAMSettingOverrides(pwquality, qualityRule.Args, pwqualityOptionKeys())
 			if overrideErr != nil {
 				unknowns = append(unknowns, stack+"의 pam_pwquality 대체 설정을 해석할 수 없음: "+overrideErr.Error())
@@ -214,34 +140,29 @@ func evaluatePasswordPolicy(ctx context.Context, rule model.ResolvedRule, enviro
 				minimumLengthValue, ok := integerSetting(qualitySettings, "minlen")
 				if !ok {
 					unknowns = append(unknowns, stack+"의 pwquality minlen을 확인할 수 없음")
-				} else if minimumLengthValue < minimumLength {
-					stackViolations = append(stackViolations, fmt.Sprintf("%s minlen=%d", stack, minimumLengthValue))
-					if !standardPolicyUncertain {
-						lengthDetails = append(lengthDetails, model.ResultDetail{
-							Label: "비밀번호 길이", Current: fmt.Sprintf("%s %d자", stack, minimumLengthValue),
-							Expected: fmt.Sprintf("%d자 이상", minimumLength), Source: passwordSettingSource(qualitySettings["minlen"], qualityRule),
-						})
+				} else {
+					detail := model.ResultDetail{
+						Label: "비밀번호 길이", Current: fmt.Sprintf("%s %d자", stack, minimumLengthValue),
+						Expected: fmt.Sprintf("%d자 이상", minimumLength), Source: passwordSettingSource(qualitySettings["minlen"], qualityRule),
+					}
+					confirmedDetails = append(confirmedDetails, detail)
+					if minimumLengthValue < minimumLength {
+						stackViolations = append(stackViolations, fmt.Sprintf("%s minlen=%d", stack, minimumLengthValue))
+						lengthDetails = append(lengthDetails, detail)
 					}
 				}
-				classCount := requiredClassCount(qualitySettings)
+				classCount := exactRequiredClassCount(qualitySettings)
+				confirmedDetails = append(confirmedDetails, model.ResultDetail{
+					Label: "문자 종류", Current: fmt.Sprintf("%s 필수 %d개", stack, classCount),
+					Expected: fmt.Sprintf("%d개 이상", requiredClasses), Source: "PAM 및 pwquality 설정",
+				})
 				if classCount < requiredClasses {
 					stackViolations = append(stackViolations, fmt.Sprintf("%s 필수 문자 종류=%d", stack, classCount))
-					if !standardPolicyUncertain {
-						classFindings = append(classFindings, fmt.Sprintf("%s %d개", stack, classCount))
-					}
-				}
-				if allowed, exists := stringSetting(qualitySettings, "allowclasses"); exists && !allCharacterClassesAllowed(allowed) {
-					stackViolations = append(stackViolations, stack+"의 allowclasses가 네 문자 종류를 모두 허용하지 않음")
-					if !standardPolicyUncertain {
-						allowedClassFindings = append(allowedClassFindings, fmt.Sprintf("%s allowclasses=%s", stack, allowed))
-						allowedClassSources = append(allowedClassSources, passwordSettingSource(qualitySettings["allowclasses"], qualityRule))
-					}
+					classFindings = append(classFindings, fmt.Sprintf("%s %d개", stack, classCount))
 				}
 				if !booleanSetting(qualitySettings, "enforce_for_root") {
 					stackViolations = append(stackViolations, stack+"의 pwquality enforce_for_root 없음")
-					if !standardPolicyUncertain {
-						rootQualityMissing = append(rootQualityMissing, stack)
-					}
+					rootQualityMissing = append(rootQualityMissing, stack)
 				}
 			}
 		}
@@ -251,21 +172,10 @@ func evaluatePasswordPolicy(ctx context.Context, rule model.ResolvedRule, enviro
 		case moduleMissing:
 			finding := stack + "에 pam_pwhistory가 없음"
 			stackViolations = append(stackViolations, finding)
-			if !standardPolicyUncertain {
-				historyMissing = append(historyMissing, stack+" pam_pwhistory 없음")
-			}
+			historyMissing = append(historyMissing, fmt.Sprintf("%s 인증 설정에서 이전 비밀번호 재사용을 제한하는 모듈(pam_pwhistory)을 찾지 못했습니다.", stack))
 		case moduleAmbiguous:
 			unknowns = append(unknowns, stack+"의 pam_pwhistory 적용 경로가 여러 개임")
 		case modulePresent:
-			if control := passwordModuleControl(historyRule.Control); control == moduleControlBypassable {
-				stackViolations = append(stackViolations, stack+"의 pam_pwhistory 제어 플래그가 정책 실패를 강제하지 않음")
-				if !standardPolicyUncertain {
-					pamControlFindings = append(pamControlFindings, fmt.Sprintf("%s pam_pwhistory control=%s", stack, historyRule.Control))
-					pamControlSources = append(pamControlSources, pamRuleSource(historyRule))
-				}
-			} else if control == moduleControlAmbiguous {
-				unknowns = append(unknowns, stack+"의 pam_pwhistory PAM 제어 흐름을 확정할 수 없음")
-			}
 			historySettings, overrideErr := applyPAMSettingOverrides(pwhistory, historyRule.Args, pwhistoryOptionKeys())
 			if overrideErr != nil {
 				unknowns = append(unknowns, stack+"의 pam_pwhistory 대체 설정을 해석할 수 없음: "+overrideErr.Error())
@@ -273,28 +183,35 @@ func evaluatePasswordPolicy(ctx context.Context, rule model.ResolvedRule, enviro
 				remember, rememberKnown := integerSetting(historySettings, "remember")
 				if !rememberKnown {
 					unknowns = append(unknowns, stack+"의 비밀번호 이력 remember를 확인할 수 없음")
-				} else if remember < historyCount {
-					stackViolations = append(stackViolations, fmt.Sprintf("%s remember=%d", stack, remember))
-					if !standardPolicyUncertain {
+				} else {
+					source := passwordSettingSource(historySettings["remember"], historyRule)
+					confirmedDetails = append(confirmedDetails, model.ResultDetail{
+						Label: "비밀번호 이력 횟수", Current: fmt.Sprintf("%s remember=%d", stack, remember),
+						Expected: fmt.Sprintf("remember=%d 이상", historyCount), Source: source,
+					})
+					if remember < historyCount {
+						stackViolations = append(stackViolations, fmt.Sprintf("%s remember=%d", stack, remember))
 						historyCountFindings = append(historyCountFindings, fmt.Sprintf("%s remember=%d", stack, remember))
-						historyCountSources = append(historyCountSources, passwordSettingSource(historySettings["remember"], historyRule))
+						historyCountSources = append(historyCountSources, source)
 					}
 				}
-				if !booleanSetting(historySettings, "enforce_for_root") {
+				if environment.Platform.Family == "rhel" && !booleanSetting(historySettings, "enforce_for_root") {
 					stackViolations = append(stackViolations, stack+"의 pwhistory enforce_for_root 없음")
-					if !standardPolicyUncertain {
-						rootHistoryMissing = append(rootHistoryMissing, stack)
+					rootHistoryMissing = append(rootHistoryMissing, stack)
+				}
+				if environment.Platform.Family == "rhel" {
+					historyFile := strings.TrimSpace(historySettings["file"].Value)
+					if historyFile != "/etc/security/opasswd" {
+						if historyFile == "" {
+							historyFile = "설정 없음"
+						}
+						stackViolations = append(stackViolations, stack+" pwhistory file="+historyFile)
+						historyFileFindings = append(historyFileFindings, stack+" "+historyFile)
 					}
 				}
 			}
 		}
-		if standardPolicyUncertain {
-			for _, finding := range stackViolations {
-				unknowns = append(unknowns, finding+"; 대체 또는 외부 비밀번호 경로의 보완 여부를 확인해야 함")
-			}
-		} else {
-			violations = append(violations, stackViolations...)
-		}
+		violations = append(violations, stackViolations...)
 	}
 
 	passMin, passMinKnown := integerSetting(loginDefs, "pass_min_days")
@@ -310,68 +227,25 @@ func evaluatePasswordPolicy(ctx context.Context, rule model.ResolvedRule, enviro
 		}
 		if passMin < minimumDays || passMax > maximumDays || passMax < minimumDays {
 			loginPeriodDetail = &model.ResultDetail{
-				Label: "사용 기간", Current: fmt.Sprintf("최소 %d일 / 최대 %d일", passMin, passMax),
+				Label: "계정 생성 시 사용 기간 기본값", Current: fmt.Sprintf("PASS_MIN_DAYS=%d  PASS_MAX_DAYS=%d", passMin, passMax),
 				Expected: fmt.Sprintf("최소 %d일 / 최대 %d일", minimumDays, maximumDays), Source: "/etc/login.defs",
 			}
 		}
 	}
 
-	shadow, shadowEvidence, err := support.ReadShadowSummary(ctx, environment.Files)
-	if err != nil {
-		return checkError("shadow_read_failed", err)
-	}
-	evidence = append(evidence, shadowEvidence)
-	for name, entry := range shadow {
-		if entry.State != "active" {
-			continue
-		}
-		if entry.MinDays == nil || entry.MaxDays == nil {
-			unknowns = append(unknowns, name+" 계정의 사용 기간이 비어 있음")
-			continue
-		}
-		if *entry.MinDays < minimumDays || *entry.MaxDays > maximumDays || *entry.MaxDays < minimumDays {
-			violations = append(violations, fmt.Sprintf("%s(min=%d,max=%d)", name, *entry.MinDays, *entry.MaxDays))
-			accountPeriodFindings = append(accountPeriodFindings, fmt.Sprintf("%s 최소 %d일 / 최대 %d일", name, *entry.MinDays, *entry.MaxDays))
-		}
-	}
-
-	localAccounts, localEvidence, err := support.ReadPasswd(ctx, environment.Files)
-	if err != nil {
-		return checkError("passwd_read_failed", err)
-	}
-	effectiveAccounts, effectiveEvidence, err := support.ReadEffectivePasswd(ctx, environment.Commands)
-	if err != nil {
-		return checkError("getent_passwd_failed", err)
-	}
-	evidence = append(evidence, localEvidence, effectiveEvidence)
-	localNames := make(map[string]struct{}, len(localAccounts))
-	for _, account := range localAccounts {
-		localNames[account.Name] = struct{}{}
-	}
-	for _, account := range effectiveAccounts {
-		if _, local := localNames[account.Name]; !local && !isNonLoginShell(account.Shell) {
-			unknowns = append(unknowns, account.Name+" 외부 계정 정책 미확인")
-		}
-	}
 	details := append([]model.ResultDetail(nil), lengthDetails...)
+	pamSources := make([]string, 0, len(pamStacks))
+	for _, stack := range pamStacks {
+		pamSources = append(pamSources, "/etc/pam.d/"+stack)
+	}
 	if len(qualityMissing) > 0 {
-		details = append(details, model.ResultDetail{Label: "비밀번호 품질 모듈", Current: strings.Join(uniqueSorted(qualityMissing), ", "), Expected: "모든 적용 PAM 스택에 pam_pwquality 적용", Source: strings.Join(pamStacks, ", ")})
+		details = append(details, model.ResultDetail{Label: "비밀번호 품질 모듈", Current: strings.Join(uniqueSorted(qualityMissing), "\n"), Expected: "비밀번호를 변경할 때 적용되는 PAM 인증 설정에서 비밀번호 품질 검사 모듈(pam_pwquality)을 사용해야 합니다.", Source: strings.Join(pamSources, ", ")})
 	}
 	if len(classFindings) > 0 {
 		details = append(details, model.ResultDetail{Label: "문자 종류", Current: strings.Join(uniqueSorted(classFindings), ", "), Expected: fmt.Sprintf("%d개", requiredClasses), Source: strings.Join(pamStacks, ", ")})
 	}
-	if len(allowedClassFindings) > 0 {
-		details = append(details, model.ResultDetail{
-			Label: "허용 문자 종류", Current: strings.Join(uniqueSorted(allowedClassFindings), ", "),
-			Expected: "숫자·대문자·소문자·기타 문자 모두 허용", Source: strings.Join(uniqueSorted(allowedClassSources), ", "),
-		})
-	}
 	if len(historyMissing) > 0 {
-		historySource := "PAM"
-		if authselectHistoryRequired {
-			historySource = "authselect, PAM"
-		}
-		details = append(details, model.ResultDetail{Label: "비밀번호 이력", Current: strings.Join(uniqueSorted(historyMissing), ", "), Expected: fmt.Sprintf("최근 %d회 기억", historyCount), Source: historySource})
+		details = append(details, model.ResultDetail{Label: "비밀번호 이력", Current: strings.Join(uniqueSorted(historyMissing), "\n"), Expected: fmt.Sprintf("최근 %d회 사용한 비밀번호의 재사용을 제한해야 합니다.", historyCount), Source: strings.Join(pamSources, ", ")})
 	}
 	if len(historyCountFindings) > 0 {
 		details = append(details, model.ResultDetail{
@@ -385,11 +259,8 @@ func evaluatePasswordPolicy(ctx context.Context, rule model.ResolvedRule, enviro
 	if len(rootHistoryMissing) > 0 {
 		details = append(details, model.ResultDetail{Label: "root 이력 정책", Current: strings.Join(uniqueSorted(rootHistoryMissing), ", ") + "에서 강제되지 않음", Expected: "root에도 이력 정책 강제", Source: "pam_pwhistory enforce_for_root"})
 	}
-	if len(pamControlFindings) > 0 {
-		details = append(details, model.ResultDetail{
-			Label: "PAM 제어 플래그", Current: strings.Join(uniqueSorted(pamControlFindings), ", "),
-			Expected: "pam_pwquality와 pam_pwhistory가 required 또는 requisite", Source: strings.Join(uniqueSorted(pamControlSources), ", "),
-		})
+	if len(historyFileFindings) > 0 {
+		details = append(details, model.ResultDetail{Label: "비밀번호 이력 파일", Current: strings.Join(uniqueSorted(historyFileFindings), ", "), Expected: "/etc/security/opasswd", Source: "pam_pwhistory file"})
 	}
 	if len(pamFlowFindings) > 0 {
 		details = append(details, model.ResultDetail{
@@ -400,9 +271,6 @@ func evaluatePasswordPolicy(ctx context.Context, rule model.ResolvedRule, enviro
 	if loginPeriodDetail != nil {
 		details = append(details, *loginPeriodDetail)
 	}
-	if len(accountPeriodFindings) > 0 {
-		details = append(details, model.ResultDetail{Label: "계정별 사용 기간", Current: strings.Join(uniqueSorted(accountPeriodFindings), ", "), Expected: fmt.Sprintf("최소 %d일 / 최대 %d일", minimumDays, maximumDays), Source: "/etc/shadow"})
-	}
 
 	sort.Strings(violations)
 	sort.Strings(unknowns)
@@ -412,32 +280,30 @@ func evaluatePasswordPolicy(ctx context.Context, rule model.ResolvedRule, enviro
 			Status:   model.StatusFail,
 			Summary:  "비밀번호 관리 정책이 가이드 기준을 충족하지 않습니다.",
 			Expected: expected,
-			Observed: strings.Join(uniqueSorted(violations), "; "),
+			Observed: strings.Join(uniqueSorted(violations), "\n"),
 			Details:  details,
 			Evidence: evidence,
 		}
 	}
 	if len(unknowns) > 0 {
-		summary := "일부 비밀번호 정책의 실효 적용 상태를 확정할 수 없습니다."
-		unknownReason := model.UnknownInsufficientEvidence
-		if pamPolicyUnknownSummary != "" {
-			summary = pamPolicyUnknownSummary
-			unknownReason = pamPolicyUnknownReason
-		}
 		return evaluator.Outcome{
 			Status:        model.StatusUnknown,
-			UnknownReason: unknownReason,
-			Summary:       summary,
+			UnknownReason: model.UnknownInsufficientEvidence,
+			Summary:       "일부 비밀번호 정책 설정을 확정할 수 없습니다.",
 			Expected:      expected,
-			Observed:      strings.Join(uniqueSorted(unknowns), "; "),
+			Observed:      strings.Join(uniqueSorted(unknowns), "\n"),
 			Evidence:      evidence,
 		}
 	}
 	return evaluator.Outcome{
 		Status:   model.StatusPass,
-		Summary:  "비밀번호 관리 정책과 적용 계정이 가이드 기준을 충족합니다.",
+		Summary:  "비밀번호 관리 정책이 가이드의 Linux 설정 기준을 충족합니다.",
 		Expected: expected,
-		Observed: "pwquality, pwhistory, login.defs와 기존 로컬 계정의 사용 기간이 기준을 충족합니다.",
+		Observed: "pwquality, pwhistory, PAM 모듈 순서와 login.defs 설정이 기준을 충족합니다.",
+		Details: append(confirmedDetails, model.ResultDetail{
+			Label: "계정 생성 시 사용 기간 기본값", Current: fmt.Sprintf("PASS_MIN_DAYS=%d  PASS_MAX_DAYS=%d", passMin, passMax),
+			Expected: fmt.Sprintf("최소 %d일 / 최대 %d일", minimumDays, maximumDays), Source: "/etc/login.defs",
+		}),
 		Evidence: evidence,
 	}
 }
@@ -788,6 +654,54 @@ func requiredClassCount(settings map[string]configSetting) int {
 		}
 	}
 	return count
+}
+
+func exactRequiredClassCount(settings map[string]configSetting) int {
+	count := 0
+	for _, key := range []string{"dcredit", "ucredit", "lcredit", "ocredit"} {
+		if value, ok := integerSetting(settings, key); ok && value == -1 {
+			count++
+		}
+	}
+	return count
+}
+
+func passwordPolicyModuleOrderFindings(stack string, rules []support.PAMRule) ([]string, []string) {
+	qualityIndexes := make([]int, 0, 1)
+	historyIndexes := make([]int, 0, 1)
+	unixIndexes := make([]int, 0, 1)
+	for index, rule := range rules {
+		if rule.Type != "password" {
+			continue
+		}
+		switch filepath.Base(rule.Module) {
+		case "pam_pwquality.so":
+			qualityIndexes = append(qualityIndexes, index)
+		case "pam_pwhistory.so":
+			historyIndexes = append(historyIndexes, index)
+		case "pam_unix.so":
+			unixIndexes = append(unixIndexes, index)
+		}
+	}
+	if len(unixIndexes) == 0 {
+		return nil, []string{stack + "에 password pam_unix.so가 없음"}
+	}
+	if len(unixIndexes) > 1 {
+		return nil, []string{stack + "의 password pam_unix.so 적용 경로가 여러 개임"}
+	}
+	violations := make([]string, 0, 2)
+	for _, candidate := range []struct {
+		name    string
+		indexes []int
+	}{
+		{name: "pam_pwquality.so", indexes: qualityIndexes},
+		{name: "pam_pwhistory.so", indexes: historyIndexes},
+	} {
+		if len(candidate.indexes) == 1 && candidate.indexes[0] > unixIndexes[0] {
+			violations = append(violations, fmt.Sprintf("%s의 %s가 pam_unix.so보다 뒤에 있음", stack, candidate.name))
+		}
+	}
+	return violations, nil
 }
 
 type moduleState uint8

@@ -110,9 +110,9 @@ func evaluateSessionTimeout(ctx context.Context, rule model.ResolvedRule, enviro
 				unknowns = append(unknowns, label+": "+strings.Join(startupContext.Unknowns, ", "))
 				unknownDetails = append(unknownDetails, model.ResultDetail{
 					Label:    label,
-					Current:  compactSessionTimeoutItems(startupContext.Unknowns, 3),
+					Current:  sessionTimeoutItems(startupContext.Unknowns),
 					Expected: expected,
-					Source:   compactSessionTimeoutSource(startupContext.Paths),
+					Source:   sessionTimeoutSource(startupContext.Paths),
 				})
 				fact["deterministic"] = false
 				contextFacts = append(contextFacts, fact)
@@ -126,7 +126,7 @@ func evaluateSessionTimeout(ctx context.Context, rule model.ResolvedRule, enviro
 					Label:    label,
 					Current:  "TMOUT이 설정되어 있지 않습니다.",
 					Expected: expected,
-					Source:   compactSessionTimeoutSource(startupContext.Paths),
+					Source:   sessionTimeoutSource(startupContext.Paths),
 				})
 				fact["tmout_defined"] = false
 				contextFacts = append(contextFacts, fact)
@@ -186,7 +186,7 @@ func evaluateSessionTimeout(ctx context.Context, rule model.ResolvedRule, enviro
 			Summary:  "잠금된 세션 종료 시간이 가이드 기준을 충족하지 않습니다.",
 			Expected: expected,
 			Observed: strings.Join(violations, "; "),
-			Details:  compactSessionTimeoutDetails(violationDetails, expected),
+			Details:  violationDetails,
 			Evidence: evidence,
 		}
 	}
@@ -197,7 +197,7 @@ func evaluateSessionTimeout(ctx context.Context, rule model.ResolvedRule, enviro
 			Summary:       "모든 대화형 shell의 최종 세션 종료 시간을 정적으로 확정할 수 없습니다.",
 			Expected:      expected,
 			Observed:      strings.Join(uniqueSorted(unknowns), "; "),
-			Details:       compactSessionTimeoutDetails(unknownDetails, expected),
+			Details:       unknownDetails,
 			Evidence:      evidence,
 		}
 	}
@@ -210,52 +210,18 @@ func evaluateSessionTimeout(ctx context.Context, rule model.ResolvedRule, enviro
 	}
 }
 
-func compactSessionTimeoutItems(items []string, limit int) string {
+func sessionTimeoutItems(items []string) string {
 	items = uniqueSorted(append([]string(nil), items...))
-	if limit < 1 {
-		limit = 1
-	}
-	visible := items
-	if len(visible) > limit {
-		visible = visible[:limit]
-	}
-	lines := append([]string(nil), visible...)
-	if remaining := len(items) - len(visible); remaining > 0 {
-		lines = append(lines, fmt.Sprintf("외 %d건은 증적에서 확인할 수 있습니다.", remaining))
-	}
-	return strings.Join(lines, "\n")
+	return strings.Join(items, "\n")
 }
 
-func compactSessionTimeoutSource(paths []string) string {
-	const limit = 3
+func sessionTimeoutSource(paths []string) string {
 	paths = uniqueSorted(append([]string(nil), paths...))
-	visible := paths
-	if len(visible) > limit {
-		visible = visible[:limit]
-	}
-	value := strings.Join(visible, ", ")
-	if remaining := len(paths) - len(visible); remaining > 0 {
-		value += fmt.Sprintf(" 외 %d개", remaining)
-	}
+	value := strings.Join(paths, ", ")
 	if value == "" {
 		return "시작 스크립트 분석"
 	}
 	return value
-}
-
-func compactSessionTimeoutDetails(details []model.ResultDetail, expected string) []model.ResultDetail {
-	const limit = 8
-	if len(details) <= limit {
-		return details
-	}
-	result := append([]model.ResultDetail(nil), details[:limit]...)
-	result = append(result, model.ResultDetail{
-		Label:    "추가 확인 항목",
-		Current:  fmt.Sprintf("외 %d개 계정·컨텍스트는 증적에서 확인할 수 있습니다.", len(details)-limit),
-		Expected: expected,
-		Source:   "session-timeout-startup-analysis",
-	})
-	return result
 }
 
 func sessionTimeoutStateSource(path string, line int) string {

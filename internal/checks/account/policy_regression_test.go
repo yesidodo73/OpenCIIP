@@ -857,7 +857,7 @@ func TestAssessSURestrictionPAMDoesNotIgnorePrecedingBypass(t *testing.T) {
 	}
 }
 
-func TestEvaluatePasswordHashUsesPAMUnixOverride(t *testing.T) {
+func TestEvaluatePasswordHashUsesOnlyGuideRHELPAMStack(t *testing.T) {
 	t.Parallel()
 
 	environment := evaluator.Environment{Files: newAccountFixtureReader(map[string]string{
@@ -870,11 +870,11 @@ func TestEvaluatePasswordHashUsesPAMUnixOverride(t *testing.T) {
 
 	outcome := evaluatePasswordHash(context.Background(), rule, environment)
 
-	if outcome.Status != model.StatusFail {
-		t.Fatalf("status = %q, want %q; outcome = %#v", outcome.Status, model.StatusFail, outcome)
+	if outcome.Status != model.StatusPass {
+		t.Fatalf("status = %q, want %q; outcome = %#v", outcome.Status, model.StatusPass, outcome)
 	}
-	if !strings.Contains(outcome.Observed, "password-auth pam_unix=MD5") || !strings.Contains(outcome.Observed, "PAM 재정의") {
-		t.Fatalf("observed = %q, want weak pam_unix override", outcome.Observed)
+	if !strings.Contains(outcome.Observed, "system-auth pam_unix=SHA512") || strings.Contains(outcome.Observed, "password-auth") {
+		t.Fatalf("observed = %q, want only the guide's system-auth stack", outcome.Observed)
 	}
 }
 
@@ -945,7 +945,7 @@ func TestEvaluatePasswordHashAcceptsStockDebianPAMControl(t *testing.T) {
 	}
 }
 
-func TestEvaluatePasswordHashRequiresReachablePAMUnix(t *testing.T) {
+func TestEvaluatePasswordHashDoesNotInferNonGuidePAMControlFlow(t *testing.T) {
 	t.Parallel()
 
 	stockStack := "password requisite pam_pwquality.so\n" +
@@ -967,32 +967,32 @@ func TestEvaluatePasswordHashRequiresReachablePAMUnix(t *testing.T) {
 			wantText:   "pam_unix=SHA512",
 		},
 		{
-			name: "preceding sufficient permit is unknown",
+			name: "preceding sufficient permit does not change the guide check",
 			stack: "password sufficient pam_permit.so\n" +
 				"password sufficient pam_unix.so sha512 shadow use_authtok\n",
-			wantStatus: model.StatusUnknown,
-			wantText:   "pam_unix.so보다 먼저 성공",
+			wantStatus: model.StatusPass,
+			wantText:   "pam_unix=SHA512",
 		},
 		{
-			name: "preceding custom writer is unknown",
+			name: "preceding custom writer does not change the guide check",
 			stack: "password required pam_exec.so expose_authtok /usr/local/sbin/password-writer\n" +
 				"password sufficient pam_unix.so sha512 shadow use_authtok\n",
-			wantStatus: model.StatusUnknown,
-			wantText:   "비밀번호를 변경",
+			wantStatus: model.StatusPass,
+			wantText:   "pam_unix=SHA512",
 		},
 		{
-			name: "writer after non-terminal pam_unix is unknown",
+			name: "writer after non-terminal pam_unix does not change the guide check",
 			stack: "password required pam_unix.so sha512 shadow use_authtok\n" +
 				"password required pam_exec.so expose_authtok /usr/local/sbin/password-writer\n",
-			wantStatus: model.StatusUnknown,
-			wantText:   "pam_unix.so 뒤에서 비밀번호를 다시 변경",
+			wantStatus: model.StatusPass,
+			wantText:   "pam_unix=SHA512",
 		},
 		{
-			name: "custom writer after sufficient pam_unix is unknown",
+			name: "custom writer after sufficient pam_unix does not change the guide check",
 			stack: "password sufficient pam_unix.so sha512 shadow use_authtok\n" +
 				"password sufficient pam_exec.so expose_authtok /usr/local/sbin/password-writer\n",
-			wantStatus: model.StatusUnknown,
-			wantText:   "대체 경로",
+			wantStatus: model.StatusPass,
+			wantText:   "pam_unix=SHA512",
 		},
 	}
 	for _, test := range tests {
@@ -1225,11 +1225,11 @@ func TestEvaluatePasswordPolicyDetailsIncludeEveryDefinitePAMViolation(t *testin
 			}
 		}
 	}
-	assertDetailContains("허용 문자 종류", "allowclasses=dul", "/etc/security/pwquality.conf:3")
+	assertDetailContains("문자 종류", "system-auth 0개", "4개", "system-auth")
 	assertDetailContains("비밀번호 이력 횟수", "remember=2", "remember=4 이상", "/etc/security/pwhistory.conf:1")
-	assertDetailContains("root 이력 정책", "password-auth", "system-auth", "pam_pwhistory enforce_for_root")
-	assertDetailContains("PAM 제어 플래그", "pam_pwquality control=optional", "pam_pwhistory control=sufficient", "/etc/pam.d/password-auth:2", "/etc/pam.d/system-auth:3")
-	assertDetailContains("PAM 적용 경로", "pam_permit.so", "비밀번호 정책", "/etc/pam.d/password-auth:1", "/etc/pam.d/system-auth:1")
+	assertDetailContains("root 정책 적용", "system-auth에서 강제되지 않음", "pam_pwquality enforce_for_root")
+	assertDetailContains("root 이력 정책", "system-auth에서 강제되지 않음", "pam_pwhistory enforce_for_root")
+	assertDetailContains("비밀번호 이력 파일", "system-auth 설정 없음", "/etc/security/opasswd")
 }
 
 func TestEvaluatePasswordPolicyUsesDebianCommonPasswordWithoutAuthselect(t *testing.T) {
@@ -1300,7 +1300,7 @@ func TestEvaluatePasswordPolicyKeepsLocalOnlyDebianPAMFindingsDefinite(t *testin
 	}
 }
 
-func TestEvaluatePasswordPolicyReturnsUnknownForAlternativeDebianPAMPaths(t *testing.T) {
+func TestEvaluatePasswordPolicyDoesNotSubstituteAlternativeDebianPAMModules(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -1341,17 +1341,17 @@ func TestEvaluatePasswordPolicyReturnsUnknownForAlternativeDebianPAMPaths(t *tes
 
 			outcome := evaluatePasswordPolicy(context.Background(), passwordPolicyRule(), environment)
 
-			if outcome.Status != model.StatusUnknown || outcome.UnknownReason != model.UnknownInsufficientEvidence {
-				t.Fatalf("outcome = %#v, want insufficient-evidence UNKNOWN", outcome)
+			if outcome.Status != model.StatusFail {
+				t.Fatalf("outcome = %#v, want FAIL", outcome)
 			}
-			if !strings.Contains(outcome.Observed, test.module) {
-				t.Fatalf("observed = %q, want alternative path %q", outcome.Observed, test.module)
+			if !strings.Contains(outcome.Observed, "pam_pwquality가 없음") || !strings.Contains(outcome.Observed, "pam_pwhistory가 없음") {
+				t.Fatalf("observed = %q, want the guide modules to be reported missing", outcome.Observed)
 			}
 		})
 	}
 }
 
-func TestEvaluatePasswordPolicyDowngradesAllPAMFindingsWithAlternativeDebianPolicy(t *testing.T) {
+func TestEvaluatePasswordPolicyKeepsGuideFindingsWithAlternativeDebianPolicy(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -1364,13 +1364,13 @@ func TestEvaluatePasswordPolicyDowngradesAllPAMFindingsWithAlternativeDebianPoli
 			name:             "strong redundant history",
 			historyConfig:    "remember=4\nenforce_for_root\n",
 			historyControl:   "requisite",
-			expectedFindings: []string{"minlen=6", "필수 문자 종류=0", "pam_unix.so가 pwquality/pwhistory보다 먼저"},
+			expectedFindings: []string{"minlen=6", "필수 문자 종류=0", "pam_pwhistory.so가 pam_unix.so보다 뒤에 있음"},
 		},
 		{
 			name:             "weak redundant history",
 			historyConfig:    "remember=1\n",
 			historyControl:   "optional",
-			expectedFindings: []string{"minlen=6", "remember=1", "pwhistory enforce_for_root 없음", "pam_pwhistory 제어 플래그"},
+			expectedFindings: []string{"minlen=6", "remember=1", "pam_pwhistory.so가 pam_unix.so보다 뒤에 있음"},
 		},
 	}
 	for _, test := range tests {
@@ -1401,19 +1401,19 @@ func TestEvaluatePasswordPolicyDowngradesAllPAMFindingsWithAlternativeDebianPoli
 
 			outcome := evaluatePasswordPolicy(context.Background(), passwordPolicyRule(), environment)
 
-			if outcome.Status != model.StatusUnknown || outcome.UnknownReason != model.UnknownInsufficientEvidence {
-				t.Fatalf("outcome = %#v, want insufficient-evidence UNKNOWN", outcome)
+			if outcome.Status != model.StatusFail {
+				t.Fatalf("outcome = %#v, want FAIL", outcome)
 			}
 			for _, finding := range test.expectedFindings {
 				if !strings.Contains(outcome.Observed, finding) {
-					t.Fatalf("observed = %q, want downgraded PAM finding %q", outcome.Observed, finding)
+					t.Fatalf("observed = %q, want guide finding %q", outcome.Observed, finding)
 				}
 			}
 		})
 	}
 }
 
-func TestEvaluatePasswordPolicyKeepsDefiniteAgeViolationWithAlternativeDebianPAM(t *testing.T) {
+func TestEvaluatePasswordPolicyReportsGuideViolationsWithAlternativeDebianPAM(t *testing.T) {
 	t.Parallel()
 
 	stack := "password requisite pam_passwdqc.so min=disabled,disabled,8,8,8\n" +
@@ -1444,29 +1444,14 @@ func TestEvaluatePasswordPolicyKeepsDefiniteAgeViolationWithAlternativeDebianPAM
 		t.Fatalf("status = %q, want %q; outcome = %#v", outcome.Status, model.StatusFail, outcome)
 	}
 	if !strings.Contains(outcome.Observed, "PASS_MIN_DAYS=0") ||
-		!strings.Contains(outcome.Observed, "root(min=0,max=99999)") {
-		t.Fatalf("observed = %q, want definite age findings", outcome.Observed)
-	}
-	for _, pamFinding := range []string{
-		"minlen=6",
-		"필수 문자 종류=0",
-		"remember=1",
-		"enforce_for_root",
-		"제어 플래그",
-		"pam_unix.so가 pwquality/pwhistory보다 먼저",
-	} {
-		if strings.Contains(outcome.Observed, pamFinding) {
-			t.Fatalf("observed = %q, unresolved PAM finding %q must not be definite", outcome.Observed, pamFinding)
-		}
-	}
-	for _, detail := range outcome.Details {
-		if detail.Label != "사용 기간" && detail.Label != "계정별 사용 기간" {
-			t.Fatalf("details = %#v, unresolved PAM detail %q must not accompany the age finding", outcome.Details, detail.Label)
-		}
+		!strings.Contains(outcome.Observed, "PASS_MAX_DAYS=99999") ||
+		!strings.Contains(outcome.Observed, "common-password minlen=6") ||
+		!strings.Contains(outcome.Observed, "common-password remember=1") {
+		t.Fatalf("observed = %q, want guide findings", outcome.Observed)
 	}
 }
 
-func TestEvaluatePasswordPolicyKeepsDefiniteAgeViolationWhenRHELPAMIsUnmanaged(t *testing.T) {
+func TestEvaluatePasswordPolicyCannotInspectMissingGuideRHELPAMStack(t *testing.T) {
 	t.Parallel()
 
 	environment := evaluator.Environment{
@@ -1488,27 +1473,12 @@ func TestEvaluatePasswordPolicyKeepsDefiniteAgeViolationWhenRHELPAMIsUnmanaged(t
 
 	outcome := evaluatePasswordPolicy(context.Background(), passwordPolicyRule(), environment)
 
-	if outcome.Status != model.StatusFail {
-		t.Fatalf("status = %q, want %q; outcome = %#v", outcome.Status, model.StatusFail, outcome)
-	}
-	for _, finding := range []string{"PASS_MIN_DAYS=0", "PASS_MAX_DAYS=99999", "root(min=0,max=99999)"} {
-		if !strings.Contains(outcome.Observed, finding) {
-			t.Fatalf("observed = %q, want definite age finding %q", outcome.Observed, finding)
-		}
-	}
-	for _, pamFinding := range []string{"system-auth", "password-auth", "pam_pwquality", "pam_pwhistory"} {
-		if strings.Contains(outcome.Observed, pamFinding) {
-			t.Fatalf("observed = %q, unresolved PAM finding %q must not be definite", outcome.Observed, pamFinding)
-		}
-	}
-	for _, detail := range outcome.Details {
-		if detail.Label != "사용 기간" && detail.Label != "계정별 사용 기간" {
-			t.Fatalf("details = %#v, unresolved PAM detail %q must not accompany the age finding", outcome.Details, detail.Label)
-		}
+	if outcome.Status != model.StatusError || outcome.ErrorCode != "pam_password_stack_failed" {
+		t.Fatalf("outcome = %#v, want pam_password_stack_failed ERROR", outcome)
 	}
 }
 
-func TestEvaluatePasswordPolicyNeverPassesUnmanagedRHELPAM(t *testing.T) {
+func TestEvaluatePasswordPolicyRejectsInvalidGuideConfigurationSyntax(t *testing.T) {
 	t.Parallel()
 
 	environment := evaluator.Environment{
@@ -1533,21 +1503,8 @@ func TestEvaluatePasswordPolicyNeverPassesUnmanagedRHELPAM(t *testing.T) {
 
 	outcome := evaluatePasswordPolicy(context.Background(), passwordPolicyRule(), environment)
 
-	if outcome.Status != model.StatusUnknown || outcome.UnknownReason != model.UnknownUnsupportedConfiguration {
-		t.Fatalf("outcome = %#v, want unsupported-configuration UNKNOWN", outcome)
-	}
-	if !strings.Contains(outcome.Observed, "authselect") {
-		t.Fatalf("observed = %q, want unresolved authselect-managed PAM path", outcome.Observed)
-	}
-	for _, pamFinding := range []string{"system-auth", "password-auth", "pam_pwquality", "pam_pwhistory"} {
-		if strings.Contains(outcome.Observed, pamFinding) {
-			t.Fatalf("observed = %q, canonical PAM finding %q must not be inferred", outcome.Observed, pamFinding)
-		}
-		for _, evidence := range outcome.Evidence {
-			if strings.Contains(evidence.Source, pamFinding) {
-				t.Fatalf("evidence = %#v, canonical PAM source %q must not be collected without an effective entrypoint", outcome.Evidence, pamFinding)
-			}
-		}
+	if outcome.Status != model.StatusError || outcome.ErrorCode != "pwquality_config_failed" {
+		t.Fatalf("outcome = %#v, want pwquality_config_failed ERROR", outcome)
 	}
 }
 

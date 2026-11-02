@@ -10,6 +10,7 @@ import (
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/yesidodo73/OpenCIIP/internal/engine"
 	"github.com/yesidodo73/OpenCIIP/internal/model"
@@ -43,6 +44,28 @@ type scanSettings struct {
 type optionChoice struct {
 	value string
 	label string
+}
+
+type optionSection struct {
+	title string
+	rows  []int
+}
+
+var optionSections = []optionSection{
+	{title: "점검", rows: []int{optionProfiles, optionChecks}},
+	{title: "출력", rows: []int{optionEvidence, optionReportDir, optionShowAll}},
+	{title: "보안", rows: []int{optionRedaction}},
+	{title: "조치", rows: []int{optionRemediation}},
+}
+
+var optionLabels = map[int]string{
+	optionProfiles:    "점검 범위",
+	optionChecks:      "점검",
+	optionEvidence:    "증적 저장",
+	optionReportDir:   "보고서 경로",
+	optionShowAll:     "결과 표시",
+	optionRedaction:   "민감정보",
+	optionRemediation: "자동 조치",
 }
 
 type optionPickerState struct {
@@ -495,6 +518,9 @@ func (m *Model) applyOptionPicker() bool {
 }
 
 func (m *Model) optionPickerView() string {
+	if m.height >= 20 {
+		return m.optionPickerDashboardView()
+	}
 	state := m.optionPicker
 	titles := map[int]string{
 		optionProfiles:  "점검 범위 선택",
@@ -548,16 +574,26 @@ func (m *Model) optionPickerView() string {
 		marker := "  "
 		style := lipgloss.NewStyle().Foreground(textColor)
 		if index == state.index {
-			marker = accentStyle.Render("› ")
-			style = keyStyle
+			marker = accentStyle.Copy().Background(selectedColor).Render("│ ")
+			style = keyStyle.Copy().Background(selectedColor)
 		}
 		checkbox := "[ ]"
 		if state.selected[choice.value] {
-			checkbox = successStyle.Render("[✓]")
+			checkStyle := successStyle
+			if index == state.index {
+				checkStyle = checkStyle.Background(selectedColor)
+			}
+			checkbox = checkStyle.Render("[✓]")
+		} else if index == state.index {
+			checkbox = selectedRowStyle.Render(checkbox)
 		}
-		row := marker + checkbox + "  " + style.Render(presentation.Sanitize(choice.label))
+		spacing := "  "
 		if index == state.index {
-			row = selectedRowStyle.Copy().Width(contentWidth).Render(row)
+			spacing = selectedRowStyle.Render(spacing)
+		}
+		row := marker + checkbox + spacing + style.Render(presentation.Sanitize(choice.label))
+		if index == state.index {
+			row = fillSelectedRow(row, contentWidth)
 		}
 		builder.WriteString(row)
 		builder.WriteByte('\n')
@@ -569,28 +605,13 @@ func (m *Model) optionPickerView() string {
 	builder.WriteString("\n")
 	builder.WriteString(optionSectionDivider("조작", contentWidth))
 	builder.WriteString("\n")
-	builder.WriteString(optionKeyLegend("↑↓", "이동", "Space", "선택", "Enter", "적용", "q", "뒤로", "Esc", "종료"))
+	builder.WriteString(pickerKeyLegend(contentWidth, state.option))
 	return m.centerOptionContent(builder.String(), contentWidth)
 }
 
 func (m *Model) optionsView() string {
-	sections := []struct {
-		title string
-		rows  []int
-	}{
-		{title: "점검", rows: []int{optionProfiles, optionChecks}},
-		{title: "출력", rows: []int{optionEvidence, optionReportDir, optionShowAll}},
-		{title: "보안", rows: []int{optionRedaction}},
-		{title: "조치", rows: []int{optionRemediation}},
-	}
-	labels := map[int]string{
-		optionProfiles:    "점검 범위",
-		optionChecks:      "점검",
-		optionEvidence:    "증적 저장",
-		optionReportDir:   "보고서 경로",
-		optionShowAll:     "결과 표시",
-		optionRedaction:   "민감정보",
-		optionRemediation: "자동 조치",
+	if m.height >= 20 {
+		return m.optionsDashboardView()
 	}
 	contentWidth := m.optionContentWidth()
 	var builder strings.Builder
@@ -598,14 +619,14 @@ func (m *Model) optionsView() string {
 	builder.WriteString("\n")
 	builder.WriteString(helpStyle.Render("점검 범위와 결과 저장 방식을 설정합니다."))
 	builder.WriteString("\n\n")
-	for sectionIndex, section := range sections {
+	for sectionIndex, section := range optionSections {
 		if sectionIndex > 0 {
 			builder.WriteByte('\n')
 		}
 		builder.WriteString(optionSectionDivider(section.title, contentWidth))
 		builder.WriteByte('\n')
 		for _, index := range section.rows {
-			builder.WriteString(m.optionRow(index, labels[index], contentWidth))
+			builder.WriteString(m.optionRow(index, optionLabels[index], contentWidth))
 			builder.WriteByte('\n')
 		}
 	}
@@ -614,9 +635,9 @@ func (m *Model) optionsView() string {
 		builder.WriteString("\n")
 		builder.WriteString(optionSectionDivider("경로 입력", contentWidth))
 		builder.WriteString("\n")
-		builder.WriteString(selectedRowStyle.Copy().Width(contentWidth).Render(accentStyle.Render("› ") + sanitizedTextInputView(m.optionInput)))
+		builder.WriteString(selectedRowStyle.Copy().Width(contentWidth).Render(accentStyle.Render("│ ") + sanitizedTextInputView(m.optionInput)))
 		builder.WriteString("\n\n")
-		builder.WriteString(optionKeyLegend("Enter", "저장", "Ctrl+G", "취소", "Ctrl+U", "지우기", "Esc", "종료"))
+		builder.WriteString(optionsKeyLegend(contentWidth, true))
 	} else {
 		builder.WriteString("\n")
 		builder.WriteString(optionSectionDivider("설명", contentWidth))
@@ -627,7 +648,7 @@ func (m *Model) optionsView() string {
 			builder.WriteString(errorStyle.Render("! " + presentation.Sanitize(m.optionErr.Error())))
 		}
 		builder.WriteString("\n\n")
-		builder.WriteString(optionKeyLegend("↑↓", "이동", "←→", "변경", "Enter", "상세", "S", "점검", "R", "기본값", "q", "뒤로", "Esc", "종료"))
+		builder.WriteString(optionsKeyLegend(contentWidth, false))
 	}
 	return m.centerOptionContent(builder.String(), contentWidth)
 }
@@ -646,20 +667,37 @@ func (m *Model) optionRow(index int, label string, contentWidth int) string {
 	marker := "  "
 	labelStyleForRow := labelStyle
 	if selected {
-		marker = accentStyle.Render("› ")
-		labelStyleForRow = keyStyle
+		marker = accentStyle.Copy().Background(selectedColor).Render("│ ")
+		labelStyleForRow = keyStyle.Copy().Background(selectedColor)
 	}
 	value := m.displayOptionValue(index, valueWidth-4)
 	valueCell := "  " + value + "  "
-	if selected && index != optionReportDir && m.optionHasControls(index) {
-		valueCell = accentStyle.Render("<") + " " + value + " " + accentStyle.Render(">")
+	if selected {
+		valueText := ansi.Truncate(ansi.Strip(value), valueWidth-4, "…")
+		valueStyle := keyStyle.Copy().Background(selectedColor)
+		if index == optionRedaction && m.scanSettings.noRedact {
+			valueStyle = warningStyle.Copy().Background(selectedColor)
+		}
+		valueCell = selectedRowStyle.Render("  ") + valueStyle.Render(valueText) + selectedRowStyle.Render("  ")
+		if index != optionReportDir && m.optionHasControls(index) {
+			controls := accentStyle.Copy().Background(selectedColor)
+			valueCell = controls.Render("< ") + valueStyle.Render(valueText) + controls.Render(" >")
+		}
+		row := marker + labelStyleForRow.Copy().Width(labelWidth).Render(label) +
+			selectedRowStyle.Render("  ") + valueCell
+		return fillSelectedRow(row, contentWidth)
 	}
 	row := marker + labelStyleForRow.Copy().Width(labelWidth).Render(label) + "  " +
 		lipgloss.NewStyle().Width(valueWidth).MaxWidth(valueWidth).Render(valueCell)
-	if selected {
-		return selectedRowStyle.Copy().Width(contentWidth).Render(row)
-	}
 	return lipgloss.NewStyle().Width(contentWidth).Render(row)
+}
+
+func fillSelectedRow(row string, width int) string {
+	remaining := width - lipgloss.Width(row)
+	if remaining > 0 {
+		row += selectedRowStyle.Render(strings.Repeat(" ", remaining))
+	}
+	return row
 }
 
 func (m *Model) optionContentWidth() int {
@@ -710,7 +748,22 @@ func optionSectionDivider(title string, width int) string {
 	return sectionStyle.Render(title) + "  " + statusRuleStyle.Render(strings.Repeat("─", lineWidth))
 }
 
-func optionKeyLegend(values ...string) string {
+func optionsKeyLegend(width int, editing bool) string {
+	if editing {
+		return optionKeyLegend(width, "Enter", "경로 저장", "Ctrl+G", "입력 취소", "Ctrl+U", "입력 지우기", "Esc", "종료 확인")
+	}
+	return optionKeyLegend(width, "↑↓", "옵션 이동", "←→", "설정값 변경", "Enter", "설정 선택·변경", "S", "점검 시작", "R", "기본값 복원", "q", "시작 화면으로", "Esc", "종료 확인")
+}
+
+func pickerKeyLegend(width, option int) string {
+	selection := "항목 선택"
+	if multiSelectOption(option) {
+		selection = "항목 선택·해제"
+	}
+	return optionKeyLegend(width, "↑↓", "항목 이동", "Space", selection, "Enter", "선택 적용", "q", "실행 옵션으로", "Esc", "종료 확인")
+}
+
+func optionKeyLegend(width int, values ...string) string {
 	parts := make([]string, 0, len(values)/2)
 	for index := 0; index+1 < len(values); index += 2 {
 		parts = append(
@@ -719,7 +772,32 @@ func optionKeyLegend(values ...string) string {
 				helpStyle.Render(presentation.Sanitize(values[index+1])),
 		)
 	}
-	return strings.Join(parts, "   ")
+	return wrapInline(parts, "   ", width)
+}
+
+// wrapInline keeps a key and its description together on narrow terminals.
+func wrapInline(parts []string, separator string, width int) string {
+	if width <= 0 {
+		return strings.Join(parts, separator)
+	}
+	var lines []string
+	var line string
+	for _, part := range parts {
+		if line == "" {
+			line = part
+			continue
+		}
+		if lipgloss.Width(line)+lipgloss.Width(separator)+lipgloss.Width(part) > width {
+			lines = append(lines, line)
+			line = part
+			continue
+		}
+		line += separator + part
+	}
+	if line != "" {
+		lines = append(lines, line)
+	}
+	return strings.Join(lines, "\n")
 }
 
 func (m *Model) displayOptionValue(index int, maxValueWidth int) string {
@@ -882,6 +960,6 @@ func (m *Model) confirmNoRedactView() string {
 			warningStyle.Render("보고서에 민감정보가 포함될 수 있습니다.")+"\n\n"+
 				"비밀번호 해시, 토큰, community string, 설정 원문 등이 마스킹되지 않을 수 있습니다.\n"+
 				"안전한 저장 경로와 접근 권한을 확인하세요.",
-		) + "\n\n" + optionKeyLegend("Y", "마스킹 해제", "N 또는 q", "유지", "Esc", "종료")
+		) + "\n\n" + optionKeyLegend(contentWidth, "Y", "마스킹 해제", "N 또는 q", "유지", "Esc", "종료")
 	return m.centerOptionContent(content, contentWidth)
 }

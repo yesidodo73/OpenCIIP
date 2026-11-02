@@ -64,10 +64,12 @@ func WriteTerminal(output io.Writer, run model.ScanRun, options TerminalOptions)
 	if _, err := fmt.Fprintln(output); err != nil {
 		return err
 	}
+	statusParts := make([]string, 0, 6)
 	for _, status := range orderedStatuses() {
-		if _, err := fmt.Fprintf(output, "%s=%d ", statusDisplayLabel(status), run.Metadata.Counts[status]); err != nil {
-			return err
-		}
+		statusParts = append(statusParts, fmt.Sprintf("%s=%d", statusDisplayLabel(status), run.Metadata.Counts[status]))
+	}
+	if _, err := fmt.Fprintln(output, strings.Join(statusParts, " ")); err != nil {
+		return err
 	}
 	if _, err := fmt.Fprintln(output); err != nil {
 		return err

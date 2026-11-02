@@ -122,6 +122,16 @@ func (e *Engine) Scan(ctx context.Context, options Options) (model.ScanRun, erro
 
 	completedAt := e.now()
 	counts := make(map[model.Status]int, 6)
+	for _, status := range []model.Status{
+		model.StatusPass,
+		model.StatusFail,
+		model.StatusUnknown,
+		model.StatusNotApplicable,
+		model.StatusError,
+		model.StatusSkipped,
+	} {
+		counts[status] = 0
+	}
 	for _, result := range results {
 		counts[result.Status]++
 	}

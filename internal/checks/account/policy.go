@@ -36,10 +36,6 @@ func policyImplementations() map[string]evaluator.Func {
 }
 
 func evaluateLockoutThreshold(ctx context.Context, rule model.ResolvedRule, environment evaluator.Environment) evaluator.Outcome {
-	defaultDeny, hasDefault, err := support.IntParameter(rule.Parameters, "default_deny")
-	if err != nil {
-		return checkError("invalid_rule_parameter", err)
-	}
 	if environment.Platform.Family == "debian" {
 		return evaluateDebianLockoutThreshold(ctx, environment)
 	}
@@ -114,7 +110,7 @@ func evaluateLockoutThreshold(ctx context.Context, rule model.ResolvedRule, envi
 		}
 	}
 
-	deny, source, denyEvidence, err := readFaillockDeny(ctx, environment, defaultDeny, hasDefault)
+	deny, source, denyEvidence, err := readFaillockDeny(ctx, environment, 0, false)
 	if err != nil {
 		return checkError("faillock_config_failed", err)
 	}
@@ -1334,13 +1330,13 @@ func pamActionBypassesTarget(action string, distance int) bool {
 	return jump >= distance
 }
 
-func readFaillockDeny(ctx context.Context, environment evaluator.Environment, defaultValue int, hasDefault bool) (int, string, model.Evidence, error) {
+func readFaillockDeny(ctx context.Context, environment evaluator.Environment, _ int, _ bool) (int, string, model.Evidence, error) {
 	data, _, err := environment.Files.ReadFile(ctx, "/etc/security/faillock.conf", 1<<20)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) && hasDefault {
-			return defaultValue, "RHEL 9 기본값", support.FactEvidence("/etc/security/faillock.conf", map[string]any{
-				"exists":       false,
-				"default_deny": defaultValue,
+		if errors.Is(err, os.ErrNotExist) {
+			return 0, "설정 없음", support.FactEvidence("/etc/security/faillock.conf", map[string]any{
+				"exists":   false,
+				"deny_set": false,
 			}), nil
 		}
 		return 0, "", model.Evidence{}, err
@@ -1366,13 +1362,9 @@ func readFaillockDeny(ctx context.Context, environment evaluator.Environment, de
 		lineNumber = index + 1
 	}
 	if !found {
-		if !hasDefault {
-			return 0, "", model.Evidence{}, fmt.Errorf("deny is not set and no verified platform default is available")
-		}
-		return defaultValue, "RHEL 9 기본값", support.FactEvidence("/etc/security/faillock.conf", map[string]any{
-			"exists":       true,
-			"deny_set":     false,
-			"default_deny": defaultValue,
+		return 0, "설정 없음", support.FactEvidence("/etc/security/faillock.conf", map[string]any{
+			"exists":   true,
+			"deny_set": false,
 		}), nil
 	}
 	return deny, fmt.Sprintf("faillock.conf:%d", lineNumber), support.FactEvidence("/etc/security/faillock.conf", map[string]any{
@@ -1399,7 +1391,7 @@ func evaluatePasswordHash(ctx context.Context, rule model.ResolvedRule, environm
 	pamStackNames := make([]string, 0, 2)
 	switch environment.Platform.Family {
 	case "rhel":
-		pamStackNames = append(pamStackNames, "system-auth", "password-auth")
+		pamStackNames = append(pamStackNames, "system-auth")
 	case "debian":
 		pamStackNames = append(pamStackNames, "common-password")
 	default:
@@ -1463,7 +1455,7 @@ func evaluatePasswordHash(ctx context.Context, rule model.ResolvedRule, environm
 	}
 	effectiveMethods := []string{fmt.Sprintf("ENCRYPT_METHOD=%s line=%d", method, line)}
 	for _, stack := range pamStackNames {
-		stackMethods, stackUnsafe, stackUnknown := inspectPAMUnixHashMethods(stack, pamStacks[stack], method, safeMethods)
+		stackMethods, stackUnsafe, stackUnknown := inspectPAMUnixHashMethodsLiteral(stack, pamStacks[stack], method, safeMethods)
 		effectiveMethods = append(effectiveMethods, stackMethods...)
 		unsafe = append(unsafe, stackUnsafe...)
 		unknown = append(unknown, stackUnknown...)
@@ -1492,8 +1484,8 @@ func evaluatePasswordHash(ctx context.Context, rule model.ResolvedRule, environm
 	if len(activeAlgorithms) == 0 {
 		sort.Strings(effectiveMethods)
 		return evaluator.Outcome{
-			Status:   model.StatusNotApplicable,
-			Summary:  "신규 비밀번호 해시 정책은 안전하지만 활성 상태의 로컬 비밀번호 해시가 없습니다.",
+			Status:   model.StatusPass,
+			Summary:  "비밀번호 암호화 정책이 안전한 알고리즘으로 설정되어 있습니다.",
 			Expected: "신규 정책과 기존 활성 해시가 SHA-2 이상의 알고리즘을 사용해야 합니다.",
 			Observed: strings.Join(uniqueSorted(effectiveMethods), "; "),
 			Evidence: evidence,
@@ -1507,6 +1499,43 @@ func evaluatePasswordHash(ctx context.Context, rule model.ResolvedRule, environm
 		Observed: strings.Join(uniqueSorted(effectiveMethods), "; ") + "; 활성 해시 알고리즘이 모두 허용 목록에 포함됩니다.",
 		Evidence: evidence,
 	}
+}
+
+func inspectPAMUnixHashMethodsLiteral(stack string, rules []support.PAMRule, fallbackMethod string, safeMethods []string) ([]string, []string, []string) {
+	matches := make([]support.PAMRule, 0, 1)
+	for _, rule := range rules {
+		if rule.Type == "password" && filepath.Base(rule.Module) == "pam_unix.so" {
+			matches = append(matches, rule)
+		}
+	}
+	if len(matches) == 0 {
+		return nil, nil, []string{stack + "에 password pam_unix.so가 없음"}
+	}
+	effective := make([]string, 0, len(matches))
+	unsafe := make([]string, 0)
+	unknown := make([]string, 0)
+	for _, rule := range matches {
+		method, overridden, err := pamUnixHashMethod(rule.Args, fallbackMethod)
+		if err != nil {
+			unknown = append(unknown, fmt.Sprintf("%s %s:%d pam_unix 해시 설정을 해석할 수 없음", stack, rule.Path, rule.Line))
+			continue
+		}
+		source := "login.defs"
+		if overridden {
+			source = fmt.Sprintf("%s:%d PAM 설정", rule.Path, rule.Line)
+		}
+		description := fmt.Sprintf("%s pam_unix=%s (%s)", stack, method, source)
+		effective = append(effective, description)
+		if containsFold(safeMethods, method) {
+			continue
+		}
+		if isKnownWeakMethod(method) {
+			unsafe = append(unsafe, description)
+		} else {
+			unknown = append(unknown, description)
+		}
+	}
+	return effective, unsafe, unknown
 }
 
 func inspectPAMUnixHashMethods(stack string, rules []support.PAMRule, fallbackMethod string, safeMethods []string) ([]string, []string, []string) {

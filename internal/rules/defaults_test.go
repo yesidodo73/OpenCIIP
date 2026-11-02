@@ -134,16 +134,14 @@ func TestDefaultDebianResolutionUsesPlatformParameters(t *testing.T) {
 	if got := byID["U-02"].Parameters["min_password_length"]; got != 8 {
 		t.Fatalf("U-02 min_password_length = %#v, want 8", got)
 	}
-	if got := byID["U-06"].Parameters["allowed_su_groups"]; !reflect.DeepEqual(got, []any{"sudo"}) {
-		t.Fatalf("U-06 allowed_su_groups = %#v, want sudo", got)
+	if _, exists := byID["U-06"].Parameters["allowed_su_groups"]; exists {
+		t.Fatalf("U-06 has non-guide allowed_su_groups: %#v", byID["U-06"].Parameters)
 	}
-	if got := byID["U-62"].BindingSources; !reflect.DeepEqual(got, []string{"linux-common", "ubuntu-24.04"}) {
-		t.Fatalf("U-62 binding sources = %v, want common and exact Ubuntu layers", got)
+	if got := byID["U-62"].BindingSources; !reflect.DeepEqual(got, []string{"linux-common"}) {
+		t.Fatalf("U-62 binding sources = %v, want only the common guide layer", got)
 	}
-	if got := byID["U-62"].Parameters["known_inadequate_issue_hashes"]; !reflect.DeepEqual(got, []any{
-		"0f42739b4fee9ba3ea7768ddf304853467e394265dc2dfde4a9531156e57ceb8",
-	}) {
-		t.Fatalf("U-62 known_inadequate_issue_hashes = %#v, want the tested Ubuntu default digest", got)
+	if _, exists := byID["U-62"].Parameters["known_inadequate_issue_hashes"]; exists {
+		t.Fatalf("U-62 has non-guide known issue hashes: %#v", byID["U-62"].Parameters)
 	}
 }
 

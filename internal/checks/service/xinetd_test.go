@@ -69,8 +69,12 @@ func TestDisabledEvaluatorsDetectEnabledXinetdServicesFromArbitraryFileNames(t *
 			outcome := implementation(context.Background(), model.ResolvedRule{}, evaluator.Environment{
 				Files: reader, Commands: inactiveServiceRunner{}, Platform: model.PlatformInfo{InitSystem: "systemd"},
 			})
-			if outcome.Status != model.StatusFail {
-				t.Fatalf("outcome status = %s, want FAIL; outcome=%#v", outcome.Status, outcome)
+			wantStatus := model.StatusFail
+			if test.evaluator == EvaluatorRCommandsDisabled {
+				wantStatus = model.StatusUnknown
+			}
+			if outcome.Status != wantStatus {
+				t.Fatalf("outcome status = %s, want %s; outcome=%#v", outcome.Status, wantStatus, outcome)
 			}
 			if !strings.Contains(outcome.Observed, "xinetd target service enabled (1)") {
 				t.Fatalf("observed = %q, want enabled xinetd signal", outcome.Observed)

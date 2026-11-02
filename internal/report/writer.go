@@ -415,6 +415,9 @@ func renderProblems(run model.ScanRun) string {
 		fmt.Fprintf(&builder, "중요도: %s\n", result.Severity)
 		writeHumanField(&builder, "판정 이유", result.Summary, 0)
 		writeHumanAssessment(&builder, result)
+		if strings.TrimSpace(result.Solution) != "" {
+			writeHumanField(&builder, "조치 방법", result.Solution, 0)
+		}
 		if result.ErrorCode != "" {
 			writeHumanField(&builder, "오류 코드", result.ErrorCode, 0)
 		}
@@ -432,6 +435,9 @@ func renderEvidence(result model.CheckResult) string {
 	fmt.Fprintf(&builder, "상태: %s\n", statusDisplayLabel(result.Status))
 	writeHumanField(&builder, "판정 이유", result.Summary, 0)
 	writeHumanAssessment(&builder, result)
+	if strings.TrimSpace(result.Solution) != "" {
+		writeHumanField(&builder, "조치 방법", result.Solution, 0)
+	}
 	fmt.Fprintf(&builder, "가이드 근거: %s, %v쪽\n", result.Reference.Section, result.Reference.Pages)
 	for index, evidence := range result.Evidence {
 		fmt.Fprintf(&builder, "\n[증적 %d]\n", index+1)

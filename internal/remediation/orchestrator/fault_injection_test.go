@@ -1074,7 +1074,7 @@ func faultPlannedChangeSet(index int) model.ChangeSet {
 
 func faultSealJournal(t *testing.T, value *model.RemediationJournal) {
 	t.Helper()
-	if value.SchemaVersion == model.RemediationSchemaVersion {
+	if model.HasRemediationBuildProvenance(value.SchemaVersion) {
 		for index := range value.RollbackAttempts {
 			attempt := &value.RollbackAttempts[index]
 			if attempt.Trigger == model.RollbackCrashRecovery {

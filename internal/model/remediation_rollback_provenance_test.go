@@ -6,8 +6,8 @@ import (
 	"time"
 )
 
-func TestRemediationJournalV3RollbackBuildProvenanceSchemaParity(t *testing.T) {
-	schema := compileRemediationJournalV3Schema(t)
+func TestRemediationJournalV4RollbackBuildProvenanceSchemaParity(t *testing.T) {
+	schema := compileRemediationJournalV4Schema(t)
 	valid := []struct {
 		name    string
 		attempt func(RemediationJournal) RollbackAttempt
@@ -24,6 +24,14 @@ func TestRemediationJournalV3RollbackBuildProvenanceSchemaParity(t *testing.T) {
 			attempt: func(value RemediationJournal) RollbackAttempt {
 				executor := journalContractRollbackExecutor()
 				return rollbackProvenanceAttempt(value, RollbackRun, RollbackUserRequest, &executor, nil, nil)
+			},
+		},
+		{
+			name: "user item rollback with prerelease executor",
+			attempt: func(value RemediationJournal) RollbackAttempt {
+				executor := journalContractRollbackExecutor()
+				executor.Version = "1.0.0-alpha.1"
+				return rollbackProvenanceAttempt(value, RollbackItem, RollbackUserRequest, &executor, nil, []string{"change-1"})
 			},
 		},
 		{
@@ -69,9 +77,9 @@ func TestRemediationJournalV3RollbackBuildProvenanceSchemaParity(t *testing.T) {
 			},
 		},
 		{
-			name: "user attempt has prerelease executor",
+			name: "user attempt has build metadata",
 			mutate: func(attempt *RollbackAttempt, _ RemediationJournal) {
-				attempt.ExecutorBuild.Version = "1.0.0-alpha.1"
+				attempt.ExecutorBuild.Version = "1.0.0-alpha.1+build.2"
 			},
 		},
 		{
@@ -129,8 +137,22 @@ func TestRemediationJournalV3RollbackBuildProvenanceSchemaParity(t *testing.T) {
 	})
 }
 
+func TestRemediationJournalV3KeepsStableRollbackContract(t *testing.T) {
+	schema := compileRemediationJournalSchema(t, "remediation-journal-v3.schema.json", "https://raw.githubusercontent.com/yesidodo73/OpenCIIP/main/schemas/remediation-journal-v3.schema.json")
+	value := journalContractRecoveryIntent()
+	value.SchemaVersion = 3
+	executor := journalContractRollbackExecutor()
+	attempt := rollbackProvenanceAttempt(value, RollbackItem, RollbackUserRequest, &executor, nil, []string{"change-1"})
+	value.RollbackAttempts = []RollbackAttempt{attempt}
+	value.UpdatedAt = attempt.StartedAt
+	assertRemediationJournalParity(t, schema, value, true)
+
+	value.RollbackAttempts[0].ExecutorBuild.Version = "1.0.0-alpha.1"
+	assertRemediationJournalParity(t, schema, value, false)
+}
+
 func TestRemediationJournalRejectsRuntimeOnlyRollbackProvenanceViolations(t *testing.T) {
-	schema := compileRemediationJournalV3Schema(t)
+	schema := compileRemediationJournalV4Schema(t)
 	tests := []struct {
 		name   string
 		mutate func(*RollbackAttempt, RemediationJournal)
