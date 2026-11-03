@@ -1,4 +1,10 @@
+<div align="center">
+
 # OpenCIIP에 기여하기
+
+[개발 환경](#개발-환경) · [변경 확인](#변경-확인) · [Linux 배포판 지원](#linux-배포판-지원) · [Pull Request](#pull-request) · [README](README.md)
+
+</div>
 
 OpenCIIP에 관심을 가져주셔서 감사합니다.
 
@@ -36,7 +42,7 @@ go build ./cmd/openciip
 
 새 Linux 배포판이나 버전을 추가할 때는 [OS 지원 가이드와 템플릿](contrib/os-support/README.md)을 사용해주세요. Pull request를 열 때는 [OS 지원 전용 양식](https://github.com/yesidodo73/OpenCIIP/compare?expand=1&template=os-support.md)을 선택하면 필요한 검증 내용을 빠뜨리지 않고 작성할 수 있습니다.
 
-읽기 전용 점검의 `tested` 상태와 자동 조치의 `verified` 상태는 별도로 확인합니다. 자동 조치는 정확한 OS·버전·아키텍처에서 적용 후 재점검, 항목별 롤백과 실행 전체 롤백을 모두 확인한 항목만 지원합니다.
+읽기 전용 점검의 `tested` 상태와 자동 조치의 `verified` 상태는 별도로 확인합니다. 새 환경의 자동 조치는 해당 OS·버전·아키텍처에서 적용 후 재점검, 항목별 롤백과 실행 전체 롤백을 확인한 뒤 지원 대상으로 추가합니다.
 
 플랫폼 YAML과 fixture는 자동으로 발견됩니다. 공통 Linux 동작은 상위 계층에 두고, 배포판 파일에는 실제 차이만 작성해주세요.
 

@@ -26,8 +26,7 @@
 
 - 실행 명령:
 - 상태별 결과:
-- candidate manifest:
-- final manifest: `evidence/os-support/<id>-<version>-<architecture>.json`
+- candidate와 final 검증 결과 요약:
 - `evidence_sha256`:
 - `manifest_sha256`:
 
@@ -58,7 +57,7 @@
 - [ ] 재부팅 후 전체 롤백과 정리를 확인했습니다.
 - [ ] candidate와 final의 자동 조치 주장이 같고 산출물은 새 실행에서 생성되었습니다.
 - [ ] 정규화 manifest의 `evidence_sha256`을 각 recipe에 연결했습니다.
-- [ ] 같은 canonical 경로의 스캔 전용 manifest를 자동 조치 포함 final manifest로 교체했습니다.
+- [ ] 로컬의 스캔 전용 manifest를 자동 조치가 포함된 final manifest로 갱신했습니다.
 - [ ] `verify-final`과 `verify-promotion`을 모두 통과했습니다.
 
 ## 로컬 확인
@@ -73,4 +72,5 @@ go build ./cmd/openciip
 
 ## 공개 자료 확인
 
+- [ ] 검증 기록은 로컬에 보관하고, PR에는 민감정보를 뺀 결과만 작성했습니다.
 - [ ] 비밀번호, 키, 토큰, IP 주소, 호스트 이름, 계정, VM 식별자, 로컬·원격 경로, 명령줄과 원본 설정 내용을 포함하지 않았습니다.

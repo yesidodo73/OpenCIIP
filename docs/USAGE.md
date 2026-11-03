@@ -1,4 +1,12 @@
+<div align="center">
+
 # 사용 방법
+
+[시작하기](#시작하기) · [대화형 실행](#대화형-실행) · [자동 조치](#자동-조치) · [명령줄 실행](#명령줄-실행) · [보고서](#보고서) · [README](../README.md)
+
+</div>
+
+## 시작하기
 
 릴리스 빌드는 점검 규칙을 포함한 단일 바이너리입니다. 실행할 서버에 Go나 별도 규칙 파일을 설치할 필요가 없습니다.
 
@@ -20,15 +28,17 @@ sudo ./openciip-linux-amd64
 
 점검 범위와 개별 점검은 목록에서 복수 선택합니다. TUI에서 보고서 경로를 직접 입력할 때는 절대경로를 사용합니다. 분류와 중요도 필터는 CLI에서 사용할 수 있습니다.
 
+![OpenCIIP 실행 옵션 화면](../assets/openciip-options.png)
+
+## 자동 조치
+
 자동 조치 옵션은 TUI 실행 옵션에 표시됩니다. 지원 환경에서 U-19, U-22, U-29 중 취약으로 판정된 항목을 대상으로 합니다. 적용 전에 변경 계획과 영향을 확인하고 승인해야 합니다. 실제 시스템에서는 서비스 구성에 따라 영향이 다를 수 있으므로 각 변경 내용을 신중하게 확인하세요.
 
 자동 조치에는 root 권한, systemd가 PID 1로 실행되는 호스트, ext4 또는 XFS 기반의 영속 로컬 저장소가 필요합니다. 컨테이너와 chroot 환경은 지원하지 않습니다.
 
 `0.1.1-alpha.16`에서는 수정되지 않은 사전 릴리스 빌드도 사용할 수 있지만, `+dirty`로 표시되는 수정된 빌드에서는 실제 조치와 롤백이 차단됩니다. 이전 릴리스는 동작이 다를 수 있으며, 버전 3 형식으로 기록된 롤백에는 정식 버전이 필요합니다.
 
-`--quiet`와 `--no-color`는 비대화형 출력 옵션이므로 TUI 설정에서는 표시하지 않습니다.
-
-## CLI 실행
+## 명령줄 실행
 
 전체 항목을 점검하려면 `scan` 명령을 사용하세요.
 
@@ -44,7 +54,7 @@ root 권한 없이 실행하면 보호된 설정과 시스템 상태를 확인�
 sudo ./openciip-linux-amd64 scan --profile account
 sudo ./openciip-linux-amd64 scan --check U-01,U-05,U-10
 sudo ./openciip-linux-amd64 scan --category file_directory --severity high
-sudo ./openciip-linux-amd64 scan --evidence all --report-dir /var/lib/openciip/reports
+sudo ./openciip-linux-amd64 scan --evidence all --report-dir ./openciip-reports
 ```
 
 ## 점검 옵션
@@ -76,7 +86,7 @@ results.json
 evidence/
 ```
 
-문제가 있는 항목의 증적만 저장하는 것이 기본값입니다. 모든 증적을 저장하려면 `--evidence all`, 증적 파일을 만들지 않으려면 `--evidence none`을 사용하세요. `evidence/` 디렉터리는 저장할 증적이 있을 때만 생성됩니다.
+문제가 있는 항목의 증적만 저장하는 것이 기본값입니다. 모든 증적을 저장하려면 `--evidence all`, 증적 파일을 만들지 않으려면 `--evidence none`을 사용하세요. 보고서의 `evidence/` 디렉터리는 저장할 증적이 있을 때만 생성됩니다.
 
 터미널과 TXT 보고서의 점검 결과는 `취약`, `수동 확인 필요`, `확인 실패`, `양호`, `해당 없음`, `점검하지 않음` 순서로 표시됩니다. JSON에는 각각 `FAIL`, `UNKNOWN`, `ERROR`, `PASS`, `NOT_APPLICABLE`, `SKIPPED` 상태 코드를 기록합니다. 같은 상태의 항목은 항목 번호순으로 정렬됩니다.
 

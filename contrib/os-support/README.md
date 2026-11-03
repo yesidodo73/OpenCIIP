@@ -1,4 +1,10 @@
+<div align="center">
+
 # Linux 배포판 지원 추가
+
+[플랫폼 계층](#플랫폼-계층) · [실행 환경 추가](#1-실행-가능-환경-추가) · [읽기 전용 점검](#2-읽기-전용-점검을-tested로-승격) · [자동 조치](#3-자동-조치를-verified로-승격) · [기여하기](../../CONTRIBUTING.md)
+
+</div>
 
 OpenCIIP는 Linux 공통 계층, 배포판 계열 계층, 정확한 환경 계층을 차례로 합쳐 점검합니다. 새 배포판을 추가할 때는 상위 계층과 실제로 다른 값만 작성해주세요.
 
@@ -35,7 +41,7 @@ OpenCIIP는 Linux 공통 계층, 배포판 계열 계층, 정확한 환경 계�
 
 ## 2. 읽기 전용 점검을 `tested`로 승격
 
-`tested`에는 공개 가능한 candidate와 final 증적이 필요합니다. 기본 입력 예제인 [evidence-manifest.yaml](evidence-manifest.yaml)은 자동 조치 내용을 포함하지 않는 읽기 전용 예제입니다.
+`tested`에는 candidate와 final 검증 기록이 필요합니다. 기본 입력 예제인 [evidence-manifest.yaml](evidence-manifest.yaml)은 자동 조치 내용을 포함하지 않는 읽기 전용 예제입니다. 검증 기록은 로컬에서 보관하며 저장소에 커밋하지 않습니다.
 
 증적에는 정확한 플랫폼, 실행 시각, 소스 커밋, 바이너리와 규칙 묶음의 SHA-256, 67개 점검 결과, `ERROR` 0건, 실행 전후 상태 보존 여부와 보고서 보관 파일의 SHA-256을 기록합니다. 호스트를 식별할 수 있는 원본 보고서나 로그는 공개하지 않습니다.
 
@@ -79,13 +85,13 @@ go run ./cmd/openciip-support-evidence verify-platform \
   --platform rules/platforms/example-1.0.yaml
 ```
 
-`verify-platform`은 자동 조치 블록이 있는 manifest를 거부합니다. 공개 경로는 `evidence/os-support/<id>-<version>-<architecture>.json`으로 고정됩니다.
+`verify-platform`은 자동 조치 블록이 있는 manifest를 거부합니다. 검증할 파일은 로컬의 `evidence/os-support/<id>-<version>-<architecture>.json` 경로에 둡니다.
 
-같은 플랫폼에서 자동 조치까지 `verified`로 승격하면 별도 스캔 증적 파일을 만들지 않고 이 canonical 파일을 자동 조치 포함 final manifest로 교체합니다. 이 경우 저장소 증적 검사는 플랫폼과 recipe를 함께 검증하며, 단일 파일 확인에는 `verify-platform`이 아니라 `verify-promotion`을 사용합니다.
+같은 플랫폼에서 자동 조치까지 `verified`로 승격할 때는 로컬의 해당 파일을 자동 조치가 포함된 final manifest로 갱신합니다. 이전 검증 기록은 따로 보관하세요. 이 경우 단일 파일 확인에는 `verify-platform`이 아니라 `verify-promotion`을 사용합니다.
 
 ## 3. 자동 조치를 `verified`로 승격
 
-현재 증적 형식은 한 환경에서 U-19, U-22, U-29를 함께 검증합니다. 기존 기록의 범위와 확인이 필요한 내용은 [OS 지원 검증 기록](../../evidence/os-support/README.md)을 참고해주세요. 새 OS의 자동 조치는 다음 조건을 모두 확인한 뒤에만 `verified`로 제출할 수 있습니다.
+현재 증적 형식은 한 환경에서 U-19, U-22, U-29를 함께 검증합니다. 기존 검증 범위와 주의사항은 [점검 범위와 결과](../../docs/CHECKS.md#자동-조치)를 참고해주세요. 새 OS의 자동 조치는 다음 조건을 모두 확인한 뒤에만 `verified`로 제출할 수 있습니다.
 
 1. exact platform과 대상 binding, recipe가 같은 `id`, `version`, `architecture`를 사용합니다.
 2. platform, binding, recipe의 environment와 `verified_at`을 일치시킵니다.
@@ -102,7 +108,7 @@ go run ./cmd/openciip-support-evidence verify-platform \
    ```
 
 5. candidate와 final을 각각 실행한 뒤 final manifest의 `evidence_sha256`을 각 recipe에 연결합니다.
-6. 기존 스캔 전용 canonical manifest를 자동 조치 포함 final manifest로 교체하고, 실제 final 바이너리, runner, 규칙 묶음과 보관 파일을 확인합니다.
+6. 로컬의 스캔 전용 manifest를 자동 조치가 포함된 final manifest로 갱신하고, 실제 final 바이너리, runner, 규칙 묶음과 보관 파일을 확인합니다. 이전 기록은 따로 보관하세요.
 
    ```bash
    go run ./cmd/openciip-support-evidence verify-final \
@@ -132,7 +138,7 @@ go run ./cmd/openciip-support-evidence verify-platform \
 
 ## 증적 해시
 
-- `evidence_sha256`: candidate와 final에서 같아야 하는 플랫폼 및 검증 주장입니다.
+- `evidence_sha256`: candidate와 final에서 같아야 하는 플랫폼 및 검증 주장 해시입니다.
 - `manifest_sha256`: 한 번의 실제 실행 시각, 소스와 산출물 해시를 포함한 manifest 전체 값입니다.
 
 정규화 도구는 필드 순서, 배열 정렬과 마지막 줄바꿈을 고정합니다. JSON Schema는 정규화된 JSON을 대상으로 사용합니다.
