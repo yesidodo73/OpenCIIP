@@ -103,18 +103,20 @@ func TestLoadDefaultsIncludesVerifiedBaselineRecipes(t *testing.T) {
 	type expectedPlatform struct {
 		environment string
 		evidence    string
+		verifiedAt  string
 	}
+	const baselineVerifiedAt = "2026-08-02T14:58:30.339056Z"
 	baselinePlatforms := map[string]expectedPlatform{
-		"centos\x008.5.2111\x00amd64": {"CentOS Linux 8.5.2111 amd64", "df4a65dca7ffdde44d044b0e22278c2f689ec65e17923da1089278e747899a7a"},
-		"rocky\x009.5\x00amd64":       {"Rocky Linux 9.5 amd64", "d0c1663b3a1b21603b6a87bae00d20f01194f288b9a6285cbd9de59864223fe7"},
-		"rocky\x009.6\x00amd64":       {"Rocky Linux 9.6 amd64", "ca925a76a0ca9ddbb4de9fbdd841ebaf3a8ad8a2c0ac129c9c63e8c7b31db7ec"},
-		"rocky\x009.7\x00amd64":       {"Rocky Linux 9.7 amd64", "a5aeb57ed649d1f3af16b6b5b44e6d147409f1692a44bf49a5cb28d60354dc4d"},
-		"rocky\x009.8\x00amd64":       {"Rocky Linux 9.8 amd64", "b0158aa89909aa50b63616d8cdf0018866fe8677071b5aa6e6907dacf5fb0f43"},
-		"ubuntu\x0018.04\x00amd64":    {"Ubuntu 18.04 LTS amd64", "6f558717dcc6d71af46956e37b99464bf63ddf346e0448a792cd4dcf82e46b83"},
-		"ubuntu\x0020.04\x00amd64":    {"Ubuntu 20.04 LTS amd64", "dfa2caa86128f934ab062131d53bae680b64e1e610757338aaed08d265b02459"},
-		"ubuntu\x0022.04\x00amd64":    {"Ubuntu 22.04 LTS amd64", "7b4a9564739c6f475ceabc6a148f1121044b3efe9eb05e76b05d82f098742075"},
-		"ubuntu\x0024.04\x00amd64":    {"Ubuntu 24.04 LTS amd64", "7dcc43ec0fd59cc5471234d0a55693bcbad6f8a6b5330661c56b7c4a419de96b"},
-		"ubuntu\x0026.04\x00amd64":    {"Ubuntu 26.04 LTS amd64", "1560ca3dbc88a1fd01bf680bea1973f984b78a578fb95bb0d3be8244c8f8e49f"},
+		"centos\x008.5.2111\x00amd64": {"CentOS Linux 8.5.2111 amd64", "df4a65dca7ffdde44d044b0e22278c2f689ec65e17923da1089278e747899a7a", baselineVerifiedAt},
+		"rocky\x009.5\x00amd64":       {"Rocky Linux 9.5 amd64", "d0c1663b3a1b21603b6a87bae00d20f01194f288b9a6285cbd9de59864223fe7", baselineVerifiedAt},
+		"rocky\x009.6\x00amd64":       {"Rocky Linux 9.6 amd64", "ca925a76a0ca9ddbb4de9fbdd841ebaf3a8ad8a2c0ac129c9c63e8c7b31db7ec", baselineVerifiedAt},
+		"rocky\x009.7\x00amd64":       {"Rocky Linux 9.7 amd64", "a5aeb57ed649d1f3af16b6b5b44e6d147409f1692a44bf49a5cb28d60354dc4d", baselineVerifiedAt},
+		"rocky\x009.8\x00amd64":       {"Rocky Linux 9.8 amd64", "b0158aa89909aa50b63616d8cdf0018866fe8677071b5aa6e6907dacf5fb0f43", baselineVerifiedAt},
+		"ubuntu\x0018.04\x00amd64":    {"Ubuntu 18.04 LTS amd64", "6f558717dcc6d71af46956e37b99464bf63ddf346e0448a792cd4dcf82e46b83", baselineVerifiedAt},
+		"ubuntu\x0020.04\x00amd64":    {"Ubuntu 20.04 LTS amd64", "dfa2caa86128f934ab062131d53bae680b64e1e610757338aaed08d265b02459", baselineVerifiedAt},
+		"ubuntu\x0022.04\x00amd64":    {"Ubuntu 22.04 LTS amd64", "7b4a9564739c6f475ceabc6a148f1121044b3efe9eb05e76b05d82f098742075", baselineVerifiedAt},
+		"ubuntu\x0024.04\x00amd64":    {"Ubuntu 24.04 LTS amd64", "7dcc43ec0fd59cc5471234d0a55693bcbad6f8a6b5330661c56b7c4a419de96b", "2026-11-03T02:31:00Z"},
+		"ubuntu\x0026.04\x00amd64":    {"Ubuntu 26.04 LTS amd64", "1560ca3dbc88a1fd01bf680bea1973f984b78a578fb95bb0d3be8244c8f8e49f", baselineVerifiedAt},
 	}
 	baselineRules := map[string]bool{"U-19": true, "U-22": true, "U-29": true}
 	found := make(map[string]bool, len(baselinePlatforms)*len(baselineRules))
@@ -131,7 +133,7 @@ func TestLoadDefaultsIncludesVerifiedBaselineRecipes(t *testing.T) {
 		if !reflect.DeepEqual(item.Verification.Environments, []string{expected.environment}) {
 			t.Errorf("recipe %s environments = %#v, want %q", item.ID, item.Verification.Environments, expected.environment)
 		}
-		if item.Verification.VerifiedAt != "2026-08-02T14:58:30.339056Z" ||
+		if item.Verification.VerifiedAt != expected.verifiedAt ||
 			!reflect.DeepEqual(item.Verification.EvidenceSHA256, []string{expected.evidence}) {
 			t.Errorf("verified recipe %s provenance = %#v", item.ID, item.Verification)
 		}
@@ -202,6 +204,11 @@ func TestDefaultRecipesMatchExactPlatformBindings(t *testing.T) {
 				binding.Verification.Environments,
 				item.Verification.Environments,
 			)
+		}
+		if layer.PlatformVerification.VerifiedAt != binding.Verification.VerifiedAt ||
+			binding.Verification.VerifiedAt != item.Verification.VerifiedAt {
+			t.Errorf("recipe %s verification times disagree: platform=%s rule=%s recipe=%s",
+				item.ID, layer.PlatformVerification.VerifiedAt, binding.Verification.VerifiedAt, item.Verification.VerifiedAt)
 		}
 		recipes[platformKey+"\x00"+item.RuleID] = item
 	}
