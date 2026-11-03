@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -96,7 +97,11 @@ func TestTestedPlatformFixturesMatchDefaultBindings(t *testing.T) {
 		if err != nil {
 			t.Fatalf("read support document %s: %v", document, err)
 		}
-		actualRows := testedSupportRows(t, document, string(content))
+		actualRows, err := testedSupportRows(string(content))
+		if err != nil {
+			t.Errorf("parse support document %s: %v", document, err)
+			continue
+		}
 		for row := range expectedDocumentedRows {
 			if _, exists := actualRows[row]; !exists {
 				t.Errorf("support document %s is missing row %q", document, row)
@@ -110,21 +115,124 @@ func TestTestedPlatformFixturesMatchDefaultBindings(t *testing.T) {
 	}
 }
 
-func testedSupportRows(t *testing.T, document, content string) map[string]struct{} {
-	t.Helper()
+func testedSupportRows(content string) (map[string]struct{}, error) {
 	rows := make(map[string]struct{})
-	for _, line := range strings.Split(content, "\n") {
-		row := strings.TrimSpace(strings.TrimSuffix(line, "\r"))
-		if !strings.HasPrefix(row, "| ") || !strings.HasSuffix(row, "| 테스트 완료 |") {
-			continue
-		}
+	compact := false
+	lastProse := ""
+	addRow := func(row string) error {
 		if _, duplicate := rows[row]; duplicate {
-			t.Errorf("support document %s repeats tested row %q", document, row)
-			continue
+			return fmt.Errorf("repeated tested row %q", row)
 		}
 		rows[row] = struct{}{}
+		return nil
 	}
-	return rows
+	for _, line := range strings.Split(content, "\n") {
+		row := strings.TrimSpace(strings.TrimSuffix(line, "\r"))
+		if !strings.HasPrefix(row, "|") || !strings.HasSuffix(row, "|") {
+			compact = false
+			if row != "" {
+				lastProse = row
+			}
+			continue
+		}
+		cells := strings.Split(strings.Trim(row, "|"), "|")
+		for index := range cells {
+			cells[index] = strings.TrimSpace(cells[index])
+		}
+		if len(cells) == 2 && cells[0] == "운영체제" && cells[1] == "테스트 버전" {
+			if !strings.Contains(lastProse, "amd64") {
+				return nil, fmt.Errorf("compact support table does not specify Linux amd64 scope")
+			}
+			compact = true
+			continue
+		}
+		if compact {
+			if len(cells) != 2 {
+				return nil, fmt.Errorf("invalid compact support row %q", row)
+			}
+			if strings.Trim(cells[0], "-: ") == "" && strings.Trim(cells[1], "-: ") == "" {
+				continue
+			}
+			if cells[0] == "" {
+				return nil, fmt.Errorf("missing operating system in %q", row)
+			}
+			for _, version := range strings.Split(cells[1], ",") {
+				version = strings.TrimSpace(version)
+				if version == "" {
+					return nil, fmt.Errorf("missing version in %q", row)
+				}
+				if err := addRow(fmt.Sprintf("| %s | %s | amd64 | 테스트 완료 |", cells[0], version)); err != nil {
+					return nil, err
+				}
+			}
+			continue
+		}
+		if strings.HasPrefix(row, "| ") && strings.HasSuffix(row, "| 테스트 완료 |") {
+			if err := addRow(row); err != nil {
+				return nil, err
+			}
+		}
+	}
+	return rows, nil
+}
+
+func TestTestedSupportRows(t *testing.T) {
+	tested := map[string]struct{}{
+		"| Ubuntu | 22.04 LTS | amd64 | 테스트 완료 |": {},
+		"| Ubuntu | 26.04 LTS | amd64 | 테스트 완료 |": {},
+	}
+	tests := []struct {
+		name    string
+		content string
+		want    map[string]struct{}
+		wantErr bool
+	}{
+		{
+			name: "one version per row",
+			content: "| 운영체제 | 버전 | 아키텍처 | 상태 |\n" +
+				"| Ubuntu | 22.04 LTS | amd64 | 테스트 완료 |\n" +
+				"| Ubuntu | 26.04 LTS | amd64 | 테스트 완료 |\n",
+			want: tested,
+		},
+		{
+			name: "versions grouped by operating system",
+			content: "다음 환경은 amd64에서 점검했습니다.\n\n" +
+				"| 운영체제 | 테스트 버전 |\n| --- | --- |\n" +
+				"| Ubuntu | 22.04 LTS, 26.04 LTS |\n",
+			want: tested,
+		},
+		{
+			name: "grouped table without architecture",
+			content: "| 운영체제 | 테스트 버전 |\n| --- | --- |\n" +
+				"| Ubuntu | 22.04 LTS |\n",
+			wantErr: true,
+		},
+		{
+			name: "duplicate version in grouped table",
+			content: "다음 Linux amd64 환경에서 점검했습니다.\n\n" +
+				"| 운영체제 | 테스트 버전 |\n| --- | --- |\n" +
+				"| Ubuntu | 22.04 LTS, 22.04 LTS |\n",
+			wantErr: true,
+		},
+		{
+			name: "missing version in grouped table",
+			content: "다음 Linux amd64 환경에서 점검했습니다.\n\n" +
+				"| 운영체제 | 테스트 버전 |\n| --- | --- |\n" +
+				"| Ubuntu | 22.04 LTS, |\n",
+			wantErr: true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := testedSupportRows(test.content)
+			if (err != nil) != test.wantErr {
+				t.Fatalf("testedSupportRows() error = %v, want error %t", err, test.wantErr)
+			}
+			if !test.wantErr && !maps.Equal(got, test.want) {
+				t.Fatalf("testedSupportRows() = %v, want %v", got, test.want)
+			}
+		})
+	}
 }
 
 func loadSupportFixture(t *testing.T, path string) supportFixture {

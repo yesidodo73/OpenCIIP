@@ -64,7 +64,7 @@ docs: 사용 방법 정리
 
 ## 버전
 
-OpenCIIP는 Semantic Versioning을 사용합니다. 현재 버전은 `internal/buildinfo/VERSION`에서 관리합니다.
+OpenCIIP는 Semantic Versioning을 사용합니다. 소스에서 빌드한 실행 파일의 버전은 `./openciip version`으로 확인할 수 있습니다.
 
 - 호환되는 버그 수정은 patch 버전을 올립니다.
 - 호환되는 기능 추가는 minor 버전을 올립니다.

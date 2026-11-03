@@ -29,7 +29,7 @@ OpenCIIP는 Linux 공통 계층, 배포판 계열 계층, 정확한 환경 계�
 4. 새 계열이 필요하면 [family-platform.yaml](family-platform.yaml)로 계열 파일을 추가합니다.
 5. 정확한 환경 파일은 `scan_support: supported`로 제출합니다.
 
-새 배포판 ID가 `rhel`, `debian`, `suse`, `alpine` 계열 매핑에 없으면 `internal/platform/detect.go`의 `detectFamily`와 fixture 테스트를 함께 수정해야 합니다.
+새 배포판 ID가 `rhel`, `debian`, `suse`, `alpine` 계열 매핑에 없으면 플랫폼 탐지의 계열 매핑과 fixture 테스트를 함께 수정해야 합니다.
 
 플랫폼 YAML과 fixture는 자동으로 발견되므로 Go 소스에 파일 목록을 추가할 필요가 없습니다.
 
@@ -85,12 +85,12 @@ go run ./cmd/openciip-support-evidence verify-platform \
 
 ## 3. 자동 조치를 `verified`로 승격
 
-현재 지원 환경의 U-19, U-22, U-29는 자동 조치 검증을 완료했습니다. 새 OS나 항목의 자동 조치는 다음 조건을 모두 확인한 뒤에만 `verified`로 제출할 수 있습니다.
+현재 증적 형식은 한 환경에서 U-19, U-22, U-29를 함께 검증합니다. 기존 기록의 범위와 확인이 필요한 내용은 [OS 지원 검증 기록](../../evidence/os-support/README.md)을 참고해주세요. 새 OS의 자동 조치는 다음 조건을 모두 확인한 뒤에만 `verified`로 제출할 수 있습니다.
 
 1. exact platform과 대상 binding, recipe가 같은 `id`, `version`, `architecture`를 사용합니다.
 2. platform, binding, recipe의 environment와 `verified_at`을 일치시킵니다.
 3. [remediation.yaml](remediation.yaml)에서 시작해 dry-run, 승인, 적용 후 원래 evaluator의 `PASS`, 항목별 롤백, 실행 전체 롤백, 재부팅 후 복구와 정리를 확인합니다.
-4. candidate에서는 verification 상태를 `pending`으로 유지하고 다음 명령으로 해시를 준비합니다.
+4. 읽기 전용 점검을 `tested`로 확인한 뒤 candidate 플랫폼과 세 항목의 verification 상태를 `pending`으로 두고 다음 명령으로 해시를 준비합니다. 플랫폼과 세 항목에는 같은 environment를 지정합니다.
 
    ```bash
    go run ./cmd/openciip-support-evidence prepare \
@@ -142,7 +142,7 @@ go run ./cmd/openciip-support-evidence verify-platform \
 호스트 이름, IP 주소, 계정, VM 식별자, 키, 토큰, 로컬·원격 경로, 명령줄과 원본 설정 내용은 증적이나 pull request에 포함하지 마세요.
 
 ```bash
-go test ./cmd/openciip-support-evidence ./internal/supportevidence ./internal/platform ./internal/rules ./internal/remediation/recipe ./internal/remediation/workflow
+go test ./...
 go vet ./...
 go build ./cmd/openciip
 ```

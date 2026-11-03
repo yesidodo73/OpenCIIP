@@ -64,7 +64,7 @@
 ## 로컬 확인
 
 ```text
-go test ./cmd/openciip-support-evidence ./internal/supportevidence ./internal/platform ./internal/rules ./internal/remediation/recipe ./internal/remediation/workflow
+go test ./...
 go vet ./...
 go build ./cmd/openciip
 ```

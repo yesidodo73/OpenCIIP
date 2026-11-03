@@ -16,9 +16,9 @@ OpenCIIP는 주요정보통신기반시설 기술적 취약점 분석·평가 �
 프로필이나 항목 코드를 지정하지 않으면 전체 항목을 점검합니다.
 
 ```bash
-sudo openciip scan
-sudo openciip scan --profile account
-sudo openciip scan --check U-01,U-02,U-03
+sudo ./openciip-linux-amd64 scan
+sudo ./openciip-linux-amd64 scan --profile account
+sudo ./openciip-linux-amd64 scan --check U-01,U-02,U-03
 ```
 
 ## 결과 상태
@@ -55,7 +55,9 @@ sudo openciip scan --check U-01,U-02,U-03
 
 전체 점검 완료 여부는 읽기 전용 점검을 기준으로 하며, 자동 조치 지원 여부와는 별개입니다.
 
-위 환경에서는 U-19, U-22, U-29의 자동 조치를 지원합니다. `0.1.0` 버전에서 세 항목의 적용 후 재점검과 실행 전체 롤백, 재부팅 후 실행 전체 롤백을 확인했습니다. 항목별 롤백은 U-22에서 확인했습니다. 다른 항목은 자동 조치 대상이 아닙니다. 실제 시스템에서는 서비스 구성과 사용 방식에 따라 영향이 다를 수 있으므로 적용 전에 변경 계획을 확인하세요.
+CentOS Linux 8은 [2021년 12월에 지원이 종료된 버전](https://blog.centos.org/2021/11/announcing-the-latest-release-of-centos-linux-8-2111/)입니다. CentOS Stream의 별도 검증 기록은 없습니다.
+
+위 환경에서는 U-19, U-22, U-29의 자동 조치를 지원합니다. `0.1.0` 버전에서 세 항목의 적용 후 재점검과 실행 전체 롤백, 재부팅 후 실행 전체 롤백을 확인했습니다. 항목별 롤백은 U-22에서 확인했습니다. 기존 기록에 관한 주의사항은 [검증 기록](../evidence/os-support/README.md)에 정리되어 있습니다. 다른 항목은 자동 조치 대상이 아닙니다. 실제 시스템에서는 서비스 구성과 사용 방식에 따라 영향이 다를 수 있으므로 적용 전에 변경 계획을 확인하세요.
 
 ## 결과 활용
 
